@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+
+/**
+ * Thatgfsj Code - CLI Entry Point
+ * 
+ * This file is executed when running `thatgfsj` command
+ */
+
+// Import and run the main CLI
+import './dist/index.js';
