@@ -9,50 +9,36 @@
 ElderCareBLEService bleService;
 WiFiManager wifiManager;
 DataPoster dataPoster;
-
-// ==================== Device ID ====================
 String deviceId;
 
-// ==================== Configurable Parameters ====================
-// These can be set via BLE commands at runtime
+// ==================== Runtime Config ====================
 static struct {
-    const char* wifi_ssid = DEFAULT_WIFI_SSID;
-    const char* wifi_pass = DEFAULT_WIFI_PASS;
-    const char* server_host = DEFAULT_SERVER_HOST;
-    uint16_t server_port = DEFAULT_SERVER_PORT;
-    uint32_t http_interval_ms = HTTP_POST_INTERVAL_MS;
-    bool http_enabled = false;
     bool wifi_enabled = false;
+    bool http_enabled = false;
+    uint32_t http_interval_ms = 30000;
+    const char* wifi_ssid = "YourWiFiSSID";
+    const char* wifi_pass = "YourWiFiPassword";
+    const char* server_host = "192.168.1.100";
+    uint16_t server_port = 8080;
 } runtimeConfig;
 
-// ==================== Timing ====================
 static unsigned long lastSensorRead = 0;
 static unsigned long lastHTTPPost = 0;
 static unsigned long lastLEDBlink = 0;
 static bool ledState = false;
 
-// ==================== LED ====================
-#define PIN_LED 2  // On-board LED on most ESP32 dev boards
-
-void led_setup() {
-    pinMode(PIN_LED, OUTPUT);
-    digitalWrite(PIN_LED, LOW);
-}
+// ==================== Forward Declaration ====================
+void sendSensorJSON(SensorStatus& status);
 
 // ==================== BLE Command Handler ====================
 class MyBLECallbacks : public BLECallbacks {
     void onBLECommandReceived(const String& cmd, const String& value) override {
-        Serial.printf("[CMD] Received: cmd=%s, value=%s\n", cmd.c_str(), value.c_str());
-        
+        Serial.printf("[BLE CMD] cmd=%s value=%s\n", cmd.c_str(), value.c_str());
+
         if (cmd == "get_status") {
-            // Force a sensor read and send data
-            SensorStatus status;
-            sensors_read_all(&status);
-            sendSensorJSON(status);
-        }
-        else if (cmd == "set_wifi") {
-            // Expected: {"cmd":"set_wifi","ssid":"MySSID","pass":"MyPass"}
-            // We'll handle via param parsing
+            SensorStatus st;
+            sensors_read_all(&st);
+            sendSensorJSON(st);
         }
         else if (cmd == "wifi_status") {
             String reply = "{\"cmd\":\"wifi_status\",\"connected\":";
@@ -60,78 +46,86 @@ class MyBLECallbacks : public BLECallbacks {
             reply += ",\"rssi\":" + String(wifiManager.getRSSI()) + "}";
             bleService.updateSensorData(reply);
         }
-        else if (cmd == "reboot") {
-            ESP.restart();
-        }
         else if (cmd == "set_http") {
             runtimeConfig.http_enabled = (value == "on");
+            String reply = "{\"cmd\":\"set_http\",\"result\":\"ok\",\"enabled\":";
+            reply += runtimeConfig.http_enabled ? "true" : "false";
+            reply += "}";
+            bleService.updateSensorData(reply);
         }
         else if (cmd == "version") {
             String reply = "{\"cmd\":\"version\",\"fw\":\"" FIRMWARE_VERSION "\"}";
             bleService.updateSensorData(reply);
         }
+        else if (cmd == "reboot") {
+            bleService.updateSensorData("{\"cmd\":\"reboot\",\"result\":\"ok\"}");
+            delay(100);
+            ESP.restart();
+        }
+        else if (cmd == "wifi") {
+            // Format: {"cmd":"wifi","ssid":"MySSID","pass":"MyPass"}
+            int s = value.indexOf(',');
+            if (s > 0) {
+                runtimeConfig.wifi_ssid = value.substring(0, s).c_str();
+                runtimeConfig.wifi_pass = value.substring(s+1).c_str();
+                runtimeConfig.wifi_enabled = true;
+                wifiManager.begin(runtimeConfig.wifi_ssid, runtimeConfig.wifi_pass);
+                dataPoster.begin(runtimeConfig.server_host, runtimeConfig.server_port, deviceId.c_str());
+                bleService.updateSensorData("{\"cmd\":\"wifi\",\"result\":\"connecting\"}");
+            }
+        }
     }
 };
-
 static MyBLECallbacks bleCallbacks;
 
-// ==================== Build Sensor JSON ====================
-void sendSensorJSON(SensorStatus& status) {
+// ==================== Build & Send JSON ====================
+void sendSensorJSON(SensorStatus& st) {
     DynamicJsonDocument doc(1024);
-    
+
     doc["device_id"] = deviceId;
-    doc["timestamp"] = time(nullptr);  // Will be 0 if NTP not configured
-    doc["uptime_s"] = status.uptime_s;
-    doc["wifi_rssi"] = status.wifi_rssi;
+    doc["timestamp"] = time(nullptr);
+    doc["uptime_s"] = st.uptime_s;
+    doc["wifi_rssi"] = st.wifi_rssi;
     doc["fw_version"] = FIRMWARE_VERSION;
-    
-    // LD2450 radar
-    JsonObject ld2450 = doc["sensors"].createNestedObject("ld2450");
-    ld2450["target_detected"] = status.ld2450.target_detected;
-    ld2450["fall_detected"] = status.ld2450.fall_detected;
-    ld2450["target_count"] = status.ld2450.target_count;
-    ld2450["x_mm"] = status.ld2450.x_mm;
-    ld2450["y_mm"] = status.ld2450.y_mm;
-    ld2450["speed_mm_s"] = status.ld2450.speed_mm_s;
-    
-    // Smoke sensor
+
+    JsonObject radar = doc["sensors"].createNestedObject("radar");
+    radar["target_detected"] = st.radar.target_detected;
+    radar["fall_detected"] = st.radar.fall_detected;
+    radar["target_count"] = st.radar.target_count;
+    radar["x_mm"] = st.radar.x_mm;
+    radar["y_mm"] = st.radar.y_mm;
+    radar["speed_mm_s"] = st.radar.speed_mm_s;
+
     JsonObject smoke = doc["sensors"].createNestedObject("smoke");
-    smoke["concentration"] = status.smoke.concentration_ppm;
-    smoke["alarm"] = status.smoke.alarm;
+    smoke["concentration"] = st.smoke.concentration_ppm;
+    smoke["alarm"] = st.smoke.alarm;
     smoke["unit"] = "ppm";
-    smoke["raw_adc"] = status.smoke.raw_adc;
-    
-    // Gas sensor
+    smoke["raw_adc"] = st.smoke.raw_adc;
+
     JsonObject gas = doc["sensors"].createNestedObject("gas");
-    gas["concentration"] = status.gas.concentration_ppm;
-    gas["alarm"] = status.gas.alarm;
+    gas["concentration"] = st.gas.concentration_ppm;
+    gas["alarm"] = st.gas.alarm;
     gas["unit"] = "ppm";
-    gas["raw_adc"] = status.gas.raw_adc;
-    
-    // Bracelet
-    JsonObject bracelet = doc["sensors"].createNestedObject("bracelet");
-    bracelet["heart_rate"] = status.bracelet.heart_rate;
-    bracelet["blood_oxygen"] = status.bracelet.blood_oxygen;
-    bracelet["button_pressed"] = status.bracelet.button_pressed;
-    bracelet["battery"] = status.bracelet.battery_percent;
-    bracelet["connected"] = status.bracelet.bracelet_connected;
-    
-    // Serialize and send via BLE
+    gas["raw_adc"] = st.gas.raw_adc;
+
+    JsonObject phone = doc["sensors"].createNestedObject("phone");
+    phone["heart_rate"] = st.phone.heart_rate;
+    phone["blood_oxygen"] = st.phone.blood_oxygen;
+    phone["button_pressed"] = st.phone.button_pressed;
+    phone["battery"] = st.phone.battery_percent;
+    phone["connected"] = st.phone.connected;
+
     String output;
     serializeJson(doc, output);
-    
+
     bleService.updateSensorData(output);
     Serial.printf("[BLE] Sent: %s\n", output.c_str());
-    
-    // Also HTTP POST if enabled and interval elapsed
-    if (runtimeConfig.http_enabled && runtimeConfig.wifi_enabled && 
-        wifiManager.isConnected() && 
+
+    // HTTP POST
+    if (runtimeConfig.http_enabled && runtimeConfig.wifi_enabled &&
+        wifiManager.isConnected() &&
         (millis() - lastHTTPPost >= runtimeConfig.http_interval_ms)) {
-        
-        bool ok = dataPoster.postJSON(output);
-        if (!ok) {
-            Serial.printf("[HTTP] Post failed: %s\n", dataPoster.getLastError());
-        }
+        dataPoster.postJSON(output);
         lastHTTPPost = millis();
     }
 }
@@ -139,127 +133,86 @@ void sendSensorJSON(SensorStatus& status) {
 // ==================== Setup ====================
 void setup() {
     Serial.begin(SERIAL_BAUD);
-    Serial.printf("\n========== ElderCare ESP32 Firmware v%s ==========\n", FIRMWARE_VERSION);
-    
-    // Generate unique device ID from MAC address
+    Serial.printf("\n========== ElderCare v%s ==========\n", FIRMWARE_VERSION);
+
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    deviceId = String(DEVICE_ID_PREFIX) + 
-               String(mac[3] & 0xFF, HEX) + 
+    deviceId = String(DEVICE_ID_PREFIX) +
+               String(mac[3] & 0xFF, HEX) +
                String(mac[4] & 0xFF, HEX) +
                String(mac[5] & 0xFF, HEX);
     deviceId.toUpperCase();
     Serial.printf("Device ID: %s\n", deviceId.c_str());
-    
-    // Initialize sensors
+
     sensors_begin();
     Serial.println("[Sensors] Initialized");
-    
-    // Initialize BLE
+
     bleService.begin(deviceId);
     bleService.setCommandCallback(&bleCallbacks);
-    Serial.println("[BLE] Service started, advertising...");
-    
-    // Initialize LED
-    led_setup();
-    
-    // Initialize WiFi (disabled by default, enable via BLE or config)
-    // wifiManager.begin(runtimeConfig.wifi_ssid, runtimeConfig.wifi_pass);
-    // dataPoster.begin(runtimeConfig.server_host, runtimeConfig.server_port, deviceId.c_str());
-    
-    Serial.println("[System] Setup complete, entering main loop...");
-    Serial.println("[System] Use BLE or Serial commands to interact.");
+    Serial.println("[BLE] Started advertising");
+
+    Serial.println("[System] Ready");
 }
 
 // ==================== Main Loop ====================
 void loop() {
     unsigned long now = millis();
-    
-    // Handle WiFi
+
     wifiManager.handle();
-    
-    // Handle BLE connection
     bleService.checkConnection();
-    
-    // Sensor reading (every 2 seconds)
+
     if (now - lastSensorRead >= SENSOR_READ_INTERVAL_MS) {
         lastSensorRead = now;
-        
-        // Update uptime
-        sensors_update_uptime();
-        
-        // Read all sensors
-        SensorStatus status;
-        sensors_read_all(&status);
-        
-        // Update WiFi RSSI in status
-        status.wifi_rssi = wifiManager.getRSSI();
-        
-        // Build and send JSON via BLE
-        sendSensorJSON(status);
-        
-        // Also print to Serial
-        Serial.printf("[Status] Target=%d Fall=%d Smoke=%d(%s) Gas=%d(%s) HR=%d BTN=%d\n",
-            status.ld2450.target_detected,
-            status.ld2450.fall_detected,
-            (int)status.smoke.concentration_ppm,
-            status.smoke.alarm ? "ALARM" : "OK",
-            (int)status.gas.concentration_ppm,
-            status.gas.alarm ? "ALARM" : "OK",
-            status.bracelet.heart_rate,
-            status.bracelet.button_pressed);
+
+        SensorStatus st;
+        sensors_read_all(&st);
+        st.wifi_rssi = wifiManager.getRSSI();
+        sendSensorJSON(st);
+
+        Serial.printf("[Status] Radar=%d Fall=%d Smoke=%d(%s) Gas=%d(%s) HR=%d SOS=%d\n",
+            st.radar.target_detected,
+            st.radar.fall_detected,
+            (int)st.smoke.concentration_ppm,
+            st.smoke.alarm ? "ALARM" : "OK",
+            (int)st.gas.concentration_ppm,
+            st.gas.alarm ? "ALARM" : "OK",
+            st.phone.heart_rate,
+            st.phone.button_pressed);
     }
-    
-    // LED heartbeat (slow blink when OK, fast when alarm)
-    bool anyAlarm = false;  // Would check sensor data here
-    unsigned long blinkInterval = anyAlarm ? 200 : 1000;
-    
-    if (now - lastLEDBlink >= blinkInterval) {
-        lastLEDBlink = now;
-        ledState = !ledState;
-        digitalWrite(PIN_LED, ledState ? HIGH : LOW);
-    }
-    
-    // Process Serial commands (for debugging)
+
+    // Process serial commands
     while (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
-        if (cmd.length() > 0) {
-            Serial.printf("[Serial CMD] %s\n", cmd.c_str());
-            // Handle simple serial commands
-            if (cmd == "status") {
-                SensorStatus s;
-                sensors_read_all(&s);
-                sendSensorJSON(s);
-            } else if (cmd.startsWith("wifi ")) {
-                // wifi MySSID MyPass
-                int space1 = cmd.indexOf(' ', 5);
-                if (space1 > 0) {
-                    String ssid = cmd.substring(5, space1);
-                    String pass = cmd.substring(space1 + 1);
-                    runtimeConfig.wifi_ssid = ssid.c_str();
-                    runtimeConfig.wifi_pass = pass.c_str();
+        if (cmd.length() == 0) continue;
+
+        Serial.printf("[Serial] %s\n", cmd.c_str());
+        if (cmd == "status") {
+            SensorStatus s; sensors_read_all(&s); sendSensorJSON(s);
+        } else if (cmd.startsWith("wifi ")) {
+            int s1 = cmd.indexOf(' ', 5);
+            if (s1 > 0) {
+                int s2 = cmd.indexOf(' ', s1+1);
+                if (s2 > 0) {
+                    runtimeConfig.wifi_ssid = cmd.substring(5, s1).c_str();
+                    runtimeConfig.wifi_pass = cmd.substring(s1+1, s2).c_str();
                     runtimeConfig.wifi_enabled = true;
                     wifiManager.begin(runtimeConfig.wifi_ssid, runtimeConfig.wifi_pass);
                     dataPoster.begin(runtimeConfig.server_host, runtimeConfig.server_port, deviceId.c_str());
-                    Serial.printf("WiFi connecting to: %s\n", ssid.c_str());
+                    Serial.printf("WiFi connecting to: %s\n", runtimeConfig.wifi_ssid);
                 }
-            } else if (cmd == "wifi on") {
-                runtimeConfig.wifi_enabled = true;
-                wifiManager.begin(runtimeConfig.wifi_ssid, runtimeConfig.wifi_pass);
-                dataPoster.begin(runtimeConfig.server_host, runtimeConfig.server_port, deviceId.c_str());
-            } else if (cmd == "wifi off") {
-                wifiManager.disconnect();
-                runtimeConfig.wifi_enabled = false;
-            } else if (cmd == "help") {
-                Serial.println("Commands: status, wifi <ssid> <pass>, wifi on/off, reboot, version");
-            } else if (cmd == "reboot") {
-                ESP.restart();
-            } else if (cmd == "version") {
-                Serial.printf("Firmware: %s\n", FIRMWARE_VERSION);
             }
+        } else if (cmd == "wifi off") {
+            wifiManager.disconnect();
+            runtimeConfig.wifi_enabled = false;
+        } else if (cmd == "reboot") {
+            ESP.restart();
+        } else if (cmd == "version") {
+            Serial.printf("FW: %s\n", FIRMWARE_VERSION);
+        } else if (cmd == "help") {
+            Serial.println("Commands: status, wifi <ssid> <pass>, wifi off, reboot, version");
         }
     }
-    
-    delay(10);  // Small yield to prevent watchdog
+
+    delay(10);
 }

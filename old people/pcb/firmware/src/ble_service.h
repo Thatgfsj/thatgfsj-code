@@ -6,9 +6,6 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-// Forward declaration
-class BLEService;
-
 class BLECallbacks {
 public:
     virtual void onBLECommandReceived(const String& cmd, const String& value) = 0;
@@ -22,19 +19,23 @@ public:
     void setCommandCallback(BLECallbacks* cb);
     void checkConnection();
 
-private:
-    BLEServer* pServer;
-    BLEService* pService;
-    BLECharacteristic* pTxCharacteristic;  // ESP32 sends to phone
-    BLECharacteristic* pRxCharacteristic;  // ESP32 receives from phone
-    BLEAdvertising* pAdvertising;
-    bool isConnected;
+    BLEAdvertising* pAdvertising = nullptr;
+    bool isConnected = false;
     String currentDeviceId;
-    BLECallbacks* commandCallback;
+    BLECallbacks* commandCallback = nullptr;
+
+private:
+    BLEServer* pServer = nullptr;
+    BLEService* pService = nullptr;
+    BLECharacteristic* pTxCharacteristic = nullptr;
+    BLECharacteristic* pRxCharacteristic = nullptr;
 
     static const char* SERVICE_UUID;
-    static const char* CHAR_TX_UUID;  // Phone → ESP32 (we'll call it TX from phone perspective)
-    static const char* CHAR_RX_UUID;  // ESP32 → Phone
+    static const char* CHAR_TX_UUID;
+    static const char* CHAR_RX_UUID;
+
+    friend class MyServerCallbacks;
+    friend class MyCharacteristicCallbacks;
 };
 
-#endif // BLE_SERVICE_H
+#endif
