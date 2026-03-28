@@ -1,0 +1,15 @@
+{
+  "name": "playwright-crawler-helper",
+  "description": "Playwright 爬虫辅助工具 - 通过分析浏览器网络请求来辅助编写爬虫脚本。用于需要渲染 JavaScript 的动态页面或需要分析网络请求的场景。",
+  "version": "3.0.0",
+  "author": "Claw",
+  "metadata": {
+    "openclaw": {
+      "emoji": "🕷️",
+      "requires": {
+        "bins": ["python3", "pip"],
+        "anyBins": ["playwright"]
+      }
+    }
+  }
+}
