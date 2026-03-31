@@ -11,6 +11,8 @@ import { SessionManager } from '../core/session.js';
 import { ConfigManager } from '../core/config.js';
 import { FileTool } from '../tools/file.js';
 import { ShellTool } from '../tools/shell.js';
+import { SystemPromptBuilder } from '../core/system-prompt.js';
+import { getBuiltInTools } from '../tools/index.js';
 
 export class REPLLoop {
   private input: REPLInput;
@@ -26,38 +28,34 @@ export class REPLLoop {
 
   /**
    * Initialize the REPL
+   * S04: Use SystemPromptBuilder for dynamic prompt construction
    */
   async init(): Promise<void> {
     // Load config
     const config = await ConfigManager.load();
-    
+
     // Initialize AI engine
     this.ai = new AIEngine(config);
-    
+
     // Register tools
-    this.ai.registerTool(new ShellTool());
-    this.ai.registerTool(new FileTool());
-    
+    const builtInTools = getBuiltInTools();
+    for (const tool of builtInTools) {
+      this.ai!.registerTool(tool);
+    }
+
     // Initialize session
     this.session = new SessionManager();
-    
-    // Add system prompt
-    const systemPrompt = `You are Thatgfsj Code, an AI coding assistant like Claude Code.
-You can:
-- Read, write, and edit files
-- Execute shell commands
-- Search and analyze code
-- Use git for version control
 
-When the user asks to do something:
-1. Understand what they want
-2. Use tools to complete the task
-3. Explain what you did
+    // S04: Build system prompt dynamically from tools
+    const promptBuilder = new SystemPromptBuilder({
+      cwd: process.cwd(),
+      tools: builtInTools,
+      permissionMode: 'ask'
+    });
+    const systemPrompt = promptBuilder.build();
 
-Be concise, helpful, and show your reasoning.`;
-    
     this.session.addMessage('system', systemPrompt);
-    
+
     this.running = true;
   }
 
@@ -165,8 +163,9 @@ Be concise, helpful, and show your reasoning.`;
     let fullResponse = '';
 
     try {
-      // S01/S03: Stream output
-      for await (const chunk of (this.ai as any).chatStream(this.session.getMessages())) {
+      // S01: Stream output via chatStream
+      const stream = (this.ai as any).chatStream(this.session.getMessages());
+      for await (const chunk of stream) {
         this.output.stopSpinner();
         process.stdout.write(chunk);
         fullResponse += chunk;
