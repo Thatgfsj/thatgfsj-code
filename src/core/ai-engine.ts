@@ -34,9 +34,14 @@ export class AIEngine {
   }
 
   /**
-   * Get registered tools for API
+   * Get registered tools for API (S02: uses ToolRegistry if available)
    */
   private getToolsForAPI() {
+    // If registry is injected, use its getToolsForAPI
+    if (this.registry) {
+      return this.registry.getToolsForAPI();
+    }
+    // Fallback: build from tools map
     return Array.from(this.tools.values()).map(tool => ({
       type: 'function' as const,
       function: {
@@ -54,15 +59,20 @@ export class AIEngine {
     }));
   }
 
-  // ==================== S01: Async Generator Agent Loop ====================
-  // Pattern from Claude Code: async function* that yields streaming chunks
-  // while(true) { response → tools → append → repeat }
+  // S02: Inject registry for enhanced tool management
+  setRegistry(registry: any) {
+    this.registry = registry;
+  }
+  private registry?: any;
 
-  /**
-   * S01 Core: Async Generator Agent Loop
-   * Yields streaming text chunks, handles tool calls automatically
-   * This is the main entry point for streaming agent behavior
-   */
+  // S08: Hook manager
+  setHooks(hooks: import('./hooks.js').HookManager) {
+    this.hooks = hooks;
+  }
+  private hooks?: import('./hooks.js').HookManager | null = null;
+
+  // ==================== S01: Async Generator Agent Loop ====================
+
   async *chatStream(
     messages: ChatMessage[],
     maxIterations: number = 10
@@ -73,22 +83,21 @@ export class AIEngine {
     while (iterations < maxIterations) {
       iterations++;
 
-      // Yield streaming chunks from LLM call
+      // S08 Hook: beforeAgentLoop
+      if (this.hooks) {
+        await this.hooks.emit('beforeAgentLoop', { messages: currentMessages, iteration: iterations });
+      }
+
       let fullResponse = '';
-      let hasToolCalls = false;
 
       for await (const chunk of this.streamRequest(currentMessages)) {
         fullResponse += chunk;
-        yield chunk; // Stream each chunk to caller
+        yield chunk;
       }
 
-      // Parse response for tool calls
       const response = this.parseResponse(fullResponse);
 
       if (response.tool_calls && response.tool_calls.length > 0) {
-        hasToolCalls = true;
-
-        // Add assistant message to history
         currentMessages.push({
           role: 'assistant',
           content: response.content,
@@ -97,9 +106,27 @@ export class AIEngine {
 
         // Execute each tool
         for (const toolCall of response.tool_calls) {
+          // S08 Hook: beforeToolCall
+          if (this.hooks) {
+            await this.hooks.emit('beforeToolCall', {
+              toolName: toolCall.function.name,
+              toolParams: JSON.parse(toolCall.function.arguments || '{}'),
+              toolCallId: toolCall.id
+            });
+          }
+
           const result = await this.executeToolCall(toolCall);
 
-          // Yield tool result as special output
+          // S08 Hook: afterToolCall
+          if (this.hooks) {
+            await this.hooks.emit('afterToolCall', {
+              toolName: toolCall.function.name,
+              toolParams: JSON.parse(toolCall.function.arguments || '{}'),
+              toolResult: result,
+              toolCallId: toolCall.id
+            });
+          }
+
           const toolResultMsg: ChatMessage = {
             role: 'tool',
             content: result.output || result.error || '',
@@ -108,20 +135,23 @@ export class AIEngine {
           };
           currentMessages.push(toolResultMsg);
 
-          // Yield tool execution feedback
           yield `\n${chalk.gray(`[tool: ${toolCall.function.name}]`)}`;
         }
 
-        // Continue loop — back to LLM with tool results
         continue;
       }
 
-      // No tool calls — exit loop, return final response
+      // No tool calls — exit loop
       if (response.content) {
         currentMessages.push({
           role: 'assistant',
           content: response.content
         });
+      }
+
+      // S08 Hook: afterAgentLoop
+      if (this.hooks) {
+        await this.hooks.emit('afterAgentLoop', { messages: currentMessages, iteration: iterations });
       }
 
       return response;
