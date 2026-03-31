@@ -234,11 +234,14 @@ Be concise but thorough. Show your reasoning.`;
     session.addMessage('user', prompt);
     
     const spinner = ora(chalk.gray('Thinking...')).start();
-    const response = await ai.chat(session.getMessages());
-    spinner.stop();
+    let fullResponse = '';
     
-    console.log(chalk.cyan('\n🤖 Response:\n'));
-    console.log(response.content);
+    for await (const chunk of ai.chatStream(session.getMessages())) {
+      spinner.stop();
+      process.stdout.write(chunk);
+      fullResponse += chunk;
+    }
+    
     console.log(chalk.gray('\n' + '─'.repeat(40)));
     
   } catch (error: any) {
@@ -369,19 +372,23 @@ Be helpful, concise, and show your reasoning.`;
           return;
         }
 
-        // Add and process
+        // Add and process with streaming
         session.addMessage('user', trimmed);
         
         const spinner = ora(chalk.gray('Thinking...')).start();
+        let fullResponse = '';
         
         try {
-          const response = await ai.chat(session.getMessages());
-          spinner.stop();
+          // S01: Use async generator for true streaming
+          for await (const chunk of ai.chatStream(session.getMessages())) {
+            spinner.stop();
+            process.stdout.write(chunk);
+            fullResponse += chunk;
+          }
           
-          console.log(chalk.cyan('\n🤖:'));
-          console.log(response.content);
+          console.log(); // newline after streaming
           
-          session.addMessage('assistant', response.content);
+          session.addMessage('assistant', fullResponse);
           session.truncate(20);
           
         } catch (error: any) {
