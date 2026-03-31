@@ -12,7 +12,24 @@ const execAsync = promisify(exec);
 export class GitTool implements Tool {
   name = 'git';
   description = 'Git operations: status, log, diff, commit, branch, etc.';
-  
+
+  inputSchema = {
+    type: 'object' as const,
+    properties: {
+      action: { type: 'string', description: 'Git action: status, log, diff, commit, branch, checkout, pull, push' },
+      args: { type: 'string', description: 'Additional arguments' },
+      message: { type: 'string', description: 'Commit message' },
+      cwd: { type: 'string', description: 'Working directory' }
+    },
+    required: ['action']
+  };
+
+  metadata = {
+    permissions: ['execute'] as ('read' | 'write' | 'execute' | 'network')[],
+    tags: ['git', 'vcs'],
+    version: '1.0.0'
+  };
+
   parameters = [
     { name: 'action', type: 'string', description: 'Git action: status, log, diff, commit, branch, checkout, pull, push', required: true },
     { name: 'args', type: 'string', description: 'Additional arguments', required: false },

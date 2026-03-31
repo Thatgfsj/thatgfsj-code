@@ -41,7 +41,26 @@ const CONFIRM_REQUIRED = [
 export class ShellTool implements Tool {
   name = 'shell';
   description = 'Execute shell commands and scripts. Use with caution - some commands require user confirmation.';
-  
+
+  /** S02: Input schema for shell command */
+  inputSchema = {
+    type: 'object' as const,
+    properties: {
+      command: { type: 'string', description: 'Shell command to execute' },
+      cwd: { type: 'string', description: 'Working directory' },
+      timeout: { type: 'number', description: 'Timeout in seconds', default: 30 }
+    },
+    required: ['command']
+  };
+
+  /** S02: Tool metadata — permission and category info */
+  metadata = {
+    permissions: ['execute', 'write', 'network'] as ('read' | 'write' | 'execute' | 'network')[],
+    tags: ['shell', 'system', 'dangerous'],
+    maxDuration: 120000, // 2 min max
+    version: '1.0.0'
+  };
+
   parameters = [
     { name: 'command', type: 'string', description: 'Shell command to execute', required: true },
     { name: 'cwd', type: 'string', description: 'Working directory', required: false },

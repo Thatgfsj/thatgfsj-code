@@ -9,7 +9,24 @@ import { join, dirname, basename, extname } from 'path';
 export class FileTool implements Tool {
   name = 'file';
   description = 'Perform file operations: read, write, list, delete, etc.';
-  
+
+  inputSchema = {
+    type: 'object' as const,
+    properties: {
+      action: { type: 'string', description: 'Action: read, write, list, delete, exists, mkdir' },
+      path: { type: 'string', description: 'File or directory path' },
+      content: { type: 'string', description: 'Content to write (for write action)' }
+    },
+    required: ['action', 'path']
+  };
+
+  metadata = {
+    permissions: ['read', 'write'] as ('read' | 'write' | 'execute' | 'network')[],
+    tags: ['file', 'filesystem'],
+    maxDuration: 30000,
+    version: '1.0.0'
+  };
+
   parameters = [
     { name: 'action', type: 'string', description: 'Action to perform: read, write, list, delete, exists', required: true },
     { name: 'path', type: 'string', description: 'File or directory path', required: true },
