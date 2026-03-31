@@ -149,34 +149,37 @@ Be concise, helpful, and show your reasoning.`;
   }
 
   /**
-   * Process user input with AI
+   * Process user input with AI (S03: streaming with permission check)
    */
   private async processInput(input: string): Promise<void> {
     if (!this.ai || !this.session) {
       this.output.printError('AI not initialized');
       return;
     }
-    
+
     // Add user message
     this.session.addMessage('user', input);
-    
+
     // Show thinking
     this.output.startSpinner('Thinking...');
-    
+    let fullResponse = '';
+
     try {
-      const response = await this.ai.chat(this.session.getMessages());
-      
-      this.output.stopSpinner();
-      
-      // Print response
-      this.output.printAssistant(response.content);
-      
+      // S01/S03: Stream output
+      for await (const chunk of (this.ai as any).chatStream(this.session.getMessages())) {
+        this.output.stopSpinner();
+        process.stdout.write(chunk);
+        fullResponse += chunk;
+      }
+
+      console.log();
+
       // Add assistant message
-      this.session.addMessage('assistant', response.content);
-      
+      this.session.addMessage('assistant', fullResponse);
+
       // Truncate if too long
       this.session.truncate(20);
-      
+
     } catch (error: any) {
       this.output.stopSpinner();
       this.output.printError(error.message);

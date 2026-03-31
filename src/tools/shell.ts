@@ -3,8 +3,16 @@
  */
 
 import { Tool, ToolResult, ToolContext } from '../core/types.js';
+import { PermissionChecker } from '../core/permissions.js';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
+
+// Shared permission checker instance
+let permissionChecker: PermissionChecker | null = null;
+
+export function setPermissionChecker(checker: PermissionChecker) {
+  permissionChecker = checker;
+}
 
 const execAsync = promisify(exec);
 
@@ -114,8 +122,25 @@ export class ShellTool implements Tool {
       return { success: false, error: validationError };
     }
 
-    // Check if confirmation is needed
-    if (ctx?.confirmAction && this.needsConfirmation(command)) {
+    // S03: 6-stage permission check
+    if (permissionChecker) {
+      const result = await permissionChecker.check('shell', params, ctx || {});
+      if (!result.allowed) {
+        return { success: false, error: `Permission denied: ${result.reason}` };
+      }
+      if (result.requiresConfirmation) {
+        // Ask user for confirmation
+        if (ctx?.confirmAction) {
+          const confirmed = await ctx.confirmAction(
+            `⚠️  Confirm command:\n  ${command}\n\n[y] Yes  [n] No`
+          );
+          if (!confirmed) {
+            return { success: false, error: 'Command cancelled by user' };
+          }
+        }
+      }
+    } else if (ctx?.confirmAction && this.needsConfirmation(command)) {
+      // Fallback confirmation
       const confirmed = await ctx.confirmAction(`Execute this command?\n  ${command}\n\nType 'y' to confirm or 'n' to cancel:`);
       if (!confirmed) {
         return { success: false, error: 'Command cancelled by user' };
