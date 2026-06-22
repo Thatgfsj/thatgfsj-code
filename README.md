@@ -1,6 +1,6 @@
 # Thatgfsj Code 🤖
 
-你的 AI 编程助手 - 像 Claude Code 一样的 CLI 工具
+你的 CLI 工具
 
 ---
 
