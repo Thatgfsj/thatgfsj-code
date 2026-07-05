@@ -2,6 +2,9 @@
 
 Thatgfsj Code 支持多种 AI 提供商，以下是各提供商 API Key 的获取教程。
 
+> 贡献者请阅读 [`DEVELOPMENT.md`](../DEVELOPMENT.md)；版本变更与已知限制见
+> [`CHANGELOG.md`](../CHANGELOG.md)。
+
 ## 目录
 
 1. [SiliconFlow (推荐)](#1-siliconflow-推荐)
@@ -208,6 +211,9 @@ export DEEPSEEK_API_KEY=你的密钥
 
 # Ollama
 export OLLAMA_BASE_URL=http://localhost:11434
+
+# 文心一言 (ERNIE) — Access Token 方式
+export ERNIE_API_KEY=你的_access_token
 ```
 
 或者运行 `gfcode init` 交互式配置。

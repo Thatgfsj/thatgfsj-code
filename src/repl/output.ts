@@ -5,6 +5,9 @@
 
 import chalk from 'chalk';
 import ora, { Ora } from 'ora';
+import pkg from '../../package.json' with { type: 'json' };
+
+const VERSION: string = pkg.version;
 
 export class REPLOutput {
   private spinner: Ora | null = null;
@@ -194,7 +197,7 @@ export class REPLOutput {
   printBanner(): void {
     console.log(chalk.cyan(`
 ╔═══════════════════════════════════════╗
-║     🤖 Thatgfsj Code v0.2.0        ║
+║     🤖 Thatgfsj Code v${VERSION.padEnd(11)}║
 ║     Claude Code Style REPL           ║
 ╚═══════════════════════════════════════╝
     `));

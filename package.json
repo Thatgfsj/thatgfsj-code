@@ -1,6 +1,6 @@
 {
   "name": "thatgfsj-code",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Thatgfsj Code - Your AI Coding Assistant",
   "main": "dist/index.js",
   "type": "module",
@@ -12,16 +12,48 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
-    "link": "npm link"
+    "link": "npm link",
+    "test": "node --test tests/*.test.js",
+    "test:silent": "node --test --test-reporter=dot tests/*.test.js",
+    "prepublishOnly": "npm run test && npm run build"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "DEVELOPMENT.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs",
+    "install.sh",
+    "install.ps1",
+    "install.bat"
+  ],
   "keywords": [
     "ai",
     "cli",
     "coding",
-    "assistant"
+    "assistant",
+    "anthropic",
+    "openai",
+    "siliconflow",
+    "minimax",
+    "kimi",
+    "deepseek",
+    "ollama"
   ],
   "author": "Thatgfsj",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Thatgfsj/thatgfsj-code.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Thatgfsj/thatgfsj-code/issues"
+  },
+  "homepage": "https://github.com/Thatgfsj/thatgfsj-code#readme",
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^11.1.0",

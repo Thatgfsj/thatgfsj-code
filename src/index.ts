@@ -6,6 +6,12 @@
  */
 
 // 强制 UTF-8 编码 (Windows) - 必须在任何输出之前
+// 注意:此项目是 ESM（package.json "type":"module"），绝不能在源码里直接
+// 调用顶层 `require()`，否则会在所有平台上抛 ReferenceError。Windows 上
+// 需要用 `createRequire(import.meta.url)` 才能拿到 CJS 风格的 `require`。
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
 if (process.platform === 'win32') {
   try {
     // 执行 chcp 65001 设置代码页
@@ -17,12 +23,16 @@ import { program } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
 import { fileURLToPath } from 'url';
-import { homedir } from 'os';
 import { dirname, join } from 'path';
-import { existsSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'fs';
+import {
+  existsSync, readdirSync, statSync, mkdirSync, writeFileSync,
+  readFileSync
+} from 'fs';
+
+// package.json 信息:便于把版本号与 README/CHANGELOG 保持同步
+import pkg from '../package.json' with { type: 'json' };
 
 import { AIEngine } from './core/ai-engine.js';
-import { ToolRegistry } from './core/tool-registry.js';
 import { SessionManager } from './core/session.js';
 import { ConfigManager } from './core/config.js';
 import { FileTool, ShellTool, GitTool, SearchTool } from './tools/index.js';
@@ -31,6 +41,7 @@ import { REPLLoop } from './repl/loop.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const VERSION: string = pkg.version;
 
 // ============== Global Error Handling ==============
 
@@ -51,7 +62,6 @@ program
   .command('init')
   .description('初始化配置/设置向导')
   .action(async () => {
-    const { WelcomeScreen } = await import('./repl/welcome.js');
     await WelcomeScreen.interactiveSetup();
   });
 
@@ -99,7 +109,7 @@ program
 program
   .name('gfcode')
   .description('🤖 AI Coding Assistant - Like Claude Code')
-  .version('0.2.0')
+  .version(VERSION)
   .argument('[prompt]', 'Task to execute (omit to start interactive mode)')
   .option('-i, --interactive', 'Start interactive mode')
   .option('-s, --stream', 'Stream output')
@@ -107,13 +117,12 @@ program
   .option('--no-auto', 'Disable auto-read project files')
   .action(async (prompt, options) => {
     // Check for API key and show welcome if needed
-    const { WelcomeScreen } = await import('./repl/welcome.js');
     const hasApiKey = checkApiKey();
-    
+
     if (!hasApiKey) {
       WelcomeScreen.show();
     }
-    
+
     // Default to interactive mode if no prompt provided
     if (!prompt && !options.interactive) {
       await startInteractive();
@@ -148,22 +157,22 @@ program.parse(process.argv);
 function getProjectContext(): string {
   const cwd = process.cwd();
   const info: string[] = [];
-  
+
   try {
     // Package info
     const pkgPath = join(cwd, 'package.json');
     if (existsSync(pkgPath)) {
       info.push(`📦 Project: ${cwd}`);
-      const { readFileSync } = require('fs');
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-      info.push(`   Name: ${pkg.name || 'unknown'}`);
-      if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
-        info.push(`   Deps: ${Object.keys(pkg.dependencies).length} packages`);
+      // 使用顶部静态导入的 readFileSync,避免在 ESM 模块里 require('fs')
+      const userPkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+      info.push(`   Name: ${userPkg.name || 'unknown'}`);
+      if (userPkg.dependencies && Object.keys(userPkg.dependencies).length > 0) {
+        info.push(`   Deps: ${Object.keys(userPkg.dependencies).length} packages`);
       }
     } else {
       info.push(`📁 Working dir: ${cwd}`);
     }
-    
+
     // Count files
     let fileCount = 0;
     const countFiles = (dir: string) => {
@@ -186,7 +195,7 @@ function getProjectContext(): string {
       info.push(`   Files: ${fileCount} code files`);
     }
   } catch {}
-  
+
   return info.join('\n');
 }
 
@@ -198,75 +207,58 @@ async function executeTask(prompt: string, options: any) {
   console.log(chalk.gray(getProjectContext()));
   console.log(chalk.gray('─'.repeat(40)));
   console.log(chalk.cyan('\n> ') + prompt + '\n');
-  
+
   try {
     const config = await ConfigManager.load();
     if (options.model) config.model = options.model;
-    
+
     const ai = new AIEngine(config);
     const session = new SessionManager();
-    const registry = new ToolRegistry();
-    
+
     // Register tools - all available tools
     const shellTool = new ShellTool();
     const fileTool = new FileTool();
     const gitTool = new GitTool();
     const searchTool = new SearchTool();
-    
+
     ai.registerTool(shellTool);
     ai.registerTool(fileTool);
     ai.registerTool(gitTool);
     ai.registerTool(searchTool);
-    
+
     // System prompt - Claude Code style
     const systemPrompt = `You are Thatgfsj Code, an AI coding assistant like Claude Code.
 You can read files, write files, and execute shell commands to complete coding tasks.
 
 When working on a task:
 1. First understand what files are involved
-2. Read necessary files to understand the codebase  
+2. Read necessary files to understand the codebase
 3. Make changes
 4. Verify the changes work
 
 Be concise but thorough. Show your reasoning.`;
-    
+
     session.addMessage('system', systemPrompt);
     session.addMessage('user', prompt);
-    
+
     const spinner = ora(chalk.gray('Thinking...')).start();
     let fullResponse = '';
-    
+
     for await (const chunk of ai.chatStream(session.getMessages())) {
       spinner.stop();
       process.stdout.write(chunk);
       fullResponse += chunk;
     }
-    
+
     console.log(chalk.gray('\n' + '─'.repeat(40)));
-    
+
+    // 把助手回复写回会话,便于后续轮次保留上下文
+    session.addMessage('assistant', fullResponse);
+
   } catch (error: any) {
     console.error(chalk.red(`\n❌ Error: ${error.message}`));
     process.exit(1);
   }
-}
-
-/**
- * Handle model switch in interactive mode
- * (Not invoked from startInteractive anymore — REPLLoop handles it via /model.)
- * Kept for backwards compatibility with any callers.
- */
-async function handleModelSwitch(_rl: unknown, currentConfig: any) {
-  console.log(chalk.cyan('\n切换模型...\n'));
-
-  const models = WelcomeScreen.getModelsForProvider(currentConfig.provider || 'siliconflow');
-
-  console.log(chalk.gray('可用模型:\n'));
-  models.forEach((model: any, idx: number) => {
-    const selected = model.id === currentConfig.model ? ' ✓' : '';
-    console.log(chalk.gray(`  ${idx + 1}. ${model.name} - ${model.desc}${selected}`));
-  });
-
-  console.log(chalk.yellow('\n(自动切换已禁用,请编辑 ~/.thatgfsj/config.json 修改 model)\n'));
 }
 
 /**

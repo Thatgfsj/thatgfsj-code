@@ -151,7 +151,7 @@ export class WelcomeScreen {
     
     const w = 62;
     
-    console.log(chalk.cyan('+') + chalk.white.bold(' Claude Code ') + chalk.cyan('-'.repeat(w - 14)) + '+');
+    console.log(chalk.cyan('+') + chalk.white.bold(' Thatgfsj Code ') + chalk.cyan('-'.repeat(w - 17)) + '+');
     console.log(chalk.cyan('|') + chalk.yellow(' 快速开始指南').padEnd(w) + chalk.cyan('|'));
     console.log(chalk.cyan('|') + ' '.repeat(w) + chalk.cyan('|'));
     console.log(chalk.cyan('|') + chalk.gray(' 欢迎使用 Thatgfsj Code!').padEnd(w) + chalk.cyan('|'));

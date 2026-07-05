@@ -20,6 +20,22 @@ export class AIEngine {
   }
 
   /**
+   * Replace the active configuration at runtime.
+   * Used by the REPL `/model` / `/provider` commands — the next streamed
+   * request will pick up the new model / baseUrl / provider.
+   */
+  updateConfig(config: AIConfig): void {
+    this.config = config;
+  }
+
+  /**
+   * Inspect a snapshot of the active configuration (read-only).
+   */
+  getConfig(): Readonly<AIConfig> {
+    return this.config;
+  }
+
+  /**
    * Register tools for function calling
    */
   registerTool(tool: Tool) {
@@ -290,13 +306,16 @@ export class AIEngine {
 
   /**
    * Extract tool calls from response content
+   *
+   * NOTE: 当前为占位实现,实际不会从流式内容中解析工具调用。这意味着
+   * `chatStream` 内的 `if (response.tool_calls ...)` 分支永远不会进入,
+   * 已注册的 `Tool` 不会被调用,Agent 等价于一个聊天客户端。这是有意为之的
+   * 局限性 — 真实工具调用解析需要每个提供商走 JSON mode / native tool_calls
+   * 流(chunks 里的 `delta.tool_calls` 已被 `extractChunkText` 丢弃)。
+   * 修复此问题需要更大的重构,不属于 0.2.2 patch 的范围。
    */
-  private extractToolCalls(content: string): ToolCall[] | undefined {
-    // Simple pattern: look for tool_call blocks in response
-    // In real implementation this would be parsed from structured response
-    // For streaming, we check if content indicates a tool call
-    if (!content.includes('tool_use')) return undefined;
-    return undefined; // Placeholder — actual implementation depends on provider
+  private extractToolCalls(_content: string): ToolCall[] | undefined {
+    return undefined;
   }
 
   // ==================== Legacy chat() — delegates to chatStream ====================

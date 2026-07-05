@@ -78,6 +78,19 @@ export class REPLInput {
   }
 
   /**
+   * Programmatic cancel trigger (used by the global SIGINT handler in REPLLoop).
+   * Increments the cancel counter as if a Ctrl+C had been seen, and returns
+   * whether the loop should now exit. Idempotent across the prompt() flow:
+   * if the user has already entered a non-empty prompt this is a no-op for exit
+   * (the loop keeps running) — but for an empty REPL it eventually returns true.
+   */
+  requestCancel(): boolean {
+    // 模拟一次空输入 cancel:计为 1,下一次 SIGINT 累计到 2 即退出
+    this.consecutiveCancels++;
+    return this.shouldExitOnCancel();
+  }
+
+  /**
    * Reset consecutive-cancel counter when the loop has decided to keep running.
    */
   resetCancelCounter(): void {
