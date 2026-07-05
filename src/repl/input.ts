@@ -1,160 +1,139 @@
 /**
  * REPL Input Handler
- * Handles multiline input, history, and Ctrl+C
+ *
+ * 基于 @inquirer/input 实现，支持：
+ *   - 方向键（含数字小键盘方向键）行内移动 / 跳转词首尾
+ *   - Home / End / Backspace / Delete 行内编辑
+ *   - Ctrl+A / Ctrl+E 跳到行首/行尾（emacs 风格）
+ *   - Ctrl+C 中断当前输入（不清空整个会话），连续按两次空输入退出
+ *   - 命令历史：本地维护 history 数组，通过 default 预填上一条
+ *
+ * 不再使用 Node 内置 readline 的 rl.question()——它在 Windows 终端下
+ * 对小键盘方向键的 ANSI 转义序列不友好，会导致光标无法移动 (Bug #1)。
  */
 
-import readline from 'readline';
+import input from '@inquirer/input';
 import chalk from 'chalk';
 
+const MAX_HISTORY = 200;
+
+export type PromptResult =
+  | { kind: 'value'; value: string }       // 用户正常输入并提交（Enter）
+  | { kind: 'cancelled' };                  // Ctrl+C 中断当前输入
+
 export class REPLInput {
-  private rl: readline.Interface;
   private history: string[] = [];
-  private historyIndex: number = -1;
-  private currentInput: string = '';
-  private multilineMode: boolean = false;
-  private multilineBuffer: string[] = [];
+  private historyIndex: number = -1;        // -1 表示"未在历史中浏览"
+  private currentDraft: string = '';        // 离开历史时保留用户原始草稿
+  private defaultPrefix: string = chalk.green('\n> ');
+  private consecutiveCancels: number = 0;   // 连续空输入 + Ctrl+C 计数,达到阈值退出
 
-  constructor() {
-    this.rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      completer: this.completer.bind(this),
-      historySize: 100,
-      tabSize: 4
+  /**
+   * Ask the user for input. Returns either a value or 'cancelled'.
+   * Loop decides what to do with cancellation (usually: continue session,
+   * unless user has cancelled an already-empty input twice in a row).
+   */
+  async prompt(prefix?: string, abortSignal?: AbortSignal): Promise<PromptResult> {
+    const prefill = this.computePrefill();
+    const previousDraft = prefill.kind === 'history' ? prefill.value : '';
+
+    // 用 abortSignal 绑到 inquirer:外面 Ctrl+C / 主进程事件可以取消
+    const value = await input({
+      message: prefix ?? this.defaultPrefix,
+      prefill: 'editable',                  // 关键:启用方向键 + 行内编辑,包括小键盘
+      default: previousDraft,               // 历史预填
+      // Ctrl+C 由 @inquirer/input 抛出一个 symbol-like 错误,我们捕获为 cancelled
+      validate: () => true,
+    }, abortSignal ? { signal: abortSignal } : undefined).catch((err: any) => {
+      // 区分真实错误与用户取消;inquirer 用 ExitPromptError (name: 'ExitPromptError')
+      if (err && (err.name === 'ExitPromptError' || err.message?.includes('User force closed'))) {
+        return null;
+      }
+      throw err;
     });
 
-    // Handle Ctrl+C
-    this.rl.on('SIGINT', () => {
-      if (this.currentInput.length > 0 || this.multilineBuffer.length > 0) {
-        // Clear current input
-        this.currentInput = '';
-        this.multilineBuffer = [];
-        this.multilineMode = false;
-        process.stdout.write('\n');
-        this.rl.prompt();
-      } else {
-        // Exit REPL
-        process.stdout.write(chalk.gray('\n\n👋 Exiting...\n'));
-        process.exit(0);
-      }
-    });
+    if (value === null || value === undefined) {
+      this.consecutiveCancels++;
+      return { kind: 'cancelled' };
+    }
 
-    // Track history navigation
-    this.rl.on('line', (line) => {
-      if (line.trim()) {
-        this.history.push(line);
-        if (this.history.length > 100) {
-          this.history.shift();
-        }
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      // 避免把连续重复的内容都压入历史
+      if (this.history[this.history.length - 1] !== trimmed) {
+        this.history.push(trimmed);
+        if (this.history.length > MAX_HISTORY) this.history.shift();
       }
+    }
+
+    this.consecutiveCancels = 0;
+    return { kind: 'value', value: trimmed };
+  }
+
+  /**
+   * Should we ask the loop to exit? Two consecutive Ctrl+C on empty input => exit.
+   */
+  shouldExitOnCancel(): boolean {
+    return this.consecutiveCancels >= 2;
+  }
+
+  /**
+   * Reset consecutive-cancel counter when the loop has decided to keep running.
+   */
+  resetCancelCounter(): void {
+    this.consecutiveCancels = 0;
+  }
+
+  /**
+   * Decide what to prefill. Two modes:
+   *   - 'history': when user is navigating up/down with arrows
+   *   - 'draft':   when user has cleared the input — preserve their draft
+   */
+  private computePrefill(): { kind: 'history' | 'draft' | 'none'; value: string } {
+    if (this.historyIndex >= 0 && this.historyIndex < this.history.length) {
+      return { kind: 'history', value: this.history[this.historyIndex] };
+    }
+    if (this.currentDraft) return { kind: 'draft', value: this.currentDraft };
+    return { kind: 'none', value: '' };
+  }
+
+  /**
+   * Save the user's in-progress draft so ↑↓ preserves their unsent typing.
+   */
+  saveDraft(text: string): void {
+    this.currentDraft = text;
+  }
+
+  /**
+   * Navigate up in history (called from a global key listener, if needed).
+   */
+  historyUp(): string {
+    if (this.history.length === 0) return this.currentDraft;
+    if (this.historyIndex < 0) this.historyIndex = this.history.length;
+    if (this.historyIndex > 0) this.historyIndex--;
+    return this.history[this.historyIndex] ?? '';
+  }
+
+  /**
+   * Navigate down in history.
+   */
+  historyDown(): string {
+    if (this.history.length === 0) return this.currentDraft;
+    if (this.historyIndex >= this.history.length) return this.currentDraft;
+    this.historyIndex++;
+    if (this.historyIndex >= this.history.length) {
       this.historyIndex = this.history.length;
-    });
-  }
-
-  /**
-   * Prompt for input
-   */
-  async prompt(prefix: string = chalk.green('\n> ')): Promise<string> {
-    return new Promise((resolve) => {
-      this.rl.question(prefix, (answer) => {
-        resolve(answer);
-      });
-    });
-  }
-
-  /**
-   * Set prompt prefix
-   */
-  setPrompt(prefix: string): void {
-    this.rl.setPrompt(prefix);
-  }
-
-  /**
-   * Close the interface
-   */
-  close(): void {
-    this.rl.close();
-  }
-
-  /**
-   * Pause input
-   */
-  pause(): void {
-    this.rl.pause();
-  }
-
-  /**
-   * Resume input
-   */
-  resume(): void {
-    this.rl.resume();
-  }
-
-  /**
-   * Get previous command from history (for key handler)
-   */
-  getPreviousHistory(): string | null {
-    if (this.history.length === 0) return null;
-    
-    if (this.historyIndex > 0) {
-      this.historyIndex--;
+      return this.currentDraft;
     }
-    return this.history[this.historyIndex] || null;
+    return this.history[this.historyIndex] ?? '';
   }
 
-  /**
-   * Get next command from history (for key handler)
-   */
-  getNextHistory(): string | null {
-    if (this.historyIndex < this.history.length - 1) {
-      this.historyIndex++;
-      return this.history[this.historyIndex];
-    }
-    this.historyIndex = this.history.length;
-    return '';
+  getHistory(): readonly string[] {
+    return this.history;
   }
 
-  /**
-   * Reset history navigation
-   */
-  resetHistoryNavigation(): void {
-    this.historyIndex = this.history.length;
-  }
-
-  /**
-   * Simple completer for commands
-   */
-  private completer(line: string): [string[], string] {
-    const commands = [
-      'exit', 'quit', 'clear', 'context',
-      'help', 'tools', 'models', 'providers',
-      'history', 'git', 'file', 'shell'
-    ];
-    
-    const hits = commands.filter(c => c.startsWith(line.toLowerCase()));
-    return [hits.length ? hits : [], line];
-  }
-
-  /**
-   * Handle multiline input detection
-   */
-  isMultilineComplete(input: string): boolean {
-    // Check for explicit multiline trigger
-    if (input.endsWith('\\')) {
-      return false;
-    }
-    
-    // Check bracket balance
-    const openBrackets = (input.match(/\{/g) || []).length;
-    const closeBrackets = (input.match(/\}/g) || []).length;
-    const openParens = (input.match(/\(/g) || []).length;
-    const closeParens = (input.match(/\)/g) || []).length;
-    const openBrackets2 = (input.match(/\[/g) || []).length;
-    const closeBrackets2 = (input.match(/\]/g) || []).length;
-    
-    // Balanced if all counts match
-    return openBrackets === closeBrackets && 
-           openParens === closeParens && 
-           openBrackets2 === closeBrackets2;
+  clearHistory(): void {
+    this.history = [];
+    this.historyIndex = -1;
   }
 }
