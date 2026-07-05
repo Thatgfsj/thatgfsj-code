@@ -23,6 +23,24 @@ import { SystemPromptBuilder } from '../core/system-prompt.js';
 import { getBuiltInTools } from '../tools/index.js';
 import type { Config } from '../core/types.js';
 
+/**
+ * One entry in ~/.thatgfsj/models.json (added in 0.3.0).
+ */
+export interface SavedModel {
+  /** Model id used in API requests, e.g. `Qwen3-32B` or `claude-sonnet-4-5`. */
+  id: string;
+  /** Unix ms timestamp when this entry was last written. Defaults to 0
+   *  on legacy entries; `appendSavedModel` always overwrites it with
+   *  `Date.now()` at write time. */
+  addedAt?: number;
+  /** Optional context-window length in MiB (the `ctx` field). */
+  ctx?: number;
+  /** Optional thinking-effort hint: 'none' | 'low' | 'medium' | 'high' | 'max'. */
+  thinking?: 'none' | 'low' | 'medium' | 'high' | 'max';
+  /** Optional free-form note (e.g. "Q4 quantized via openrouter"). */
+  note?: string;
+}
+
 export class REPLLoop {
   private input: REPLInput;
   private output: REPLOutput;
@@ -206,6 +224,13 @@ export class REPLLoop {
         await this.handleProviderSwitch();
         return true;
 
+      case 'edit':
+      case '修改':
+        // /edit [n] — directly jump to the edit wizard. With no arg,
+        // shows the saved-model list first (same as /model).
+        await this.runEditShortcut();
+        return true;
+
       default:
         return false;
     }
@@ -310,19 +335,19 @@ export class REPLLoop {
   }
 
   /**
-   * /model — interactive model picker for the currently-active provider.
-   * Persists the choice to ~/.thatgfsj/config.json and updates the running
-   * AIEngine so subsequent requests use the new model immediately. Also
-   * appends the picked model id to ~/.thatgfsj/models.json so it shows up
-   * as a recent option across sessions (mirrors the 1.0.4 behaviour).
+   * /model — main entry point for model management.
    *
-   * The user can:
-   *   1. Enter the numbered index of a built-in choice
-   *   2. Paste an exact model id (matched against the provider's model list,
-   *      recent history, OR the current model)
-   *   3. Type any free-form model id to switch to a custom model
-   *   4. Press Enter with empty input to keep the current model
-   *   5. Press Ctrl+C to cancel
+   * 0.3.0 UX (per user feedback):
+   *   - 先看到的是**已经保存的模型** (从 ~/.thatgfsj/models.json 读)，
+   *     而不是内置 provider 列表。
+   *   - 列表末尾是 `+ 添加新模型` 选项 → 触发完整向导
+   *     (provider → api_key → baseUrl(可选,用于中转站) → model_name →
+   *      context length (M) → thinking effort)。
+   *   - 顶部有 `edit` 模式,可以重新修改任意已保存模型。
+   *   - 选某条 saved model 后立即切换并退出；按 Enter 不变。
+   *   - 兼容 0.2.x / 1.0.4 老 history:
+   *     - 字符串数组会透明迁移成 {id,...} 形式。
+   *     - 内置模型 (`Qwen3-32B` 之类) 也可选择,作为「saved + builtin」展示。
    */
   private async handleModelSwitch(): Promise<void> {
     if (!this.ai || !this.session) return;
@@ -330,57 +355,58 @@ export class REPLLoop {
     const currentConfig = this.ai.getConfig();
     const provider = currentConfig.provider || 'siliconflow';
     const builtin = WelcomeScreen.getModelsForProvider(provider);
-    const history = this.loadModelHistory();
+    const saved = this.loadSavedModels();
     const currentModel = currentConfig.model || builtin[0]?.id;
 
-    // Build the displayed list: recent history first (newest), then
-    // built-in models (dedup), with a trailing "+ add new" entry.
-    const RECENT_LIMIT = 5;
-    const recents = history.filter(id => id !== currentModel).slice(0, RECENT_LIMIT);
+    const RECENT_LIMIT = 8;
+    // Most-recent first (exclude the current one in the listing — it's
+    // surfaced separately as the active row).
+    const recents = [...saved]
+      .sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
+      .filter(m => m.id !== currentModel)
+      .slice(0, RECENT_LIMIT);
 
-    this.output.printHeader(`🤖 /model — 切换模型 (provider: ${provider})`);
+    this.output.printHeader(`🤖 /model — 切换 / 管理模型 (provider: ${provider})`);
 
-    // If the active model is not in either list, surface it as a "(当前)"
-    // banner entry so the user can see what is actually configured.
-    const knownBuiltinIds = new Set(builtin.map(m => m.id));
-    const knownHistory = new Set(recents);
-    const currentIsExotic = currentModel
-      && !knownBuiltinIds.has(currentModel)
-      && !knownHistory.has(currentModel);
-
-    if (currentIsExotic) {
-      this.output.printInfo(chalk.green(`  ⮕ 当前 (非内置): ${currentModel}`));
-      this.output.printInfo('');
+    // 当前
+    if (currentModel) {
+      const curSaved = saved.find(m => m.id.toLowerCase() === currentModel.toLowerCase());
+      const meta = curSaved && (curSaved.ctx || curSaved.thinking)
+        ? chalk.gray(`  ctx=${curSaved.ctx ?? '-'}M thinking=${curSaved.thinking ?? '-'}`)
+        : '';
+      this.output.printInfo(chalk.green(`  ⮕ 当前: ${currentModel}`) + meta);
     }
 
+    // 已保存
     if (recents.length > 0) {
-      this.output.printInfo(chalk.yellow('  最近使用:'));
-      recents.forEach((id, idx) => {
-        const mark = id === currentModel ? '  ✓' : '';
-        this.output.printInfo(
-          `  r${idx + 1}. ${chalk.cyan(id)}${mark}`,
-        );
+      this.output.printInfo('');
+      this.output.printInfo(chalk.yellow('  已保存模型:'));
+      recents.forEach((m, idx) => {
+        const meta = [];
+        if (m.ctx)    meta.push(`ctx=${m.ctx}M`);
+        if (m.thinking) meta.push(`think=${m.thinking}`);
+        const extra = meta.length ? chalk.gray(`  [${meta.join(' · ')}]`) : '';
+        this.output.printInfo(`  ${(idx + 1).toString().padStart(2)}. ${chalk.cyan(m.id)}${extra}`);
       });
+    } else {
+      this.output.printInfo('');
+      this.output.printInfo(chalk.gray('  (尚无保存的模型)'));
     }
 
+    // 添加 / 编辑 提示
     this.output.printInfo('');
-    this.output.printInfo('  内置模型:');
-    builtin.forEach((m, idx) => {
-      const mark = m.id === currentModel ? '  ✓' : '';
-      this.output.printInfo(
-        `  ${(idx + 1).toString().padStart(2)}. ${m.name.padEnd(28)} ${chalk.gray(m.id)}${mark}`,
-      );
-    });
+    this.output.printInfo(chalk.yellow('  操作:'));
+    this.output.printInfo(`  a. ${chalk.cyan('+ 添加新模型')}    (完整向导: provider → key → url → 名称 → ctx → thinking)`);
+    if (recents.length > 0) {
+      this.output.printInfo(`  e. ${chalk.cyan('edit <编号>')}     (修改已保存模型的 ctx / thinking / 备注)`);
+    }
+    if (builtin.length > 0) {
+      this.output.printInfo(chalk.gray(`  或输入编号 1-${recents.length} 切换到对应已保存模型;直接回车保持当前。`));
+    }
 
-    this.output.printInfo('');
-    this.output.printInfo(
-      chalk.gray(
-        '输入编号(r1-r' + recents.length + ' / 1-' + builtin.length +
-        ')、完整 model id、或任意自定义 id。回车保持当前。',
-      ),
+    const choice = await this.askOnce(
+      chalk.cyan('\nmodel > ') + (recents[0]?.id ? `${recents[0].id} (1) / a / e / id` : 'a / id'),
     );
-
-    const choice = await this.askOnce(chalk.cyan('model > ') + (currentModel ?? ''));
     if (choice === null) {
       this.output.printInfo(chalk.gray('(已取消,保持当前模型)'));
       return;
@@ -390,90 +416,345 @@ export class REPLLoop {
       return;
     }
 
-    let pickedId: string | null = null;
+    const trimmed = choice.trim().toLowerCase();
 
-    // Recent-history shortcut: "r1" .. "r<N>"
-    const recentMatch = /^r(\d+)$/i.exec(choice);
-    if (recentMatch) {
-      const k = Number.parseInt(recentMatch[1], 10) - 1;
-      pickedId = recents[k] ?? null;
-    }
-    // Numeric index into builtin
-    else if (/^\d+$/.test(choice)) {
-      const k = Number.parseInt(choice, 10) - 1;
-      pickedId = builtin[k]?.id ?? null;
-      if (!pickedId) {
-        this.output.printError(`编号超出范围: "${choice}". 保持当前模型。`);
-        return;
-      }
-    }
-    // Exact id match against builtin
-    else if (builtin.find(m => m.id === choice)) {
-      pickedId = choice;
-    }
-    // Exact id match against recent history
-    else if (recents.includes(choice)) {
-      pickedId = choice;
-    }
-    // Free-form — treat as a custom model id
-    else {
-      pickedId = choice;
-      this.output.printInfo(chalk.gray(`(未识别,按自定义模型处理: ${pickedId})`));
-    }
-
-    if (!pickedId) {
-      this.output.printError(`未识别: "${choice}". 保持当前模型。`);
+    // === 添加新模型 ===
+    if (trimmed === 'a' || trimmed === '+' || trimmed === 'add') {
+      await this.runAddModelWizard();
       return;
     }
 
-    await this.applyModelSwitch(pickedId);
-    this.appendModelHistory(pickedId);
-    const builtinMatch = builtin.find(m => m.id === pickedId);
-    const display = builtinMatch
-      ? `${builtinMatch.name}  (${builtinMatch.id})`
-      : `${pickedId}  (自定义)`;
-    this.output.printSuccess(`模型已切换为: ${display}`);
+    // === 编辑已保存 ===
+    const editMatch = /^e(?:dit)?\s*(\d+)$/.exec(trimmed);
+    if (editMatch) {
+      const k = Number.parseInt(editMatch[1], 10) - 1;
+      const target = recents[k];
+      if (!target) {
+        this.output.printError('编号超出范围。');
+        return;
+      }
+      await this.runEditModelWizard(target);
+      return;
+    }
+
+    // === 数字 — 已保存模型中的第 k 个 ===
+    if (/^\d+$/.test(trimmed)) {
+      const k = Number.parseInt(trimmed, 10) - 1;
+      const target = recents[k];
+      if (!target) {
+        this.output.printError(`编号超出范围 (1-${recents.length} 或 a / edit).`);
+        return;
+      }
+      await this.applyModelSwitch(target.id);
+      this.appendSavedModel(target);
+      const meta = target.ctx || target.thinking
+        ? chalk.gray(` (ctx=${target.ctx ?? '-'}M, think=${target.thinking ?? '-'})`)
+        : '';
+      this.output.printSuccess(`模型已切换为: ${target.id}${meta}`);
+      this.session.addMessage(
+        'system',
+        `[system: model switched to ${target.id}. Continue with the task.]`,
+      );
+      return;
+    }
+
+    // === 自由输入 id ===
+    if (trimmed === '') {
+      this.output.printInfo(chalk.gray('(保持当前模型)'));
+      return;
+    }
+
+    // 把裸输入当成 model id(兼容老的 /model Qwen3-32B 行为)
+    await this.applyModelSwitch(trimmed);
+    this.appendSavedModel({ id: trimmed });
+    this.output.printSuccess(`模型已切换为: ${trimmed}  (新保存)`);
     this.session.addMessage(
       'system',
-      `[system: model switched to ${pickedId}. Continue with the task.]`,
+      `[system: model switched to ${trimmed}. Continue with the task.]`,
     );
   }
 
   /**
-   * Read ~/.thatgfsj/models.json — a flat array of model ids the user has
-   * previously switched to. Order is "most recent last" in the file but the
-   * caller treats it as time-ordered.
+   * Add-model wizard (0.3.0+):
+   *   Step 1: Provider (内置 / custom_openai / custom_anthropic)
+   *   Step 2: API Key (内置:给注册链接;custom:无)
+   *   Step 3: Base URL (仅 custom_*;内置跳过)
+   *   Step 4: 模型名称 (自由输入)
+   *   Step 5: 上下文长度 (MiB,数字,默认 8)
+   *   Step 6: 思考强度 (none / low / medium / high / max,默认 none)
+   *
+   * 完成后:写入 ~/.thatgfsj/models.json,顺便把新模型切到当前,
+   * 更新 AIEngine + 写入 ~/.thatgfsj/config.json model 字段。
+   */
+  private async runAddModelWizard(): Promise<void> {
+    if (!this.ai) return;
+
+    this.output.printHeader('➕ 添加新模型');
+
+    // Step 1: provider
+    const providers = [
+      { id: 'siliconflow',     name: '硅基流动 (SiliconFlow, OpenAI 兼容)' },
+      { id: 'openai',          name: 'OpenAI' },
+      { id: 'anthropic',       name: 'Anthropic (Claude, Anthropic Messages)' },
+      { id: 'minimax',         name: 'MiniMax (M3)' },
+      { id: 'gemini',          name: 'Google Gemini' },
+      { id: 'kimi',            name: 'Kimi (Moonshot AI)' },
+      { id: 'deepseek',        name: 'DeepSeek' },
+      { id: 'ernie',           name: '文心一言 (ERNIE)' },
+      { id: 'custom_openai',   name: '自定义 → OpenAI 兼容 (中转站)' },
+      { id: 'custom_anthropic', name: '自定义 → Anthropic 兼容 (中转站)' },
+    ];
+
+    this.output.printInfo('  步骤 1/6: 选择 provider');
+    providers.forEach((p, i) => {
+      this.output.printInfo(`    ${(i + 1).toString().padStart(2)}. ${p.name}`);
+    });
+    const provIdx = await this.askChoice('选择编号 (1-10): ', 1, 1, providers.length);
+    if (provIdx === null) return;
+    const provider = providers[provIdx - 1];
+
+    // Step 2: api key
+    let apiKey = '';
+    this.output.printInfo(`\n  步骤 2/6: API Key  (provider: ${provider.name})`);
+    if (provider.id.startsWith('custom_')) {
+      this.output.printInfo('    (中转站模式: 这一步可选,直接回车表示使用 baseUrl 自身的鉴权头)');
+    }
+    const keyRaw = await this.askOnce('  API Key (输入或回车跳过): ');
+    if (keyRaw === null) return;
+    apiKey = keyRaw.trim();
+
+    // Step 3: baseUrl (only custom_*)
+    let baseUrl: string | undefined;
+    if (provider.id === 'custom_openai' || provider.id === 'custom_anthropic') {
+      this.output.printInfo('\n  步骤 3/6: baseUrl (中转站 URL)');
+      this.output.printInfo(chalk.gray('    例如: https://api.example.com/v1'));
+      const url = await this.askOnce('  baseUrl: ');
+      if (url === null || !url.trim()) {
+        this.output.printError('需要 baseUrl 才能保存自定义 provider。');
+        return;
+      }
+      baseUrl = url.trim();
+    }
+
+    // Step 4: model name
+    this.output.printInfo('\n  步骤 4/6: 模型名称');
+    const modelId = await this.askOnce('  模型 id (例如 gpt-4.1-mini, claude-sonnet-4-5): ');
+    if (modelId === null || !modelId.trim()) {
+      this.output.printError('模型名称不能为空。已取消。');
+      return;
+    }
+    const model = modelId.trim();
+
+    // Step 5: context length
+    this.output.printInfo('\n  步骤 5/6: 上下文长度 (MiB)');
+    this.output.printInfo(chalk.gray('    常见的 8 / 32 / 128 / 200;默认 8'));
+    const ctxRaw = await this.askOnce('  ctx (M): ');
+    let ctx: number | undefined;
+    if (ctxRaw !== null && ctxRaw.trim()) {
+      const n = Number.parseInt(ctxRaw.trim(), 10);
+      if (Number.isFinite(n) && n > 0) ctx = n;
+    }
+    if (!ctx) ctx = 8;
+
+    // Step 6: thinking effort
+    this.output.printInfo('\n  步骤 6/6: 思考强度');
+    this.output.printInfo(chalk.gray('    none / low / medium / high / max (默认 none)'));
+    const thinkRaw = await this.askOnce('  thinking: ');
+    let thinking: SavedModel['thinking'];
+    const t = (thinkRaw ?? '').trim().toLowerCase();
+    if (t === 'low' || t === 'medium' || t === 'high' || t === 'max') thinking = t;
+    else if (t === 'none' || t === '') thinking = 'none';
+    else {
+      this.output.printWarning(`未识别的 thinking 值 "${t}", 按 none 处理。`);
+      thinking = 'none';
+    }
+
+    // 持久化 + 切换
+    const saved: SavedModel = {
+      id: model,
+      addedAt: Date.now(),
+      ctx,
+      thinking,
+      note: provider.id,
+    };
+    this.appendSavedModel(saved);
+
+    // 同步切到当前模型,顺带把 provider/baseUrl 写入 config.json
+    await this.applyProviderSwitchInternal(provider.id, baseUrl, apiKey);
+    await this.applyModelSwitch(model);
+
+    this.output.printSuccess(
+      `已保存并切换到: ${model}  (ctx=${ctx}M, thinking=${thinking}, provider=${provider.id}${baseUrl ? ', baseUrl=' + baseUrl : ''})`,
+    );
+    this.session?.addMessage(
+      'system',
+      `[system: model ${model} added (ctx=${ctx}M, thinking=${thinking}, provider=${provider.id}). Continue with the task.]`,
+    );
+  }
+
+  /**
+   * Edit-model wizard (0.3.0+): pick a saved model and update ctx /
+   * thinking / note without leaving the REPL.
+   */
+  private async runEditModelWizard(target: SavedModel): Promise<void> {
+    this.output.printHeader(`✏️  修改已保存模型: ${target.id}`);
+    this.output.printInfo(chalk.gray(`  provider=${target.note ?? '?'}, ctx=${target.ctx ?? '?'}M, thinking=${target.thinking ?? '?'}`));
+    this.output.printInfo('  输入新值;直接回车保留旧值;输入 `-` 清空字段');
+    this.output.printInfo('');
+
+    const ctxRaw = await this.askOnce(`  ctx (M) [${target.ctx ?? '?'}]: `);
+    if (ctxRaw === null) return;
+    const ctxTrim = ctxRaw.trim();
+    let newCtx = target.ctx;
+    if (ctxTrim === '-') newCtx = undefined;
+    else if (ctxTrim !== '') {
+      const n = Number.parseInt(ctxTrim, 10);
+      if (Number.isFinite(n) && n > 0) newCtx = n;
+      else this.output.printWarning(`ctx 未识别 ("${ctxTrim}"), 保留 ${target.ctx}。`);
+    }
+
+    const thinkRaw = await this.askOnce(`  thinking [${target.thinking ?? 'none'}]: `);
+    if (thinkRaw === null) return;
+    const thinkTrim = thinkRaw.trim().toLowerCase();
+    let newThinking = target.thinking;
+    if (thinkTrim === '-') newThinking = undefined;
+    else if (['none', 'low', 'medium', 'high', 'max'].includes(thinkTrim)) newThinking = thinkTrim as any;
+    else if (thinkTrim !== '') this.output.printWarning(`thinking 未识别 ("${thinkRaw}"), 保留 ${target.thinking ?? 'none'}。`);
+
+    const noteRaw = await this.askOnce(`  note [${target.note ?? ''}]: `);
+    if (noteRaw === null) return;
+    const noteTrim = noteRaw.trim();
+    let newNote = target.note;
+    if (noteTrim === '-') newNote = undefined;
+    else if (noteTrim !== '') newNote = noteTrim;
+
+    const updated: SavedModel = {
+      ...target,
+      ctx: newCtx,
+      thinking: newThinking,
+      note: newNote,
+    };
+    this.replaceSavedModel(target.id, updated);
+    this.output.printSuccess(`已更新: ${target.id}`);
+    this.output.printInfo(chalk.gray(`  ctx=${newCtx ?? '-'}M, thinking=${newThinking ?? '-'}, note=${newNote ?? '-'}`));
+  }
+
+  /**
+   * Persist a provider choice + custom baseUrl + apiKey into
+   * ~/.thatgfsj/config.json and reload AIEngine config. Differs from
+   * applyProviderSwitch in that this also writes a custom baseUrl.
+   */
+  private async applyProviderSwitchInternal(
+    providerId: string,
+    baseUrl: string | undefined,
+    apiKey: string,
+  ): Promise<void> {
+    if (!this.ai) return;
+    const cfg = await this.readPersistedConfig();
+    cfg.provider = providerId as Config['provider'];
+    if (baseUrl) cfg.baseUrl = baseUrl;
+    if (apiKey)  cfg.apiKey = apiKey;
+    await this.persistConfig(cfg);
+    const next = await ConfigManager.load();
+    this.ai.updateConfig(next);
+  }
+
+  /**
+   * Read ~/.thatgfsj/models.json — a list of saved models the user has
+   * previously switched to or added. Starting from 0.3.0 each entry is
+   * `{ id, addedAt, ctx?, thinking?, note? }`. Older releases stored a
+   * flat array of strings; we transparently migrate that on read.
    */
   private loadModelHistory(): string[] {
+    // Kept for backward compat with existing call sites. Returns just the
+    // model ids, newest last.
+    return this.loadSavedModels().map(m => m.id);
+  }
+
+  /**
+   * Read ~/.thatgfsj/models.json as a list of SavedModel entries.
+   * Migrates v0.2.x's `["id1","id2"]` shape into 0.3.0's `{id,...}` shape
+   * on the fly, leaving the on-disk file untouched until a write happens.
+   */
+  private loadSavedModels(): SavedModel[] {
     try {
       const p = join(homedir(), '.thatgfsj', 'models.json');
       if (!existsSync(p)) return [];
       const raw = JSON.parse(readFileSync(p, 'utf-8'));
-      return Array.isArray(raw) ? raw.filter(x => typeof x === 'string') : [];
+      if (!Array.isArray(raw)) return [];
+
+      // v0.3.0+: [{id, ctx?, thinking?}, ...]
+      const looksLikeObjects = raw.length > 0 && raw[0] && typeof raw[0] === 'object';
+      if (looksLikeObjects) {
+        return raw
+          .filter(x => x && typeof x === 'object' && typeof x.id === 'string')
+          .map((x: any) => ({
+            id: x.id,
+            addedAt: typeof x.addedAt === 'number' ? x.addedAt : 0,
+            ctx: typeof x.ctx === 'number' ? x.ctx : undefined,
+            thinking: typeof x.thinking === 'string' ? x.thinking : undefined,
+            note: typeof x.note === 'string' ? x.note : undefined,
+          }));
+      }
+      // v0.2.x: ["id1", "id2", ...] — migrate in memory only.
+      return (raw as unknown[])
+        .filter(x => typeof x === 'string')
+        .map(id => ({ id: id as string, addedAt: 0 }));
     } catch {
       return [];
     }
   }
 
   /**
-   * Append a model id to ~/.thatgfsj/models.json, deduping the trailing
-   * entry. Mirrors the 1.0.4 behaviour: history is "things you switched to".
+   * Legacy helper: append a model id to ~/.thatgfsj/models.json.
+   * New callers should prefer `appendSavedModel` so we don't lose
+   * ctx / thinking metadata.
    */
   private appendModelHistory(modelId: string): void {
+    this.appendSavedModel({ id: modelId });
+  }
+
+  /**
+   * Persist a SavedModel into ~/.thatgfsj/models.json, replacing any
+   * existing entry with the same id (case-insensitive). The original
+   * casing of the entry is preserved — i.e. if the user already has
+   * `Qwen3-32B` saved and types `qwen3-32b`, the canonical `Qwen3-32B`
+   * casing is kept. Newest entries go at the tail of the file.
+   */
+  private appendSavedModel(model: SavedModel): void {
     try {
       const dir = join(homedir(), '.thatgfsj');
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       const p = join(dir, 'models.json');
-      let history: string[] = [];
-      if (existsSync(p)) {
-        try { history = JSON.parse(readFileSync(p, 'utf-8')); } catch { history = []; }
-      }
-      if (!Array.isArray(history)) history = [];
-      const filtered = history.filter(x => typeof x === 'string' && x !== modelId);
-      filtered.push(modelId);
+      const list = this.loadSavedModels();
+      const existing = list.find(m => m.id.toLowerCase() === model.id.toLowerCase());
+      const filtered = list.filter(m => m.id.toLowerCase() !== model.id.toLowerCase());
+      const canonical: SavedModel = {
+        ...(existing ?? {}),
+        ...model,
+        id: existing?.id ?? model.id,            // canonical casing wins
+        addedAt: Date.now(),
+      };
+      filtered.push(canonical);
       writeFileSync(p, JSON.stringify(filtered, null, 2));
     } catch {
-      // best-effort: history persistence is not critical
+      // best-effort
+    }
+  }
+
+  /** Replace an existing saved model entry (matched by id). */
+  private replaceSavedModel(id: string, patch: Partial<SavedModel>): void {
+    try {
+      const dir = join(homedir(), '.thatgfsj');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const p = join(dir, 'models.json');
+      const list = this.loadSavedModels();
+      const idx = list.findIndex(m => m.id.toLowerCase() === id.toLowerCase());
+      if (idx < 0) return;
+      list[idx] = { ...list[idx], ...patch, id: list[idx].id, addedAt: list[idx].addedAt };
+      writeFileSync(p, JSON.stringify(list, null, 2));
+    } catch {
+      // best-effort
     }
   }
 
@@ -494,6 +775,8 @@ export class REPLLoop {
       { id: 'kimi',       name: 'Kimi (Moonshot AI)',  envKey: 'KIMI_API_KEY' },
       { id: 'deepseek',   name: 'DeepSeek',            envKey: 'DEEPSEEK_API_KEY' },
       { id: 'ernie',      name: '文心一言 (ERNIE)',     envKey: 'ERNIE_API_KEY' },
+      { id: 'custom_openai',   name: '自定义 → OpenAI 兼容 (中转站)', envKey: 'CUSTOM_API_KEY' },
+      { id: 'custom_anthropic', name: '自定义 → Anthropic 兼容 (中转站)', envKey: 'CUSTOM_API_KEY' },
     ];
 
     this.output.printHeader('🌐 /provider — 切换提供商');
@@ -525,7 +808,30 @@ export class REPLLoop {
       return;
     }
 
-    // 校验 API Key 存在(从 env 或 ~/.thatgfsj/config.json)
+    // 自定义 provider 走完整向导,内置 provider 只切 + 提示 key
+    if (pickedProvider.id.startsWith('custom_')) {
+      this.output.printInfo(chalk.cyan(`\n  切换到 ${pickedProvider.id},需要 baseUrl:`));
+      const url = await this.askOnce('  baseUrl (例如 https://api.example.com/v1): ');
+      if (!url || !url.trim()) {
+        this.output.printError('需要 baseUrl,已取消。');
+        return;
+      }
+      const keyRaw = await this.askOnce(`  API Key (可回车跳过,env ${pickedProvider.envKey} 也行): `);
+      await this.applyProviderSwitchInternal(
+        pickedProvider.id,
+        url.trim(),
+        (keyRaw ?? '').trim(),
+      );
+      this.output.printSuccess(`provider 已切换为: ${pickedProvider.name} (${pickedProvider.id})`);
+      this.session.addMessage(
+        'system',
+        `[system: provider switched to ${pickedProvider.id} (baseUrl=${url.trim()}).]`,
+      );
+      await this.handleModelSwitch();
+      return;
+    }
+
+    // 内置 provider
     const envHasKey = !!process.env[pickedProvider.envKey];
     let cfgHasKey = false;
     try {
@@ -538,20 +844,56 @@ export class REPLLoop {
 
     if (!envHasKey && !cfgHasKey) {
       this.output.printWarning(
-        `未检测到 ${pickedProvider.envKey}。运行 \`gfcode init\` 设置，或 export ${pickedProvider.envKey}=... 后重试。`,
+        `未检测到 ${pickedProvider.envKey}。运行 \`gfcode init\` 设置,或 export ${pickedProvider.envKey}=... 后重试。`,
       );
-      // 仍然继续切换,但 applyModelSwitch 内部会捕获到没有 key
     }
 
     await this.applyProviderSwitch(pickedProvider.id);
     this.output.printSuccess(`provider 已切换为: ${pickedProvider.name} (${pickedProvider.id})`);
 
-    // 自动跟进选模型
     this.session.addMessage(
       'system',
       `[system: provider switched to ${pickedProvider.id}. Picking a new model…]`,
     );
     await this.handleModelSwitch();
+  }
+
+  /**
+   * /edit [n] — short-hand for the edit wizard.
+   *   `/edit`           → list saved models, ask which to edit.
+   *   `/edit 1`         → jump to wizard for saved model #1.
+   *   `/edit Qwen3-32B` → jump to wizard for the model whose id matches.
+   */
+  private async runEditShortcut(): Promise<void> {
+    if (!this.ai) return;
+    const saved = this.loadSavedModels().sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0));
+    if (saved.length === 0) {
+      this.output.printWarning('没有已保存的模型。先用 /model 添加几条。');
+      return;
+    }
+    this.output.printHeader('✏️  /edit — 修改已保存模型');
+    saved.forEach((m, i) => {
+      const meta = [];
+      if (m.ctx) meta.push(`ctx=${m.ctx}M`);
+      if (m.thinking) meta.push(`think=${m.thinking}`);
+      const extra = meta.length ? chalk.gray(`  [${meta.join(' · ')}]`) : '';
+      this.output.printInfo(`  ${(i + 1).toString().padStart(2)}. ${chalk.cyan(m.id)}${extra}`);
+    });
+    this.output.printInfo('');
+    const arg = await this.askOnce('  编号或完整 id: ');
+    if (arg === null) return;
+    const trimmed = arg.trim();
+    let target: SavedModel | null = null;
+    if (/^\d+$/.test(trimmed)) {
+      target = saved[Number.parseInt(trimmed, 10) - 1] ?? null;
+    } else {
+      target = saved.find(m => m.id.toLowerCase() === trimmed.toLowerCase()) ?? null;
+    }
+    if (!target) {
+      this.output.printError(`未识别: "${trimmed}".`);
+      return;
+    }
+    await this.runEditModelWizard(target);
   }
 
   /**
@@ -651,6 +993,21 @@ export class REPLLoop {
         resolve(answer.trim());
       });
     });
+  }
+
+  /**
+   * Validate-and-collect a numeric choice within `[min..max]`. Accepts
+   * empty input as `defaultValue`. Returns `null` on Ctrl+C.
+   */
+  private async askChoice(prefix: string, defaultValue: number, min: number, max: number): Promise<number | null> {
+    while (true) {
+      const raw = await this.askOnce(prefix);
+      if (raw === null) return null;
+      if (raw === '') return defaultValue;
+      const n = Number.parseInt(raw, 10);
+      if (Number.isInteger(n) && n >= min && n <= max) return n;
+      this.output.printWarning(`请输入 ${min}-${max} 之间的整数。`);
+    }
   }
 
   /**

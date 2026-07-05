@@ -15,6 +15,53 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [0.3.0] - 2026-07-06
+
+### Added
+- **「已保存的模型」作为 `/model` 主视图**：0.2.x 进 `/model` 先列内置模型，
+  这版改为先列 `~/.thatgfsj/models.json` 里**已经保存的模型**（显示 id +
+  `ctx` + `thinking` + `note/provider`），与 1.0.4 的 `ModelSelector` 行为
+  对齐。内置 provider 模型列表作为辅助信息保留在底部。
+- **`+ 添加新模型` 向导**：在 `/model` 选 `a` / `add` / `+` 启动完整向导：
+  1. **步骤 1/6: 选择 provider**（10 个：8 个内置 + `custom_openai` + `custom_anthropic`）
+  2. **步骤 2/6: 输入 API Key**（custom_* 可选跳过）
+  3. **步骤 3/6: 输入 baseUrl**（仅 custom_*；要求 `https://.../v1` 形式）
+  4. **步骤 4/6: 输入模型 id**
+  5. **步骤 5/6: 上下文长度 (MiB)**（默认 8；常见 8 / 32 / 128 / 200）
+  6. **步骤 6/6: 思考强度**（`none` / `low` / `medium` / `high` / `max`，默认 `none`）
+  完成后：写入 `~/.thatgfsj/models.json`，同步切换到新模型（更新
+  `AIEngine` + `~/.thatgfsj/config.json`），并把 `[system: model ... added]`
+  注入 `SessionManager`，让 LLM 下一轮看到。
+- **`/edit` 修改已保存模型**：1.0.4 时代就期望的能力，本次补齐：
+  - `/edit` 列出全部已保存模型，输入编号或完整 id 进入
+  - `/edit 1` / `/edit Qwen3-32B` 直接跳到对应模型
+  - 修改 `ctx` / `thinking` / `note`，空回车保留旧值，`-` 清空字段
+- **`/provider` 支持自定义 provider**：
+  - 新增 `custom_openai`（OpenAI 兼容中转站）与 `custom_anthropic`
+    （Anthropic 兼容中转站）两项
+  - 选中后立刻提示输入 baseUrl，跳过内置的 `envKey` 校验
+  - 自动跟进 `/model` 让你顺便挑 / 添加一个模型
+- **`SavedModel` 类型导出**（`src/repl/loop.ts`）：
+  ```ts
+  interface SavedModel {
+    id: string;
+    addedAt?: number;
+    ctx?: number;          // 上下文长度，单位 MiB
+    thinking?: 'none' | 'low' | 'medium' | 'high' | 'max';
+    note?: string;         // 备注（如 provider id、quant 说明等）
+  }
+  ```
+- **6 个新单元测试**（`tests/unit-wizard.test.js`）：覆盖 v0.2.x → v0.3.0
+  history 形状的透明迁移、`appendSavedModel` 大小写不敏感去重 + canonical
+  casing 保留、`replaceSavedModel` 单条更新、`SavedModel` 形状 JSON 往返。
+
+### Fixed
+- **appendSavedModel casing**：之前大小写不一致的同一模型会被当成两条；
+  现在若已经存了 `Qwen3-32B`，再次输入 `qwen3-32b` 仍然只保留 `Qwen3-32B`
+  （原始拼写规范）。
+
+---
+
 ## [0.2.3] - 2026-07-06
 
 ### Added
