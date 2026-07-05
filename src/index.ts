@@ -16,7 +16,6 @@ if (process.platform === 'win32') {
 import { program } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import readline from 'readline';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
@@ -28,6 +27,7 @@ import { SessionManager } from './core/session.js';
 import { ConfigManager } from './core/config.js';
 import { FileTool, ShellTool, GitTool, SearchTool } from './tools/index.js';
 import { WelcomeScreen } from './repl/welcome.js';
+import { REPLLoop } from './repl/loop.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -252,50 +252,29 @@ Be concise but thorough. Show your reasoning.`;
 
 /**
  * Handle model switch in interactive mode
+ * (Not invoked from startInteractive anymore — REPLLoop handles it via /model.)
+ * Kept for backwards compatibility with any callers.
  */
-async function handleModelSwitch(rl: readline.Interface, currentConfig: any) {
+async function handleModelSwitch(_rl: unknown, currentConfig: any) {
   console.log(chalk.cyan('\n切换模型...\n'));
-  
-  // Get available models based on current provider
+
   const models = WelcomeScreen.getModelsForProvider(currentConfig.provider || 'siliconflow');
-  
+
   console.log(chalk.gray('可用模型:\n'));
-  models.forEach((model, idx) => {
+  models.forEach((model: any, idx: number) => {
     const selected = model.id === currentConfig.model ? ' ✓' : '';
     console.log(chalk.gray(`  ${idx + 1}. ${model.name} - ${model.desc}${selected}`));
   });
-  
-  console.log();
-  
-  const answer = await new Promise<string>((resolve) => {
-    rl.question(chalk.green('选择模型编号: '), resolve);
-  });
-  
-  const idx = parseInt(answer) - 1;
-  if (idx >= 0 && idx < models.length) {
-    const selected = models[idx];
-    
-    // Save to config
-    const config = { ...currentConfig, model: selected.id };
-    const configPath = join(homedir(), '.thatgfsj', 'config.json');
-    
-    try {
-      const dir = join(homedir(), '.thatgfsj');
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      writeFileSync(configPath, JSON.stringify(config, null, 2));
-      console.log(chalk.green(`\n✓ 模型已切换为: ${selected.name}\n`));
-    } catch (e: any) {
-      console.error(chalk.red(`\n保存失败: ${e.message}\n`));
-    }
-  } else {
-    console.log(chalk.yellow('\n无效选择，保持当前模型\n'));
-  }
+
+  console.log(chalk.yellow('\n(自动切换已禁用,请编辑 ~/.thatgfsj/config.json 修改 model)\n'));
 }
 
 /**
  * Start interactive mode (Claude Code style)
+ *
+ * 委托给 REPLLoop,它使用 @inquirer/input,支持方向键(含数字小键盘)、行内
+ * 编辑、命令历史、可滚动流式输出。原生 readline 在 Windows 终端下对小键盘
+ * 方向键的 ANSI 转义序列不友好 (Bug #1),所以这里不再直接用 readline。
  */
 async function startInteractive() {
   console.log(chalk.cyan('\n🤖 Thatgfsj Code - Interactive Mode\n'));
@@ -303,104 +282,15 @@ async function startInteractive() {
   console.log(chalk.gray('─'.repeat(40)));
   console.log(chalk.gray('\nCommands:'));
   console.log(chalk.gray('  exit, Ctrl+C   - Quit'));
-  console.log(chalk.gray('  clear          - Clear history'));
+  console.log(chalk.gray('  clear          - Clear screen'));
   console.log(chalk.gray('  context        - Show project context'));
+  console.log(chalk.gray('  history        - Show command history'));
+  console.log(chalk.gray('  help           - Show all commands'));
   console.log(chalk.gray('\n' + '─'.repeat(40) + '\n'));
-  
+
   try {
-    const config = await ConfigManager.load();
-    const ai = new AIEngine(config);
-    const session = new SessionManager();
-    
-    // Register tools - all available tools
-    const shellTool = new ShellTool();
-    const fileTool = new FileTool();
-    const gitTool = new GitTool();
-    const searchTool = new SearchTool();
-    
-    ai.registerTool(shellTool);
-    ai.registerTool(fileTool);
-    ai.registerTool(gitTool);
-    ai.registerTool(searchTool);
-    
-    // System prompt
-    const defaultSystem = `You are Thatgfsj Code, an AI coding assistant like Claude Code.
-You can read files, write files, and execute shell commands.
-Be helpful, concise, and show your reasoning.`;
-    session.addMessage('system', defaultSystem);
-
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: true
-    });
-
-    const ask = () => {
-      rl.question(chalk.green('\n> '), async (input) => {
-        const trimmed = input.trim();
-        
-        if (!trimmed) {
-          ask();
-          return;
-        }
-        
-        // Commands
-        if (trimmed === 'exit' || trimmed === 'quit' || trimmed === '\\x03') {
-          console.log(chalk.gray('\n👋 Goodbye!'));
-          rl.close();
-          return;
-        }
-        
-        if (trimmed === 'clear') {
-          session.clear();
-          console.clear();
-          console.log(chalk.cyan('🤖 Thatgfsj Code - Interactive Mode\n'));
-          ask();
-          return;
-        }
-        
-        if (trimmed === 'context') {
-          console.log(chalk.cyan('\n' + getProjectContext() + '\n'));
-          ask();
-          return;
-        }
-        
-        // Model switch command
-        if (trimmed === '/model' || trimmed === 'model') {
-          await handleModelSwitch(rl, config);
-          ask();
-          return;
-        }
-
-        // Add and process with streaming
-        session.addMessage('user', trimmed);
-        
-        const spinner = ora(chalk.gray('Thinking...')).start();
-        let fullResponse = '';
-        
-        try {
-          // S01: Use async generator for true streaming
-          for await (const chunk of ai.chatStream(session.getMessages())) {
-            spinner.stop();
-            process.stdout.write(chunk);
-            fullResponse += chunk;
-          }
-          
-          console.log(); // newline after streaming
-          
-          session.addMessage('assistant', fullResponse);
-          session.truncate(20);
-          
-        } catch (error: any) {
-          spinner.fail(chalk.red(`Error: ${error.message}`));
-        }
-
-        ask();
-      });
-    };
-
-    ask();
-    
+    const repl = new REPLLoop();
+    await repl.start();
   } catch (error: any) {
     console.error(chalk.red(`\n❌ Failed to start: ${error.message}`));
     process.exit(1);
