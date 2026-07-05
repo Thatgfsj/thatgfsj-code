@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,6 +17,12 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 // repo root is one level up from tests/
 const REPO = resolve(__dirname, '..');
 const CLI = join(REPO, 'dist', 'index.js');
+
+// Read expected version dynamically from package.json so this test
+// tracks future bumps without needing edits.
+const EXPECTED_VERSION = JSON.parse(
+  readFileSync(join(REPO, 'package.json'), 'utf-8'),
+).version;
 
 // `bash -n install.sh` may not be available on Windows. Skip gracefully there.
 const HAS_BASH = (() => {
@@ -46,12 +52,12 @@ test('preflight: dist/index.js exists', () => {
 test('smoke: --version prints the package version', () => {
   const r = run(['--version']);
   assert.equal(r.status, 0, `--version should exit 0, got ${r.status}: ${r.stderr}`);
-  // Expect exactly "0.2.2"
+  // Expect exactly the package.json version (0.2.3 at the time of writing)
   assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+$/);
   assert.equal(
     r.stdout.trim(),
-    '0.2.2',
-    `--version should match package.json: got ${r.stdout.trim()}`,
+    EXPECTED_VERSION,
+    `--version should match package.json (got ${r.stdout.trim()}, expected ${EXPECTED_VERSION})`,
   );
 });
 

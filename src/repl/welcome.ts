@@ -15,65 +15,70 @@ export interface ModelInfo {
 }
 
 export class WelcomeScreen {
-  
-  // SiliconFlow 推荐模型列表 (Agent 常用)
+
+  // SiliconFlow 推荐模型列表 (2026-01 cutoff)
+  // API: OpenAI 兼容 — https://api.siliconflow.cn/v1/chat/completions
   static readonly SILICONFLOW_MODELS: ModelInfo[] = [
-    { id: 'Qwen/Qwen2.5-7B-Instruct', name: 'Qwen2.5-7B (推荐)', desc: '性价比高，适合日常编程' },
-    { id: 'Qwen/Qwen2.5-32B-Instruct', name: 'Qwen2.5-32B', desc: '更强性能，适合复杂任务' },
-    { id: 'Qwen/Qwen2.5-72B-Instruct', name: 'Qwen2.5-72B', desc: '旗舰模型' },
-    { id: 'Pro/moonshotai/Kimi-K2.5', name: 'Kimi-K2.5 (私有)', desc: 'Moonshot 强力模型' },
-    { id: 'Pro/deepseek-ai/DeepSeek-V3', name: 'DeepSeek-V3', desc: '深度求索最新模型' },
-    { id: 'Pro/deepseek-ai/DeepSeek-R1', name: 'DeepSeek-R1', desc: '推理能力强' },
-    { id: 'THUDM/glm-4-9b-chat', name: 'GLM-4-9B', desc: '智谱模型' },
-    { id: 'THUDM/glm-4-32b-chat', name: 'GLM-4-32B', desc: '智谱大模型' },
-    { id: '01-ai/Yi-1.5-34B-Chat', name: 'Yi-1.5-34B', desc: '零一万物' },
-    { id: 'microsoft/WizardLM-2-8x22B', name: 'WizardLM-2', desc: '微软开源' },
+    { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507', name: 'Qwen3-235B (推荐)', desc: '最新旗舰,综合能力强' },
+    { id: 'Qwen/Qwen3-32B',                   name: 'Qwen3-32B',        desc: '性价比高,日常编程' },
+    { id: 'Qwen/Qwen3-Coder-480B-A35B-Instruct', name: 'Qwen3-Coder-480B', desc: '代码专用,最强' },
+    { id: 'Qwen/Qwen3-Coder-30B-A3B-Instruct', name: 'Qwen3-Coder-30B',  desc: '代码专用,性价比' },
+    { id: 'Qwen/Qwen2.5-72B-Instruct',         name: 'Qwen2.5-72B',      desc: '上一代旗舰' },
+    { id: 'Pro/moonshotai/Kimi-K2-Instruct',   name: 'Kimi-K2',          desc: 'Moonshot 200B 长上下文' },
+    { id: 'Pro/deepseek-ai/DeepSeek-V3.2',     name: 'DeepSeek-V3.2',    desc: '深度求索最新' },
+    { id: 'Pro/deepseek-ai/DeepSeek-R1',       name: 'DeepSeek-R1',      desc: '强推理,适合复杂调试' },
+    { id: 'THUDM/glm-4-9b-chat',               name: 'GLM-4-9B',         desc: '智谱 9B 轻量' },
+    { id: 'baidu/ERNIE-4.5-300B-A47B',         name: 'ERNIE-4.5',        desc: '百度文心旗舰' },
   ];
 
-  // MiniMax 模型
+  // MiniMax 模型 (Anthropic API 兼容)
   static readonly MINIMAX_MODELS = [
-    { id: 'MiniMax-M2.5', name: 'MiniMax-M2.5 (推荐)', desc: 'Agent 能力最强' },
-    { id: 'MiniMax-M2.1', name: 'MiniMax-M2.1', desc: '稳定版本' },
+    { id: 'MiniMax-M3',          name: 'MiniMax-M3 (推荐)',    desc: '代号 M3,2026 默认模型' },
+    { id: 'MiniMax-M2.5',        name: 'MiniMax-M2.5',         desc: '上一代旗舰' },
+    { id: 'MiniMax-M2.1',        name: 'MiniMax-M2.1',         desc: '稳定版本' },
   ];
 
   // OpenAI 模型
   static readonly OPENAI_MODELS = [
-    { id: 'gpt-4o-mini', name: 'GPT-4o-mini (推荐)', desc: '性价比高' },
-    { id: 'gpt-4o', name: 'GPT-4o', desc: '最新旗舰' },
-    { id: 'gpt-4-turbo', name: 'GPT-4-Turbo', desc: '强性能' },
+    { id: 'gpt-4.1-mini',            name: 'GPT-4.1-mini (推荐)', desc: '性价比最高' },
+    { id: 'gpt-4.1',                 name: 'GPT-4.1',             desc: '最新通用旗舰' },
+    { id: 'gpt-4o',                  name: 'GPT-4o',              desc: '多模态旗舰' },
+    { id: 'o4-mini',                 name: 'o4-mini',             desc: '推理加强' },
+    { id: 'gpt-5',                   name: 'GPT-5',               desc: '下一代旗舰(若可用)' },
   ];
 
   // Anthropic 模型
   static readonly ANTHROPIC_MODELS = [
-    { id: 'claude-3-haiku-20240307', name: 'Claude-3-Haiku (推荐)', desc: '快速响应' },
-    { id: 'claude-3.5-sonnet-20241022', name: 'Claude-3.5-Sonnet', desc: '最新旗舰' },
-    { id: 'claude-3-opus-20240229', name: 'Claude-3-Opus', desc: '最强性能' },
+    { id: 'claude-haiku-4-5-20251001', name: 'Claude-Haiku-4.5 (推荐)', desc: '快速响应,Agent 友好' },
+    { id: 'claude-sonnet-4-5-20251001', name: 'Claude-Sonnet-4.5',       desc: '主力旗舰' },
+    { id: 'claude-opus-4-1-20251001',  name: 'Claude-Opus-4.1',          desc: '最强推理' },
   ];
 
   // Gemini 模型
   static readonly GEMINI_MODELS = [
-    { id: 'gemini-1.5-flash-8b', name: 'Gemini-1.5-Flash-8B (推荐)', desc: '免费快速' },
-    { id: 'gemini-1.5-flash', name: 'Gemini-1.5-Flash', desc: '性价比高' },
-    { id: 'gemini-1.5-pro', name: 'Gemini-1.5-Pro', desc: '最新旗舰' },
+    { id: 'gemini-2.5-flash',   name: 'Gemini-2.5-Flash (推荐)', desc: '免费快速' },
+    { id: 'gemini-2.5-pro',     name: 'Gemini-2.5-Pro',          desc: '最新旗舰' },
+    { id: 'gemini-2.0-flash',   name: 'Gemini-2.0-Flash',        desc: '上一代快速' },
   ];
 
   // Kimi 模型 (Moonshot AI)
   static readonly KIMI_MODELS = [
-    { id: 'moonshot-v1-8k', name: 'Moonshot-V1-8K (推荐)', desc: '日常编程' },
-    { id: 'moonshot-v1-32k', name: 'Moonshot-V1-32K', desc: '更长上下文' },
-    { id: 'moonshot-v1-128k', name: 'Moonshot-V1-128K', desc: '超长上下文' },
+    { id: 'moonshot-v1-128k',     name: 'Moonshot-V1-128K (推荐)', desc: '超长上下文' },
+    { id: 'moonshot-v1-32k',      name: 'Moonshot-V1-32K',         desc: '日常编程' },
+    { id: 'kimi-k2-instruct',     name: 'Kimi-K2',                 desc: '最新 200B MoE' },
   ];
 
   // DeepSeek 模型
   static readonly DEEPSEEK_MODELS = [
-    { id: 'deepseek-chat', name: 'DeepSeek-Chat (推荐)', desc: '性价比高' },
-    { id: 'deepseek-coder', name: 'DeepSeek-Coder', desc: '编程专用' },
+    { id: 'deepseek-chat',     name: 'DeepSeek-V3 (推荐)', desc: '日常编程,性价比高' },
+    { id: 'deepseek-coder',    name: 'DeepSeek-Coder',      desc: '编程专用' },
+    { id: 'deepseek-reasoner', name: 'DeepSeek-R1',         desc: '强推理' },
   ];
 
   // ERNIE 模型 (百度文心一言)
   static readonly ERNIE_MODELS = [
-    { id: 'ernie-4.0-8k', name: 'ERNIE-4.0-8K (推荐)', desc: '百度旗舰' },
-    { id: 'ernie-3.5-8k', name: 'ERNIE-3.5-8K', desc: '性价比高' },
+    { id: 'ernie-4.5-8k',     name: 'ERNIE-4.5-8K (推荐)', desc: '百度最新旗舰' },
+    { id: 'ernie-4.0-8k',     name: 'ERNIE-4.0-8K',        desc: '上一代旗舰' },
   ];
 
   /**

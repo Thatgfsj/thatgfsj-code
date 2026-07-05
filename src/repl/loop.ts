@@ -117,7 +117,10 @@ export class REPLLoop {
 
       // input layer 自动重置 cancel 计数,无需手动调
 
-      const userInput = result.value;
+      // Trim and unwrap accidentally-pasted quoted prompts like `""` or `''`
+      // — common when the user copy-pastes from a markdown example.
+      let userInput = result.value;
+      userInput = userInput.replace(/^["'](.*)["']$/s, '$1').trim();
       if (!userInput) continue;
 
       const handled = await this.handleCommand(userInput);
@@ -132,57 +135,74 @@ export class REPLLoop {
 
   /**
    * Handle built-in commands
+   *
+   * Accepts bare words, slash-prefixed forms (`/model`), AND Chinese aliases
+   * (`/模型`, `/提供商`, `/帮助`, `/清除`, `/退出`, `/历史`, `/工具`).
+   * The Chinese forms mirror thatgfsj-code@1.0.4 behaviour.
    */
   private async handleCommand(input: string): Promise<boolean> {
-    // Allow both bare words (mirrors REPL UI) and /slash-prefixed forms
-    // (legacy / 1.0.4 habit), e.g. `/model` or `/provider`.
-    const cmd = input.replace(/^\//, '').toLowerCase().trim();
+    // Strip leading slash and full-width slash; trim whitespace; lowercase.
+    const cmd = input
+      .replace(/^\//, '')
+      .replace(/^／/, '')
+      .toLowerCase()
+      .trim();
 
     switch (cmd) {
+      // ── Session control ────────────────────────────────────────────
       case 'exit':
       case 'quit':
+      case '退出':
       case '\\x03':
         this.output.printInfo('\n👋 Goodbye!');
         this.running = false;
         return true;
 
       case 'clear':
+      case '清除':
+      case '清屏':
         this.output.clear();
         this.output.printBanner();
         return true;
 
+      // ── Inspection ─────────────────────────────────────────────────
       case 'context':
+      case '上下文':
         this.showContext();
         return true;
 
       case 'history':
+      case '历史':
         this.showHistory();
         return true;
 
       case 'tools':
+      case '工具':
         this.showTools();
         return true;
 
       case 'help':
+      case '帮助':
         this.output.printHelp();
         return true;
 
       case 'models':
-        // Bare read-only listing (legacy alias for "/provider")
-        this.showProviders();
-        return true;
-
       case 'providers':
+      case '模型列表':
+      case '提供商':
+        // read-only listing
         this.showProviders();
         return true;
 
+      // ── Switching (interactive picker, actually mutates config) ────
       case 'model':
-        // Interactive picker — actually switches the model
+      case '模型':
         await this.handleModelSwitch();
         return true;
 
       case 'provider':
-        // Interactive picker — switches provider, then asks for model
+      case '提供商切换':
+      case '切换':
         await this.handleProviderSwitch();
         return true;
 
@@ -320,6 +340,19 @@ export class REPLLoop {
 
     this.output.printHeader(`🤖 /model — 切换模型 (provider: ${provider})`);
 
+    // If the active model is not in either list, surface it as a "(当前)"
+    // banner entry so the user can see what is actually configured.
+    const knownBuiltinIds = new Set(builtin.map(m => m.id));
+    const knownHistory = new Set(recents);
+    const currentIsExotic = currentModel
+      && !knownBuiltinIds.has(currentModel)
+      && !knownHistory.has(currentModel);
+
+    if (currentIsExotic) {
+      this.output.printInfo(chalk.green(`  ⮕ 当前 (非内置): ${currentModel}`));
+      this.output.printInfo('');
+    }
+
     if (recents.length > 0) {
       this.output.printInfo(chalk.yellow('  最近使用:'));
       recents.forEach((id, idx) => {
@@ -343,7 +376,7 @@ export class REPLLoop {
     this.output.printInfo(
       chalk.gray(
         '输入编号(r1-r' + recents.length + ' / 1-' + builtin.length +
-        ')、完整 model id、或直接贴一个新 id。回车保持当前。',
+        ')、完整 model id、或任意自定义 id。回车保持当前。',
       ),
     );
 

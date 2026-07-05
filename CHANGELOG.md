@@ -15,6 +15,54 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [0.2.3] - 2026-07-06
+
+### Added
+- **中文命令别名**：1.0.4 老版本支持的 `/模型`、`/提供商`、`/提供商切换`、
+  `/帮助`、`/退出`、`/清除`、`/清屏`、`/历史`、`/工具`、`/上下文`、
+  `/模型列表` 现在都被识别。同时支持全角斜杠 `／模型`。详见
+  `src/repl/loop.ts::handleCommand`。
+- **`/model`「当前」标记**：即使当前模型不在内置列表里（老配置 / 自定义 id），
+  `/model` 现在会在顶部显示一行 `⮕ 当前 (非内置): <id>`，并保留内置 / 历史
+  列表中的 `✓` 标记逻辑。
+- **3 个新单元测试**（`tests/unit-config.test.js`）：验证 0.2.3 的
+  `ConfigManager` 行为契约（不再有 silent fallback 警告、从 `CUSTOM_BASE_URL`
+  / `OPENAI_API_KEY` 派生 baseUrl、识别 8 个 provider name）。
+
+### Fixed
+- **legacy provider 名称崩溃**：0.2.2 的 `ConfigManager.resolveProvider` 对
+  任何不在白名单的 provider（如 1.0.4 的 `custom_openai`）会强行 overwrite
+  成 `siliconflow` 并打印 `Unknown provider: custom_openai, falling back to
+  siliconflow` 警告，结果用户的 `MiniMax-M3` 等真实配置被悄悄丢掉，下一个
+  AI 请求直接撞上 401。0.2.3 改为：
+  - 保留用户的 provider id 不动。
+  - 从 `CUSTOM_BASE_URL` / `BASE_URL` 环境变量派生 baseUrl，如果都没有则
+    退到 `https://api.openai.com/v1`。
+  - API Key 从 `OPENAI_API_KEY` / `CUSTOM_API_KEY` / config 里取。
+  - 不再打「Unknown provider」警告。
+- **空 prompt / 引号包裹 prompt**：`REPLInput.prompt()` 收到被意外粘贴成
+  `""` 或 `''` 的内容时，0.2.3 会在 loop 里剥离外层引号再判断是否为空。
+  这避免了用户从 markdown 复制示例时把空串丢给 LLM（命中 `[API Error: 401]`）。
+- **DEFAULT_CONFIG 太老**：`ConfigManager` 默认从 `Qwen2.5-7B-Instruct`
+  升级到 `Qwen3-235B-A22B-Instruct-2507`（或 `Qwen3-32B` 作为
+  `PROVIDERS.siliconflow.defaultModel`）。
+
+### Changed
+- **刷新内置模型列表**（`src/repl/welcome.ts` + `src/core/types.ts`）：
+  - SiliconFlow：Qwen3-235B / Qwen3-Coder-480B / Kimi-K2 / DeepSeek-V3.2 /
+    ERNIE-4.5 等。
+  - MiniMax：M3（推荐）、M2.5、M2.1（默认从 `MiniMax-M2.5` 升到 `MiniMax-M3`）。
+  - OpenAI：GPT-4.1 / GPT-4.1-mini / GPT-4o / o4-mini / GPT-5。
+  - Anthropic：Claude-Haiku-4.5 / Claude-Sonnet-4.5 / Claude-Opus-4.1。
+  - Gemini：Gemini-2.5-Flash / Gemini-2.5-Pro / Gemini-2.0-Flash。
+  - Kimi：Moonshot-V1-128K / Kimi-K2。
+  - DeepSeek：DeepSeek-V3（带 R1 推理）。
+  - ERNIE：ERNIE-4.5-8K（百度最新旗舰）。
+- **`PROVIDERS` 默认模型**全部更新到 2025+ 推荐（Qwen3-32B、MiniMax-M3、
+  GPT-4.1-mini、Claude-Haiku-4.5、Llama3、Gemini-2.5-Flash、Kimi-K2 等）。
+
+---
+
 ## [0.2.2] - 2026-07-06
 
 ### Added

@@ -226,43 +226,43 @@ export const PROVIDERS = {
   minimax: {
     name: 'MiniMax',
     baseUrl: 'https://api.minimax.io/anthropic/v1',
-    defaultModel: 'MiniMax-M2.5',
+    defaultModel: 'MiniMax-M3',
     envKeys: ['MINIMAX_API_KEY', 'OPENAI_API_KEY']
   },
   siliconflow: {
     name: 'SiliconFlow (硅基流动)',
     baseUrl: 'https://api.siliconflow.cn/v1',
-    defaultModel: 'Qwen/Qwen2.5-7B-Instruct',
+    defaultModel: 'Qwen/Qwen3-32B',
     envKeys: ['SILICONFLOW_API_KEY', 'OPENAI_API_KEY']
   },
   openai: {
     name: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-4o-mini',
+    defaultModel: 'gpt-4.1-mini',
     envKeys: ['OPENAI_API_KEY']
   },
   anthropic: {
     name: 'Anthropic',
     baseUrl: 'https://api.anthropic.com/v1',
-    defaultModel: 'claude-3-haiku-20240307',
+    defaultModel: 'claude-haiku-4-5-20251001',
     envKeys: ['ANTHROPIC_API_KEY']
   },
   ollama: {
     name: 'Ollama (Local)',
     baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-    defaultModel: 'llama2',
+    defaultModel: 'llama3',
     envKeys: []
   },
   gemini: {
     name: 'Google Gemini',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    defaultModel: 'gemini-1.5-flash',
+    defaultModel: 'gemini-2.5-flash',
     envKeys: ['GEMINI_API_KEY']
   },
   kimi: {
     name: 'Kimi (Moonshot AI)',
     baseUrl: 'https://api.moonshot.cn/v1',
-    defaultModel: 'moonshot-v1-8k',
+    defaultModel: 'kimi-k2-instruct',
     envKeys: ['KIMI_API_KEY', 'MOONSHOT_API_KEY']
   },
   deepseek: {
@@ -274,7 +274,7 @@ export const PROVIDERS = {
   ernie: {
     name: 'Baidu ERNIE (文心一言)',
     baseUrl: 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1',
-    defaultModel: 'ernie-4.0-8k',
+    defaultModel: 'ernie-4.5-8k',
     envKeys: ['ERNIE_API_KEY', 'BAIDU_API_KEY']
   }
 } as const;
