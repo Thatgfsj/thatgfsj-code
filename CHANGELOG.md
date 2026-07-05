@@ -15,7 +15,7 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
-## [0.3.0] - 2026-07-06
+## [0.3.1] - 2026-07-06
 
 ### Added
 - **「已保存的模型」作为 `/model` 主视图**：0.2.x 进 `/model` 先列内置模型，
@@ -51,7 +51,7 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
     note?: string;         // 备注（如 provider id、quant 说明等）
   }
   ```
-- **6 个新单元测试**（`tests/unit-wizard.test.js`）：覆盖 v0.2.x → v0.3.0
+- **6 个新单元测试**（`tests/unit-wizard.test.js`）：覆盖 v0.2.x → v0.3.x
   history 形状的透明迁移、`appendSavedModel` 大小写不敏感去重 + canonical
   casing 保留、`replaceSavedModel` 单条更新、`SavedModel` 形状 JSON 往返。
 
@@ -59,6 +59,9 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 - **appendSavedModel casing**：之前大小写不一致的同一模型会被当成两条；
   现在若已经存了 `Qwen3-32B`，再次输入 `qwen3-32b` 仍然只保留 `Qwen3-32B`
   （原始拼写规范）。
+
+> ⚠️ 上游 npm 上 `0.3.0` 已经被 1.0.4 时代占用过，因此本次发布使用 `0.3.1`，
+> 仅是 patch 编号变化，feature 内容就是上面这份。
 
 ---
 
