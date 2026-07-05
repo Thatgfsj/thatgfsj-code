@@ -208,18 +208,21 @@ export class REPLOutput {
    */
   printHelp(): void {
     console.log(`
-${chalk.cyan('Commands:')}
-  ${chalk.gray('exit, Ctrl+C')}  - Exit the REPL
-  ${chalk.gray('clear')}           - Clear screen
-  ${chalk.gray('context')}          - Show project context
-  ${chalk.gray('history')}          - Show command history
-  ${chalk.gray('tools')}            - List available tools
-  ${chalk.gray('help')}            - Show this help
+${chalk.cyan('命令 / Commands:')}
+  ${chalk.gray('/help  帮助  /退出')}                       - 显示帮助 show this help
+  ${chalk.gray('/clear  清屏')}                            - 清屏 clear screen
+  ${chalk.gray('/context  上下文')}                        - 显示项目上下文 context
+  ${chalk.gray('/history  历史')}                          - 历史 history
+  ${chalk.gray('/tools  工具')}                            - 列出工具 list tools
+  ${chalk.gray('/models  模型列表 / /providers  提供商')}  - 只读列出 provider+model
+  ${chalk.gray('/model   模型')}                           - 切换 / 管理模型(主视图:已保存的模型 + 添加入口)
+  ${chalk.gray('/provider  提供商切换')}                   - 切换 provider,顺便跟到 /model
+  ${chalk.gray('/edit  修改 / 编辑')}                      - 修改已保存模型的 ctx / thinking / note
 
-${chalk.cyan('Tips:')}
-  • Use ${chalk.gray('\\')} at end for multiline input
-  • Use ${chalk.gray('↑/↓')} for command history
-  • Use ${chalk.gray('Tab')} for auto-complete
+${chalk.cyan('提示 / Tips:')}
+  • ${chalk.gray('/模型 / /帮助 / /退出')} 等中文命令别名都已支持 — 中文别名直接生效
+  • 用 ${chalk.gray('/退出 / exit')} 或 ${chalk.gray('Ctrl+C')} 退出 REPL
+  • ${chalk.gray('↑/↓')} 翻历史 · ${chalk.gray('\\')} 多行输入
     `);
   }
 }

@@ -208,6 +208,7 @@ export class REPLLoop {
       case 'providers':
       case '模型列表':
       case '提供商':
+      case '供应商':
         // read-only listing
         this.showProviders();
         return true;
@@ -215,17 +216,22 @@ export class REPLLoop {
       // ── Switching (interactive picker, actually mutates config) ────
       case 'model':
       case '模型':
+      case '选择模型':
         await this.handleModelSwitch();
         return true;
 
       case 'provider':
       case '提供商切换':
       case '切换':
+      case '切换提供商':
         await this.handleProviderSwitch();
         return true;
 
       case 'edit':
       case '修改':
+      case '修改模型':
+      case '编辑模型':
+      case 'editmodel':
         // /edit [n] — directly jump to the edit wizard. With no arg,
         // shows the saved-model list first (same as /model).
         await this.runEditShortcut();
@@ -393,26 +399,26 @@ export class REPLLoop {
       this.output.printInfo(chalk.gray('  (尚无保存的模型)'));
     }
 
-    // 添加 / 编辑 提示
+    // 添加 / 编辑 提示 (中英对照)
     this.output.printInfo('');
-    this.output.printInfo(chalk.yellow('  操作:'));
-    this.output.printInfo(`  a. ${chalk.cyan('+ 添加新模型')}    (完整向导: provider → key → url → 名称 → ctx → thinking)`);
+    this.output.printInfo(chalk.yellow('  操作 / Actions:'));
+    this.output.printInfo(`  a. ${chalk.cyan('+ 添加新模型 / Add new model')}    (完整向导: provider → key → url → 名称 → ctx(M) → thinking)`);
     if (recents.length > 0) {
-      this.output.printInfo(`  e. ${chalk.cyan('edit <编号>')}     (修改已保存模型的 ctx / thinking / 备注)`);
+      this.output.printInfo(`  e. ${chalk.cyan('edit <编号> / 修改 <编号>')}   (修改 ctx / thinking / 备注)`);
     }
     if (builtin.length > 0) {
-      this.output.printInfo(chalk.gray(`  或输入编号 1-${recents.length} 切换到对应已保存模型;直接回车保持当前。`));
+      this.output.printInfo(chalk.gray(`  或直接输入编号 1-${recents.length} 切换到对应已保存模型;回车保持当前。`));
     }
 
     const choice = await this.askOnce(
-      chalk.cyan('\nmodel > ') + (recents[0]?.id ? `${recents[0].id} (1) / a / e / id` : 'a / id'),
+      chalk.cyan('\n模型 / model > ') + (recents[0]?.id ? `${recents[0].id} (1) / a 添加 / e 修改 / 输入id` : 'a 添加 / 输入 id'),
     );
     if (choice === null) {
-      this.output.printInfo(chalk.gray('(已取消,保持当前模型)'));
+      this.output.printInfo(chalk.gray('(已取消 / cancelled,保持当前模型)'));
       return;
     }
     if (choice === '') {
-      this.output.printInfo(chalk.gray('(保持当前模型)'));
+      this.output.printInfo(chalk.gray('(保持当前模型 / keep current)'));
       return;
     }
 
@@ -787,9 +793,9 @@ export class REPLLoop {
     this.output.printInfo('');
     this.output.printInfo('输入编号或 provider id,直接回车保持当前。');
 
-    const choice = await this.askOnce(chalk.cyan('provider > ') + (currentConfig.provider ?? ''));
+    const choice = await this.askOnce(chalk.cyan('提供商 / provider > ') + (currentConfig.provider ?? ''));
     if (choice === null) {
-      this.output.printInfo(chalk.gray('(已取消,保持当前 provider)'));
+      this.output.printInfo(chalk.gray('(已取消 / cancelled,保持当前 provider)'));
       return;
     }
 
@@ -799,7 +805,7 @@ export class REPLLoop {
       providers.find(p => p.id === choice);
 
     if (!pickedProvider) {
-      this.output.printError(`未识别: "${choice}". 保持当前 provider。`);
+      this.output.printError(`未识别 / not found: "${choice}". 保持当前 provider。`);
       return;
     }
 
@@ -871,16 +877,17 @@ export class REPLLoop {
       this.output.printWarning('没有已保存的模型。先用 /model 添加几条。');
       return;
     }
-    this.output.printHeader('✏️  /edit — 修改已保存模型');
+    this.output.printHeader('✏️  /edit / 修改 — 修改已保存模型');
     saved.forEach((m, i) => {
       const meta = [];
       if (m.ctx) meta.push(`ctx=${m.ctx}M`);
       if (m.thinking) meta.push(`think=${m.thinking}`);
+      if (m.note) meta.push(`note=${m.note}`);
       const extra = meta.length ? chalk.gray(`  [${meta.join(' · ')}]`) : '';
       this.output.printInfo(`  ${(i + 1).toString().padStart(2)}. ${chalk.cyan(m.id)}${extra}`);
     });
     this.output.printInfo('');
-    const arg = await this.askOnce('  编号或完整 id: ');
+    const arg = await this.askOnce('  编号或完整 id / number or id: ');
     if (arg === null) return;
     const trimmed = arg.trim();
     let target: SavedModel | null = null;
@@ -890,7 +897,7 @@ export class REPLLoop {
       target = saved.find(m => m.id.toLowerCase() === trimmed.toLowerCase()) ?? null;
     }
     if (!target) {
-      this.output.printError(`未识别: "${trimmed}".`);
+      this.output.printError(`未识别 / not found: "${trimmed}".`);
       return;
     }
     await this.runEditModelWizard(target);

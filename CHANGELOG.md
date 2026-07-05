@@ -15,6 +15,25 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.0.0] - 2026-07-06
+
+> ℹ️ **版本号说明**：之前 v0.3.1 是首个正式 0.3.x 发布，但 npm 页面显示
+> `thatgfsj-code` 的最新版本依然是它（每天只有几个下载），原因是上游老
+> `thatgfsj-code` 在 npm 历史里占了 0.3.0 之前的全部号段（含 1.0.4）。
+> 如果继续发 0.3.x patch，新用户 `npm install -g thatgfsj-code` 时会
+> 默认拉取 `latest` tag 指向的版本——v0.3.1 已经把 `latest` 指过来，但
+> 从 semver 直观性看，「2.0.0」更准确地表达"我们这一支新主线已经有
+> 完整的 v0.3.x 功能集（wizard + 自定义 provider + 中文化）"，所以本次
+> 直接 jump。后续所有改动遵循这份 contract。
+
+### Changed
+- **版本号跳跃** `0.3.1 → 2.0.0`，原因如上。
+- **双语文案** `/model` 主提示、`/edit` 列表、`/provider` 选择、REPL
+  `help()` 都改成 `中文 / English` 双语对照。新增中文命令别名：
+  `选择模型`、`修改模型`、`编辑模型`、`供应商`、`切换提供商`。
+
+---
+
 ## [0.3.1] - 2026-07-06
 
 ### Added
@@ -60,8 +79,7 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
   现在若已经存了 `Qwen3-32B`，再次输入 `qwen3-32b` 仍然只保留 `Qwen3-32B`
   （原始拼写规范）。
 
-> ⚠️ 上游 npm 上 `0.3.0` 已经被 1.0.4 时代占用过，因此本次发布使用 `0.3.1`，
-> 仅是 patch 编号变化，feature 内容就是上面这份。
+> ⚠️ 上游 npm 上 `0.3.0` 已经被 1.0.4 时代占用过，因此本批次最终发布为 `0.3.1`。
 
 ---
 
