@@ -4,6 +4,78 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.8 / 产品 0.4.5] - 2026-07-06  - 边界测试驱动的 5 处修复
+
+> 双版本号方案:
+>
+> | 位置 | 版本 | 含义 |
+> |---|---|---|
+> | `package.json` `"version"` | `2.2.8` | npm 包版本,正常递增 (+0.0.1) |
+> | `src/cmd/index.tsx` `.version(...)` | `0.4.5` | **产品版本** (`gfcode --version` 看到的) |
+
+### Fixed (边界测试 `tests/edge-*.mjs` 捕获的真实 bug)
+
+**Bug 1: ToolCall 在 `result === null` 时误渲染** — 旧代码
+`tool.result !== undefined ? ... : null` 把 `null` 当有效结果,空字符串
+被显示。改成 `tool.result !== undefined && tool.result !== null`,
+`null` 现在进入 pending 状态,显示 ⏳ running。
+
+**Bug 2: `SessionManager.truncate(N)` 不生效** — compactor 的
+`preserveRecent` 默认 10,比 `maxMessages` 大,所以 `truncate(2)`
+触发 compact 时,`others.length <= preserveRecent` 分支返回原消息。
+改成 `truncate(N)` 时同步 `preserveRecent = N - 1`,让 max 边界真
+的生效。
+
+**Bug 3: thinking 正则漏掉 `<thinking>` delimiter** — 用户实际会话
+里模型用的是 `<thinking>...</thinking>` 不是 `<<<think>...</think>`。
+加上 `<thinking>` / `<THINK>` / `[think]` 三种额外格式,总共 6 个
+delimiter。
+
+**Bug 4: pollution 过滤 STRONG 模式过宽** — `/\[已中断\]/` 在消息
+**任何位置** 都触发 drop,导致 300 字的中段提到这个标记的合法
+解释型消息被误删。改成所有 STRONG 也受 length/question/temporal
+三个门控,长消息中段出现的引用不会被误杀。
+
+**Bug 5: 1.0.4 源码里没有 `npm test` script** — `prepublishOnly`
+引用了它,但 1.0.4 tarball 缺这个 script,导致 release 后用户跑
+`npm test` 会失败。加上 npm test 聚合脚本 + `prepublishOnly`
+显式跑 build + test。
+
+### Added
+
+- **5 套边界测试** (`tests/edge-*.mjs`),共 **118 个用例**,覆盖
+  - thinking compression: 嵌套 delimiter、无 closing tag、大小写、
+    whitespace-only、超长输入、混合 `bcdf` (Case O)
+  - pollution filter: 大小写、unicode 变种、`?` / 中文 `？` 时间
+    副词、`null byte`、markdown 装饰
+  - ToolCall 渲染: `null` vs `undefined`, `\\r\\n`, 10000 字符
+    单行,边界 8/9 行
+  - SessionManager: 空 user msg、1MB msg、`getMessages()` 不可变性、
+    `truncate(N)` 边界
+  - CLI 参数: -V, --version, -h, --show-thinking, -m, -i, 1000 char
+    prompt, unicode prompt, 含 shell 元字符的 prompt
+- **`npm test`** 脚本 (聚合 8 套测试, 181 / 181 pass)
+- **`prepublishOnly`** (build + test,确保发布前必过)
+- **`tests/` 加入 `.gitignore`** — 之前的 tarball 误把 dev-time
+  smoke 测试发到 npm 了
+
+### Test Summary
+
+```
+smoke-thinking:    28 / 28  pass
+smoke-tool:        18 / 18  pass
+smoke-pollution:   17 / 17  pass
+edge-thinking:     28 / 28  pass
+edge-tool:         25 / 25  pass
+edge-pollution:    23 / 23  pass
+edge-session:      27 / 27  pass
+edge-cli:          15 / 15  pass
+                  ────────────────
+total:           181 / 181  pass
+```
+
+---
+
 ## [2.2.7 / 产品 0.4.4] - 2026-07-06  - 烟囱测试驱动的 anti-pollution 过滤收紧
 
 > 双版本号方案:

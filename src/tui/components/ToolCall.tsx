@@ -42,7 +42,12 @@ function truncateOutput(output: string, maxLines = 8): { text: string; truncated
 
 export function ToolCall({ tool, width }: Props) {
   const label = formatToolName(tool.name, tool.args);
-  const result = tool.result !== undefined ? truncateOutput(tool.result) : null;
+  // v2.2.7 edge: treat null same as undefined (both mean "still
+  // running"). Previous check `result !== undefined` would render
+  // null as an empty string output, causing confusion.
+  const result = (tool.result !== undefined && tool.result !== null)
+    ? truncateOutput(tool.result)
+    : null;
 
   return (
     <Box flexDirection="column" marginBottom={0} paddingLeft={1}>

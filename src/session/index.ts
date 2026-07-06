@@ -40,17 +40,18 @@ const POLLUTION_WEAK: RegExp[] = [
 
 function looksPolluted(content: string): boolean {
   if (!content) return false;
-  if (POLLUTION_STRONG.some(p => p.test(content))) return true;
-  // WEAK pattern gate:
-  //   - Message must be short (model got cut off mid-stream, so it
-  //     can't be long)
-  //   - Message must NOT end with '?' (questions are user complaints
-  //     about past behavior, not pollution)
-  //   - Message must NOT contain "last time" / "earlier" / "before"
-  //     (temporal references indicate user discussing past behavior)
+  // Common gates (apply to both tiers):
+  //   - Length: model got cut off mid-stream → pollution is short.
+  //     A long message with [已中断] in the middle is the model
+  //     legitimately referencing the marker, not pollution.
+  //   - Question: ends with '?' → user complaining about past behavior.
+  //   - Temporal: contains "last time" / "earlier" / etc. → past tense.
   if (content.length >= 200) return false;
   if (/\?\s*$/.test(content.trim())) return false;
   if (/\b(last time|earlier|before|previously|yesterday)\b/i.test(content)) return false;
+  // STRONG markers — bracketed truncation markers, unambiguous.
+  if (POLLUTION_STRONG.some(p => p.test(content))) return true;
+  // WEAK markers — bare "response truncated" phrases.
   if (POLLUTION_WEAK.some(p => p.test(content))) return true;
   return false;
 }
@@ -134,8 +135,16 @@ export class SessionManager {
 
   truncate(maxMessages?: number): void {
     if (maxMessages) {
+      // v2.2.7 edge fix: preserveRecent must be <= maxMessages - 1,
+      // otherwise the compactor's "always keep recent N" branch
+      // overrides the trim and no messages actually get dropped.
+      // Set preserveRecent to maxMessages-1 so anything beyond the
+      // last maxMessages-1 user/assistant msgs gets summarized.
       this.maxMessages = maxMessages;
-      this.compactor = new ContextCompactor({ maxMessages });
+      this.compactor = new ContextCompactor({
+        maxMessages,
+        preserveRecent: Math.max(1, maxMessages - 1),
+      });
     }
     const { compacted } = this.compactor.compact(this.messages);
     this.messages = compacted;

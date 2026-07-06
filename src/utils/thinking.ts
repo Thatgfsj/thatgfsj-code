@@ -44,8 +44,11 @@ export interface ThinkingSplit {
  */
 const THINKING_PATTERNS: RegExp[] = [
   /<think>[\s\S]*?<\/think>/gi,
+  /<thinking>[\s\S]*?<\/thinking>/gi,
   /<reasoning>[\s\S]*?<\/reasoning>/gi,
+  /<THINK>[\s\S]*?<\/THINK>/gi,        // v2.2.7 edge: case variant
   /\[THINK\][\s\S]*?\[\/THINK\]/gi,
+  /\[\/?think\]/gi,                    // bare [think] / [/think] (rare)
 ];
 
 export function splitThinking(content: string): ThinkingSplit {

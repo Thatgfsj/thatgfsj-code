@@ -1,6 +1,6 @@
 {
   "name": "thatgfsj-code",
-  "version": "2.2.7",
+  "version": "2.2.8",
   "description": "Thatgfsj Code - AI Coding Assistant",
   "main": "dist/cmd/index.js",
   "type": "module",
@@ -12,7 +12,10 @@
     "build": "tsc",
     "start": "node dist/cmd/index.js",
     "dev": "tsc && node dist/cmd/index.js",
-    "link": "npm link"
+    "link": "npm link",
+    "test": "node tests/smoke-thinking.mjs && node tests/smoke-tool.mjs && node tests/smoke-pollution.mjs && node tests/edge-thinking.mjs && node tests/edge-tool.mjs && node tests/edge-pollution.mjs && node tests/edge-session.mjs && node tests/edge-cli.mjs",
+    "test:single": "node tests/",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "ai",
