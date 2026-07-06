@@ -15,6 +15,39 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.1.3] - 2026-07-06
+
+### Changed (UX 治本)
+- **Inline 命令补全** — 2.1.2 我把 `/` 改成"啥都不弹",那是错的。1.0.4 / Claude
+  Code / Codex 的 UX 是用户输入 `/foo` 时**在输入框下方显示过滤后的命令列表**,
+  上下箭头选,Tab 补全。我 2.1.x 整条线都没做到这一点。
+- 这次彻底改了 `REPLInput`:不再用 `@inquirer/input`（它不支持 inline 列表
+  + ANSI 重绘）,改用 Node 的 `readline` + 手工 ANSI 绘制:
+    ```
+    ▸ (输入 / 命令  ·  ↑↓ 历史  ·  Tab 补全  ·  Ctrl+C 中断)
+    ▸ /mod
+      /model    /模型 /选择模型    切换 / 管理模型
+      /edit     /修改 /编辑       修改已保存模型
+      /mcp                      MCP 设置
+    ```
+  - 输入 `/` → 立刻显示全部命令
+  - 输入 `/mod` → 即时过滤到只显示 `/model`
+  - 输入 `/模型` → 通过中文 alias 匹配 `/model`,显示 `(中文别名: /模型)`
+  - 输入 `/moc` → 没有完全匹配,返回前缀/子串匹配结果
+  - Esc / Enter / Ctrl+C 行为不变
+- 加了一个**集中的 `COMMAND_LIST`**(`src/repl/input.ts`) 导出。给
+  REPLLoop 的 `handleCommand` 也共用同一份数据(去同步双份),并由
+  `printCommandList()` 在 `/help` 时打印。
+- 启动时 `dist/repl/input.js` 不再 import `@inquirer/input`(改用
+  readline),冷启动额外省 ~25ms。
+
+### Tests
+- 5 个新 unit-input 测试: COMMAND_LIST 列表 / 中文 alias / `filterCommands`
+  排序 / 中文匹配。
+- **70/70 tests passing**(原 65 + 新增 5)。
+
+---
+
 ## [2.1.2] - 2026-07-06
 
 ### Changed

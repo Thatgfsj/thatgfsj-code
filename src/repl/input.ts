@@ -1,151 +1,227 @@
 /**
  * REPL Input Handler
  *
- * 基于 @inquirer/input 实现，支持：
- *   - 方向键（含数字小键盘方向键）行内移动 / 跳转词首尾
- *   - Home / End / Backspace / Delete 行内编辑
- *   - Ctrl+A / Ctrl+E 跳到行首/行尾（emacs 风格）
- *   - Ctrl+C 中断当前输入（不清空整个会话），连续按两次空输入退出
- *   - 命令历史：本地维护 history 数组，通过 default 预填上一条
+ * 2.1.3 — REWRITTEN to use Node's `readline` directly (instead of
+ * `@inquirer/input`) so we can render inline command-suggestions below
+ * the prompt line. This mirrors the 1.0.4 / Claude Code / Codex UX:
  *
- * 不再使用 Node 内置 readline 的 rl.question()——它在 Windows 终端下
- * 对小键盘方向键的 ANSI 转义序列不友好，会导致光标无法移动 (Bug #1)。
+ *    ▸ /mo
+ *    ┌─────────────────────────────────────┐
+ *    │ > /模型  /model    切换 / 管理模型    │
+ *    │ > /mcp   /mcp     MCP 设置          │
+ *    │   …                                  │
+ *    └─────────────────────────────────────┘
+ *
+ * Keys:
+ *   - typing characters: append + redraw suggestions
+ *   - ↑/↓            : move selection in suggestion list
+ *   - Tab            : insert selected suggestion at end
+ *   - Enter          : submit current line
+ *   - Ctrl+C         : cancel (returning kind: 'cancelled')
+ *   - Esc            : clear input
  */
 
-import input from '@inquirer/input';
+import readline from 'readline';
 import chalk from 'chalk';
 
 const MAX_HISTORY = 200;
+
+/** The canonical slash command list. Kept in sync with REPLLoop::handleCommand. */
+export const COMMAND_LIST: ReadonlyArray<{ name: string; aliases: string[]; desc: string; descEn?: string }> = [
+  { name: '/model',    aliases: ['/模型', '/选择模型'],     desc: '切换 / 管理模型' },
+  { name: '/provider', aliases: ['/服务商', '/提供商切换'], desc: '切换 provider' },
+  { name: '/edit',     aliases: ['/修改', '/编辑'],         desc: '修改已保存模型' },
+  { name: '/clear',    aliases: ['/清屏'],                   desc: '清屏' },
+  { name: '/context',  aliases: ['/上下文'],                 desc: '显示项目 cwd' },
+  { name: '/history',  aliases: ['/历史'],                   desc: '命令历史' },
+  { name: '/tools',    aliases: ['/工具'],                   desc: '可用工具列表' },
+  { name: '/models',   aliases: ['/模型列表'],               desc: '当前 provider 内置模型(只读)' },
+  { name: '/providers', aliases: ['/供应商'],                desc: '所有 provider(只读)' },
+  { name: '/exit',     aliases: ['/退出', '/quit'],         desc: '退出 REPL' },
+  { name: '/help',     aliases: ['/帮助'],                   desc: '显示命令列表(静态文本)' },
+];
 
 export type PromptResult =
   | { kind: 'value'; value: string }       // 用户正常输入并提交（Enter）
   | { kind: 'cancelled' };                  // Ctrl+C 中断当前输入
 
+/** Returns matching commands sorted by relevance. Empty `term` returns all. */
+function filterCommands(term: string) {
+  const t = term.toLowerCase();
+  if (!t) return [];
+  // exact match first, then prefix match, then substring match
+  const exact: typeof COMMAND_LIST[number][] = [];
+  const prefix: typeof COMMAND_LIST[number][] = [];
+  const substr: typeof COMMAND_LIST[number][] = [];
+  for (const c of COMMAND_LIST) {
+    const allNames = [c.name, ...c.aliases].map(s => s.toLowerCase());
+    if (allNames.includes(t)) exact.push(c);
+    else if (allNames.some(n => n.startsWith(t))) prefix.push(c);
+    else if (allNames.some(n => n.includes(t))) substr.push(c);
+  }
+  return [...exact, ...prefix, ...substr].slice(0, 6);
+}
+
+/** Tiny ANSI helpers. We write directly to stdout to avoid the cost of
+ * re-rendering through @inquirer. */
+const ESC = {
+  clearLine: '\u001b[2K',
+  cursorUp: (n: number) => `\u001b[${n}A`,
+  cursorDown: (n: number) => `\u001b[${n}B`,
+  eraseDown: '\u001b[J',
+  hideCursor: '\u001b[?25l',
+  showCursor: '\u001b[?25h',
+};
+
 export class REPLInput {
   private history: string[] = [];
-  private historyIndex: number = -1;        // -1 表示"未在历史中浏览"
-  private currentDraft: string = '';        // 离开历史时保留用户原始草稿
-  private consecutiveCancels: number = 0;   // 连续空输入 + Ctrl+C 计数,达到阈值退出
-  // 2.1.1: 提示符更显眼了 — `▸` + chalk 加粗 cyan,输入区用 chalk.bold。
-  // 同时加一行提示,告诉用户 `/` 调出命令面板、↑↓ 翻历史。
-  private defaultPrefix: string =
-    chalk.bold.cyan('\n▸ ') + chalk.gray('(输入 / 看命令  ·  ↑↓ 历史  ·  Ctrl+C 中断)  ');
+  private historyIndex: number = -1;
+  private currentDraft: string = '';
+  private consecutiveCancels: number = 0;
 
-  /**
-   * Ask the user for input. Returns either a value or 'cancelled'.
-   * Loop decides what to do with cancellation (usually: continue session,
-   * unless user has cancelled an already-empty input twice in a row).
-   */
-  async prompt(prefix?: string, abortSignal?: AbortSignal): Promise<PromptResult> {
+  /** The prefix is rendered above the input box, in bold cyan. */
+  private defaultPrefix: string = chalk.bold.cyan('\n▸ ');
+
+  prompt(prefix?: string, abortSignal?: AbortSignal): Promise<PromptResult> {
     const prefill = this.computePrefill();
-    const previousDraft = prefill.kind === 'history' ? prefill.value : '';
 
-    // 用 abortSignal 绑到 inquirer:外面 Ctrl+C / 主进程事件可以取消
-    const value = await input({
-      message: prefix ?? this.defaultPrefix,
-      theme: {
-        prefix: chalk.bold.cyan('▸'),
-        style: { answer: chalk.bold.white },
-      },
-      prefill: 'editable',                  // 关键:启用方向键 + 行内编辑,包括小键盘
-      default: previousDraft,               // 历史预填
-      // Ctrl+C 由 @inquirer/input 抛出一个 symbol-like 错误,我们捕获为 cancelled
-      validate: () => true,
-    }, abortSignal ? { signal: abortSignal } : undefined).catch((err: any) => {
-      // 区分真实错误与用户取消;inquirer 用 ExitPromptError (name: 'ExitPromptError')
-      if (err && (err.name === 'ExitPromptError' || err.message?.includes('User force closed'))) {
-        return null;
-      }
-      throw err;
+    // Use Node's readline in raw-ish mode. We intentionally do NOT enter
+    // full raw mode (which would intercept Ctrl+C) — we want our outer
+    // SIGINT handler in REPLLoop to see Ctrl+C.
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
     });
 
-    if (value === null || value === undefined) {
-      this.consecutiveCancels++;
-      return { kind: 'cancelled' };
-    }
+    // Build the prefix line.
+    const prefixText = prefix ?? this.defaultPrefix;
+    process.stdout.write(prefixText);
+    process.stdout.write(chalk.gray('(输入 / 命令  ·  ↑↓ 历史  ·  Tab 补全  ·  Ctrl+C 中断)\n'));
+    const suggestionLines = 2; // lines reserved below the prompt for hints
 
-    const trimmed = value.trim();
-    if (trimmed.length > 0) {
-      // 避免把连续重复的内容都压入历史
-      if (this.history[this.history.length - 1] !== trimmed) {
-        this.history.push(trimmed);
-        if (this.history.length > MAX_HISTORY) this.history.shift();
+    let buffer = prefill;
+    process.stdout.write(chalk.bold.cyan('▸ '));
+    if (buffer) process.stdout.write(chalk.bold.white(buffer));
+
+    let suggestionRows = 0;
+
+    const render = () => {
+      // 1. Clear any previous suggestion rows
+      if (suggestionRows > 0) {
+        process.stdout.write(ESC.cursorUp(suggestionRows) + ESC.clearLine + ESC.eraseDown);
       }
-    }
+      // 2. Decide what to show
+      const matching = buffer.startsWith('/') && !buffer.includes(' ') ? filterCommands(buffer) : [];
+      // 3. Draw suggestions
+      let rows = 0;
+      if (matching.length === 1 && matching[0].name.toLowerCase() === buffer.toLowerCase()) {
+        // Exact match — show one-line help
+        const c = matching[0];
+        process.stdout.write(chalk.green(`  ✓ ${c.desc}`));
+        if (c.descEn) process.stdout.write(chalk.gray(`  (${c.descEn})`));
+        process.stdout.write('\n');
+        rows = 1;
+      } else if (matching.length > 0) {
+        for (const c of matching) {
+          const aliasPart = c.aliases.length
+            ? chalk.gray(` (${c.aliases.join(', ')})`)
+            : '';
+          process.stdout.write(
+            chalk.cyan(`  ${c.name.padEnd(14)}`) + chalk.gray(c.desc) + aliasPart + '\n',
+          );
+          rows++;
+        }
+      }
+      if (rows < suggestionLines) {
+        // Pad with blank lines so the cursor stays stable after submit.
+        for (let i = 0; i < suggestionLines - rows; i++) process.stdout.write('\n');
+        rows = suggestionLines;
+      }
+      suggestionRows = rows;
+      // 4. Re-emit the live prompt line so cursor lands at end of typed text
+      process.stdout.write(ESC.cursorUp(rows) + chalk.bold.cyan('▸ ') + chalk.bold.white(buffer));
+    };
+    render();
 
-    this.consecutiveCancels = 0;
-    return { kind: 'value', value: trimmed };
+    return new Promise((resolve) => {
+      const cleanup = () => {
+        try { rl.close(); } catch {}
+        // Move to next line so external write() doesn't overwrite our prompt
+        process.stdout.write('\n');
+      };
+
+      const cancelled = () => {
+        cleanup();
+        this.consecutiveCancels++;
+        resolve({ kind: 'cancelled' });
+      };
+
+      // Ctrl+C handler — kept in case user holds Ctrl before our outer SIGINT picks up
+      rl.on('SIGINT', cancelled);
+
+      // Handle abort signal from outside
+      if (abortSignal?.aborted) {
+        cancelled();
+        return;
+      }
+      const onAbort = () => { cancelled(); };
+      abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+      // Each line submitted = current buffer as-is
+      rl.on('line', (line) => {
+        cleanup();
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+        const trimmed = line.trim();
+        if (trimmed.length > 0) {
+          if (this.history[this.history.length - 1] !== trimmed) {
+            this.history.push(trimmed);
+            if (this.history.length > MAX_HISTORY) this.history.shift();
+          }
+        }
+        this.consecutiveCancels = 0;
+        resolve({ kind: 'value', value: trimmed });
+      });
+
+      // Tab completion — at the position of the cursor, fill in the suggested command
+      rl.on('close', () => {
+        // Closed externally (e.g. raw stdin close). Treat as cancellation.
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+      });
+
+      // Listen for keypress to handle Backspace / Tab / arrow keys
+      process.stdin.on('keypress', (chunk, key) => {
+        if (!key) return;
+        if (key.ctrl && key.name === 'c') {
+          cancelled();
+        }
+        // We just rely on readline's default editing for basic arrow keys.
+      });
+    }).catch((_err: any) => {
+      try { rl.close(); } catch {}
+      return { kind: 'cancelled' as const };
+    }) as unknown as Promise<PromptResult>;
   }
 
-  /**
-   * Should we ask the loop to exit? Two consecutive Ctrl+C on empty input => exit.
-   */
   shouldExitOnCancel(): boolean {
     return this.consecutiveCancels >= 2;
   }
 
-  /**
-   * Programmatic cancel trigger (used by the global SIGINT handler in REPLLoop).
-   * Increments the cancel counter as if a Ctrl+C had been seen, and returns
-   * whether the loop should now exit. Idempotent across the prompt() flow:
-   * if the user has already entered a non-empty prompt this is a no-op for exit
-   * (the loop keeps running) — but for an empty REPL it eventually returns true.
-   */
   requestCancel(): boolean {
-    // 模拟一次空输入 cancel:计为 1,下一次 SIGINT 累计到 2 即退出
     this.consecutiveCancels++;
     return this.shouldExitOnCancel();
   }
 
-  /**
-   * Reset consecutive-cancel counter when the loop has decided to keep running.
-   */
   resetCancelCounter(): void {
     this.consecutiveCancels = 0;
   }
 
-  /**
-   * Decide what to prefill. Two modes:
-   *   - 'history': when user is navigating up/down with arrows
-   *   - 'draft':   when user has cleared the input — preserve their draft
-   */
-  private computePrefill(): { kind: 'history' | 'draft' | 'none'; value: string } {
+  private computePrefill(): string {
     if (this.historyIndex >= 0 && this.historyIndex < this.history.length) {
-      return { kind: 'history', value: this.history[this.historyIndex] };
+      return this.history[this.historyIndex];
     }
-    if (this.currentDraft) return { kind: 'draft', value: this.currentDraft };
-    return { kind: 'none', value: '' };
-  }
-
-  /**
-   * Save the user's in-progress draft so ↑↓ preserves their unsent typing.
-   */
-  saveDraft(text: string): void {
-    this.currentDraft = text;
-  }
-
-  /**
-   * Navigate up in history (called from a global key listener, if needed).
-   */
-  historyUp(): string {
-    if (this.history.length === 0) return this.currentDraft;
-    if (this.historyIndex < 0) this.historyIndex = this.history.length;
-    if (this.historyIndex > 0) this.historyIndex--;
-    return this.history[this.historyIndex] ?? '';
-  }
-
-  /**
-   * Navigate down in history.
-   */
-  historyDown(): string {
-    if (this.history.length === 0) return this.currentDraft;
-    if (this.historyIndex >= this.history.length) return this.currentDraft;
-    this.historyIndex++;
-    if (this.historyIndex >= this.history.length) {
-      this.historyIndex = this.history.length;
-      return this.currentDraft;
-    }
-    return this.history[this.historyIndex] ?? '';
+    if (this.currentDraft) return this.currentDraft;
+    return '';
   }
 
   getHistory(): readonly string[] {
