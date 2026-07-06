@@ -28,7 +28,7 @@ process.on('unhandledRejection', (reason) => {
 program
   .name('gfcode')
   .description('Thatgfsj Code - AI Coding Assistant')
-  .version('1.0.5')
+  .version('2.2.2')
   .argument('[prompt]', 'Task to execute (omit to start interactive mode)')
   .option('-m, --model <model>', 'Specify model')
   .option('-i, --interactive', 'Force interactive mode')
