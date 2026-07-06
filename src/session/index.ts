@@ -5,12 +5,37 @@
 import type { ChatMessage } from '../types.js';
 import { ContextCompactor } from './compactor.js';
 
+/**
+ * v2.2.4 (port from v2.1.0): patterns that, if found in an assistant
+ * message, indicate the message is a truncated/aborted response that
+ * should NOT be persisted into history. Without this filter, the next
+ * turn's LLM sees the marker and starts echoing it back, creating a
+ * self-reinforcing "[已中断]" hallucination loop.
+ *
+ * Kept conservative: only matches explicit truncation markers the model
+ * itself uses, NOT general mentions in normal conversation.
+ */
+const POLLUTION_PATTERNS: RegExp[] = [
+  /^\s*\[已中断\]/m,                 // marker at line start
+  /\u5df2\u4e2d\u65ad[^\n]{0,40}/,   // '已中断' followed by short truncation context
+  /response (was )?truncated/i,
+  /output (was )?cut off/i,
+  /\[interrupted\]/i,
+];
+
+function looksPolluted(content: string): boolean {
+  if (!content) return false;
+  return POLLUTION_PATTERNS.some(p => p.test(content));
+}
+
 export class SessionManager {
   private messages: ChatMessage[] = [];
   private sessionId: string;
   private createdAt: Date;
   private compactor: ContextCompactor;
   private maxMessages: number;
+  /** v2.2.4: counter for messages dropped by the pollution filter. */
+  private droppedCount: number = 0;
 
   constructor(maxMessages = 50) {
     this.maxMessages = maxMessages;
@@ -22,6 +47,26 @@ export class SessionManager {
   addMessage(role: ChatMessage['role'], content: string, extras?: Partial<ChatMessage>): void {
     this.messages.push({ role, content, ...extras });
     this.autoCompact();
+  }
+
+  /**
+   * v2.2.4 (port from v2.1.0): same as addMessage but returns false
+   * (and skips the push) if the message content matches a known
+   * truncation/abort pollution pattern. Use this for assistant
+   * messages whose stream might have been aborted.
+   */
+  addMessageSafe(role: ChatMessage['role'], content: string, extras?: Partial<ChatMessage>): boolean {
+    if (role === 'assistant' && looksPolluted(content)) {
+      this.droppedCount++;
+      return false;
+    }
+    this.addMessage(role, content, extras);
+    return true;
+  }
+
+  /** v2.2.4: total messages dropped by addMessageSafe since session start. */
+  getDroppedCount(): number {
+    return this.droppedCount;
   }
 
   getMessages(): ChatMessage[] {

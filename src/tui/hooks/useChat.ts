@@ -95,20 +95,37 @@ export function useChat(app: App) {
         }
       }
 
-      // Save response (even if aborted, save what we have)
-      if (fullContent.trim() || currentToolCalls.length > 0) {
-        const suffix = abortRef.current ? '\n\n[已中断]' : '';
-        app.session.addMessage('assistant', fullContent + suffix);
+      // v2.2.4 (port from v2.1.0): DO NOT persist truncated assistant
+      // messages. The previous code literally wrote `'\n\n[已中断]'`
+      // as a suffix and persisted it — which is what created the
+      // hallucination loop where the next turn's LLM echoed the
+      // marker back. The fix is two-pronged:
+      //   1. Never persist when the stream was aborted (here).
+      //   2. SessionManager.addMessageSafe drops messages that match
+      //      the pollution filter as a belt-and-suspenders check
+      //      for cases where we somehow persist a polluted message.
+      const wasAborted = abortRef.current;
+      const shouldPersist = !wasAborted &&
+        (fullContent.trim() || currentToolCalls.length > 0);
+
+      if (shouldPersist) {
+        // Note: we don't re-persist currentToolCalls here — those
+        // are the TUI's local `ToolCallData[]` (just name/args),
+        // not the canonical `ToolCall[]` (with id/type/function)
+        // that the OpenAI protocol expects. The LLMService agent
+        // loop already saves them in canonical form. We just save
+        // the displayable text content for the conversation log.
+        app.session.addMessageSafe('assistant', fullContent);
       }
 
       setState(prev => ({
         ...prev,
         messages: [
           ...prev.messages,
-          ...(fullContent.trim() || currentToolCalls.length > 0
+          ...(shouldPersist
             ? [{
                 role: 'assistant' as const,
-                content: fullContent + (abortRef.current ? '\n\n[已中断]' : ''),
+                content: fullContent,
                 toolCalls: currentToolCalls.length > 0 ? currentToolCalls : undefined,
               }]
             : []),

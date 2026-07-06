@@ -83,6 +83,11 @@ export class App {
 
   /**
    * Run a single prompt (non-interactive mode)
+   *
+   * v2.2.4 (port from v2.1.0): persistence of the assistant message
+   * uses addMessageSafe, which drops the message if it contains
+   * pollution markers like "[已中断]". Without this, the next turn's
+   * LLM echoes the marker back, creating a hallucination loop.
    */
   async runPrompt(prompt: string): Promise<string> {
     this.session.addMessage('user', prompt);
@@ -94,15 +99,15 @@ export class App {
         fullResponse += chunk;
       }
     } catch (err) {
-      // Re-throw after saving partial response
-      if (fullResponse) {
-        this.session.addMessage('assistant', fullResponse);
-      }
+      // Re-throw without persisting partial response. Persisting
+      // truncated output here was the source of the [已中断] loop in
+      // v2.2.3.
       throw err;
     }
 
     console.log();
-    this.session.addMessage('assistant', fullResponse);
+    // Use addMessageSafe so a polluted message gets dropped.
+    this.session.addMessageSafe('assistant', fullResponse);
     return fullResponse;
   }
 }
