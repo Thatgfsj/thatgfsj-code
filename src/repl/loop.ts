@@ -10,6 +10,7 @@
 
 import chalk from 'chalk';
 import readline from 'readline';
+import select from '@inquirer/select';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -49,6 +50,9 @@ export class REPLLoop {
   private running: boolean = false;
   // Used to abort an in-flight AI stream when the user presses Ctrl+C twice
   private streamAbort: AbortController | null = null;
+  // Set when the user aborted the previous turn so we skip persisting the
+  // truncated assistant message — fixes the "已中断" hallucination loop.
+  private _wasAborted: boolean = false;
 
   constructor() {
     this.input = new REPLInput();
@@ -87,6 +91,7 @@ export class REPLLoop {
       if (this.streamAbort) {
         this.streamAbort.abort();
         this.streamAbort = null;
+        this._wasAborted = true;
         this.output.stopSpinner();
         this.output.printWarning('\n⏹  Generation cancelled (Ctrl+C again to exit)');
         return;
@@ -216,9 +221,12 @@ export class REPLLoop {
       // ── Switching (interactive picker, actually mutates config) ────
       case 'model':
       case '模型':
-      case '选择模型':
-        await this.handleModelSwitch();
+      case '选择模型': {
+        // /model [id] — without id, full picker; with id, direct switch.
+        const arg = input.replace(/^\/?model\s*/, '').replace(/^\/模型\s*/, '').trim();
+        await this.handleModelSwitch(arg ? { initialId: arg } : undefined);
         return true;
+      }
 
       case 'provider':
       case '提供商切换':
@@ -231,11 +239,12 @@ export class REPLLoop {
       case '修改':
       case '修改模型':
       case '编辑模型':
-      case 'editmodel':
-        // /edit [n] — directly jump to the edit wizard. With no arg,
-        // shows the saved-model list first (same as /model).
-        await this.runEditShortcut();
+      case 'editmodel': {
+        // /edit [id] — without id, full picker; with id, direct wizard.
+        const arg = input.replace(/^\/?edit\s*/, '').replace(/^\/修改\s*/, '').replace(/^\/编辑\s*/, '').trim();
+        await this.runEditShortcut(arg ? { initialId: arg } : undefined);
         return true;
+      }
 
       default:
         return false;
@@ -266,7 +275,11 @@ export class REPLLoop {
     this.streamAbort = new AbortController();
 
     try {
-      const stream = this.ai.chatStream(this.session.getMessages());
+      const stream = this.ai.chatStream(
+        this.session.getMessages(),
+        10,
+        this.streamAbort.signal,
+      );
       for await (const chunk of stream) {
         if (firstChunk) {
           // 第一个 chunk 到来,把 "Thinking..." 那行通过 ANSI 清除
@@ -292,16 +305,25 @@ export class REPLLoop {
       this.streamAbort = null;
     }
 
-    const accepted = this.session.addMessage('assistant', fullResponse);
-    if (!accepted) {
-      this.output.printWarning(
-        chalk.yellow(
-          `⚠️  上轮回复包含 "[已中断]" 等污染标记,已自动丢弃以避免循环。本次回复不会基于它继续;请重说你的问题。\n` +
-          `(本次会话已累计过滤 ${this.session.getDroppedCount()} 条污染消息)`
-        )
-      );
+    // 治本修复:被 abort 的截断响应 **不要** 写入 SessionManager。
+    // 旧版本无条件写入,导致下一轮 LLM 看到不完整对话,可能在输出里复读
+    // "[已中断]" 之类的 sentinel,从而触发 SessionManager 的 anti-pollution
+    // filter — 看起来是个 filter bug,实际是上游故障。只要不写入 truncated
+    // 响应, 就不会有"已中断"字符串进 history,filter 也只是兜底。
+    if (this.session && !this._wasAborted) {
+      const accepted = this.session.addMessage('assistant', fullResponse);
+      if (!accepted) {
+        // 真有 LLM 自己吐出"已中断"的极端情况 — 兜底过滤,不应该发生。
+        this.output.printWarning(
+          chalk.yellow(
+            `⚠️  上轮回复包含 "[已中断]" 等污染标记,已自动丢弃以避免循环。本次回复不会基于它继续;请重说你的问题。\n` +
+            `(本次会话已累计过滤 ${this.session.getDroppedCount()} 条污染消息)`
+          )
+        );
+      }
+      this.session.truncate(20);
     }
-    this.session.truncate(20);
+    this._wasAborted = false;
   }
 
   private showContext(): void {
@@ -343,19 +365,15 @@ export class REPLLoop {
   /**
    * /model — main entry point for model management.
    *
-   * 0.3.0 UX (per user feedback):
-   *   - 先看到的是**已经保存的模型** (从 ~/.thatgfsj/models.json 读)，
-   *     而不是内置 provider 列表。
-   *   - 列表末尾是 `+ 添加新模型` 选项 → 触发完整向导
-   *     (provider → api_key → baseUrl(可选,用于中转站) → model_name →
-   *      context length (M) → thinking effort)。
-   *   - 顶部有 `edit` 模式,可以重新修改任意已保存模型。
-   *   - 选某条 saved model 后立即切换并退出；按 Enter 不变。
-   *   - 兼容 0.2.x / 1.0.4 老 history:
-   *     - 字符串数组会透明迁移成 {id,...} 形式。
-   *     - 内置模型 (`Qwen3-32B` 之类) 也可选择,作为「saved + builtin」展示。
+   * 2.1 UX (per user feedback):
+   *   - 用真正的上下键选择器(@inquirer/select),而不是自由输入 + 编号记忆。
+   *     列表项一目了然,不需要用户记编号。
+   *   - 主列表是「已保存的模型」(`~/.thatgfsj/models.json`)。
+   *     末尾追加 `+ 添加新模型` / `✏ 修改已保存` / `📋 内置模型列表` 三个动作。
+   *   - 当前模型用 `⮕ ` 前缀标记在顶部,跟选项列表区分开。
+   *   - 兼容旧版 `/model <id>` / `/模型 <id>`(直接传模型名走自由路径)。
    */
-  private async handleModelSwitch(): Promise<void> {
+  private async handleModelSwitch(opts?: { initialId?: string }): Promise<void> {
     if (!this.ai || !this.session) return;
 
     const currentConfig = this.ai.getConfig();
@@ -364,93 +382,119 @@ export class REPLLoop {
     const saved = this.loadSavedModels();
     const currentModel = currentConfig.model || builtin[0]?.id;
 
-    const RECENT_LIMIT = 8;
-    // Most-recent first (exclude the current one in the listing — it's
-    // surfaced separately as the active row).
+    const RECENT_LIMIT = 12;
     const recents = [...saved]
       .sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
-      .filter(m => m.id !== currentModel)
       .slice(0, RECENT_LIMIT);
 
+    // 顶部提示
     this.output.printHeader(`🤖 /model — 切换 / 管理模型 (provider: ${provider})`);
-
-    // 当前
+    this.output.printInfo(chalk.gray('  ↑/↓ 移动,回车确认,Ctrl+C 取消  (use ↑/↓ to pick, Enter to confirm, Ctrl+C to cancel)'));
+    this.output.printInfo('');
     if (currentModel) {
       const curSaved = saved.find(m => m.id.toLowerCase() === currentModel.toLowerCase());
       const meta = curSaved && (curSaved.ctx || curSaved.thinking)
-        ? chalk.gray(`  ctx=${curSaved.ctx ?? '-'}M thinking=${curSaved.thinking ?? '-'}`)
+        ? chalk.gray(`  [ctx=${curSaved.ctx ?? '-'}M thinking=${curSaved.thinking ?? '-'}]`)
         : '';
       this.output.printInfo(chalk.green(`  ⮕ 当前: ${currentModel}`) + meta);
-    }
-
-    // 已保存
-    if (recents.length > 0) {
       this.output.printInfo('');
-      this.output.printInfo(chalk.yellow('  已保存模型:'));
-      recents.forEach((m, idx) => {
-        const meta = [];
-        if (m.ctx)    meta.push(`ctx=${m.ctx}M`);
-        if (m.thinking) meta.push(`think=${m.thinking}`);
-        const extra = meta.length ? chalk.gray(`  [${meta.join(' · ')}]`) : '';
-        this.output.printInfo(`  ${(idx + 1).toString().padStart(2)}. ${chalk.cyan(m.id)}${extra}`);
-      });
-    } else {
-      this.output.printInfo('');
-      this.output.printInfo(chalk.gray('  (尚无保存的模型)'));
     }
 
-    // 添加 / 编辑 提示 (中英对照)
-    this.output.printInfo('');
-    this.output.printInfo(chalk.yellow('  操作 / Actions:'));
-    this.output.printInfo(`  a. ${chalk.cyan('+ 添加新模型 / Add new model')}    (完整向导: provider → key → url → 名称 → ctx(M) → thinking)`);
-    if (recents.length > 0) {
-      this.output.printInfo(`  e. ${chalk.cyan('edit <编号> / 修改 <编号>')}   (修改 ctx / thinking / 备注)`);
-    }
-    if (builtin.length > 0) {
-      this.output.printInfo(chalk.gray(`  或直接输入编号 1-${recents.length} 切换到对应已保存模型;回车保持当前。`));
-    }
-
-    const choice = await this.askOnce(
-      chalk.cyan('\n模型 / model > ') + (recents[0]?.id ? `${recents[0].id} (1) / a 添加 / e 修改 / 输入id` : 'a 添加 / 输入 id'),
-    );
-    if (choice === null) {
-      this.output.printInfo(chalk.gray('(已取消 / cancelled,保持当前模型)'));
+    // === 处理 legacy `/model <id>` 调用:直接切换,不走列表 ===
+    if (opts?.initialId && opts.initialId.trim()) {
+      await this.applyModelSwitch(opts.initialId.trim());
+      this.appendSavedModel({ id: opts.initialId.trim() });
+      this.output.printSuccess(`模型已切换为: ${opts.initialId.trim()}`);
+      this.session.addMessage(
+        'system',
+        `[system: model switched to ${opts.initialId.trim()}. Continue with the task.]`,
+      );
       return;
     }
-    if (choice === '') {
+
+    // === 真正的上下键选择器 ===
+    const picked = await select({
+      message: '选择模型 / Pick a model:',
+      pageSize: Math.min(20, recents.length + 5),
+      choices: (() => {
+        const out: Array<{ name: string; value: string; description?: string }> = [];
+        if (recents.length === 0) {
+          out.push({ name: chalk.gray('(尚无保存的模型 / no saved models)'), value: '__noop__' });
+        } else {
+          for (const m of recents) {
+            const meta: string[] = [];
+            if (m.ctx) meta.push(`ctx=${m.ctx}M`);
+            if (m.thinking) meta.push(`think=${m.thinking}`);
+            if (m.note) meta.push(`note=${m.note}`);
+            const tag = m.id === currentModel ? '⮕ ' : '   ';
+            const star = m.id === currentModel ? chalk.green(' ✓ 当前') : '';
+            out.push({
+              name: `${tag}${chalk.cyan(m.id)}${chalk.gray(meta.length ? '  [' + meta.join(' · ') + ']' : '')}${star}`,
+              value: m.id,
+              description: m.id === currentModel ? '当前正在使用' : undefined,
+            });
+          }
+        }
+        out.push(
+          { name: chalk.green('+ 添加新模型 / Add new model'), value: '__add__', description: '完整向导(provider→key→url→名称→ctx→thinking)' },
+          { name: chalk.yellow('✏  修改已保存 / Edit saved'),  value: '__edit__', description: '选一条已保存的,修改 ctx / thinking / note' },
+          { name: chalk.gray('📋  内置模型列表 (只读) / Builtin list'), value: '__builtin__', description: '查看当前 provider 的内置模型(可手动复制 id)' },
+          { name: chalk.gray('─ 关闭 / Close (Esc, Ctrl+C)'), value: '__close__', description: '不切换,直接退出 /model 选择器' },
+        );
+        return out;
+      })(),
+    }).catch((err: any) => {
+      if (err?.name === 'ExitPromptError' || err?.message?.includes('User force closed')) {
+        return '__close__';
+      }
+      throw err;
+    });
+
+    if (picked === '__close__' || picked === '__noop__') {
       this.output.printInfo(chalk.gray('(保持当前模型 / keep current)'));
       return;
     }
-
-    const trimmed = choice.trim().toLowerCase();
-
-    // === 添加新模型 ===
-    if (trimmed === 'a' || trimmed === '+' || trimmed === 'add') {
+    if (picked === '__add__') {
       await this.runAddModelWizard();
       return;
     }
-
-    // === 编辑已保存 ===
-    const editMatch = /^e(?:dit)?\s*(\d+)$/.exec(trimmed);
-    if (editMatch) {
-      const k = Number.parseInt(editMatch[1], 10) - 1;
-      const target = recents[k];
-      if (!target) {
-        this.output.printError('编号超出范围。');
+    if (picked === '__edit__') {
+      await this.runEditShortcut();
+      return;
+    }
+    if (picked === '__builtin__') {
+      this.output.printHeader(`📋 内置模型 / Builtin models (provider: ${provider})`);
+      const pickBuiltin = await select({
+        message: '选择一个内置模型 / Pick a builtin model:',
+        pageSize: Math.min(20, builtin.length),
+        choices: builtin.map(m => ({
+          name: `${chalk.cyan(m.name)}  ${chalk.gray(m.id)}`,
+          value: m.id,
+          description: m.desc,
+        })),
+      }).catch((err: any) => {
+        if (err?.name === 'ExitPromptError' || err?.message?.includes('User force closed')) {
+          return '__close__';
+        }
+        return '__close__';
+      });
+      if (pickBuiltin === '__close__' || !pickBuiltin) {
         return;
       }
-      await this.runEditModelWizard(target);
+      await this.applyModelSwitch(pickBuiltin);
+      this.appendSavedModel({ id: pickBuiltin });
+      const m = builtin.find(x => x.id === pickBuiltin);
+      this.output.printSuccess(`模型已切换为: ${m?.name ?? pickBuiltin}  (${pickBuiltin})`);
+      this.session.addMessage(
+        'system',
+        `[system: model switched to ${pickBuiltin}. Continue with the task.]`,
+      );
       return;
     }
 
-    // === 数字 — 已保存模型中的第 k 个 ===
-    if (/^\d+$/.test(trimmed)) {
-      const k = Number.parseInt(trimmed, 10) - 1;
-      const target = recents[k];
-      if (!target) {
-        this.output.printError(`编号超出范围 (1-${recents.length} 或 a / edit).`);
-        return;
-      }
+    // 用户选了一个已保存模型
+    const target = saved.find(m => m.id === picked) ?? null;
+    if (target) {
       await this.applyModelSwitch(target.id);
       this.appendSavedModel(target);
       const meta = target.ctx || target.thinking
@@ -461,23 +505,11 @@ export class REPLLoop {
         'system',
         `[system: model switched to ${target.id}. Continue with the task.]`,
       );
-      return;
+    } else {
+      // 找不到这条记录(可能在多终端并发删了)— 直接切换
+      await this.applyModelSwitch(picked);
+      this.output.printSuccess(`模型已切换为: ${picked}`);
     }
-
-    // === 自由输入 id ===
-    if (trimmed === '') {
-      this.output.printInfo(chalk.gray('(保持当前模型)'));
-      return;
-    }
-
-    // 把裸输入当成 model id(兼容老的 /model Qwen3-32B 行为)
-    await this.applyModelSwitch(trimmed);
-    this.appendSavedModel({ id: trimmed });
-    this.output.printSuccess(`模型已切换为: ${trimmed}  (新保存)`);
-    this.session.addMessage(
-      'system',
-      `[system: model switched to ${trimmed}. Continue with the task.]`,
-    );
   }
 
   /**
@@ -765,8 +797,9 @@ export class REPLLoop {
   }
 
   /**
-   * /provider — interactive provider picker. After provider selection,
-   * delegates to /model so the user can also pick a new model for the new provider.
+   * /provider — interactive provider picker (2.1: uses @inquirer/select so
+   * the user doesn't need to memorise ids). After picking it delegates to
+   * /model so the user can also pick (or add) a model for the new provider.
    */
   private async handleProviderSwitch(): Promise<void> {
     if (!this.ai || !this.session) return;
@@ -786,26 +819,31 @@ export class REPLLoop {
     ];
 
     this.output.printHeader('🌐 /provider — 切换提供商');
-    providers.forEach((p, idx) => {
-      const mark = p.id === currentConfig.provider ? '  ✓' : '';
-      this.output.printInfo(`  ${(idx + 1).toString().padStart(2)}. ${p.name.padEnd(28)} ${chalk.gray(p.id)}${mark}`);
-    });
-    this.output.printInfo('');
-    this.output.printInfo('输入编号或 provider id,直接回车保持当前。');
+    this.output.printInfo(chalk.gray('  ↑/↓ 选择,回车确认,Ctrl+C 取消'));
 
-    const choice = await this.askOnce(chalk.cyan('提供商 / provider > ') + (currentConfig.provider ?? ''));
-    if (choice === null) {
-      this.output.printInfo(chalk.gray('(已取消 / cancelled,保持当前 provider)'));
+    const pickedId = await select({
+      message: '选择提供商 / Pick a provider:',
+      pageSize: Math.min(15, providers.length + 1),
+      choices: providers.map(p => ({
+        name: `${p.name}  ${chalk.gray(p.id)}${p.id === currentConfig.provider ? chalk.green('  ✓ 当前') : ''}`,
+        value: p.id,
+        description: p.id.startsWith('custom_')
+          ? '需要 baseUrl(中转站);会立刻询问 baseUrl 与 API Key'
+          : `API Key 环境变量: ${p.envKey}`,
+      })).concat([{ name: chalk.gray('─ 取消 / Cancel (Ctrl+C)'), value: '__close__', description: '不切换,直接退出 /provider 选择器' }]),
+    }).catch((err: any) => {
+      if (err?.name === 'ExitPromptError') return '__close__';
+      throw err;
+    });
+
+    if (pickedId === '__close__') {
+      this.output.printInfo(chalk.gray('(保持当前 provider / keep current)'));
       return;
     }
 
-    const idx = Number.parseInt(choice, 10);
-    const pickedProvider =
-      (Number.isInteger(idx) && providers[idx - 1]) ||
-      providers.find(p => p.id === choice);
-
+    const pickedProvider = providers.find(p => p.id === pickedId);
     if (!pickedProvider) {
-      this.output.printError(`未识别 / not found: "${choice}". 保持当前 provider。`);
+      this.output.printError(`未识别 / not found: "${pickedId}".`);
       return;
     }
 
@@ -814,15 +852,14 @@ export class REPLLoop {
       return;
     }
 
-    // 自定义 provider 走完整向导,内置 provider 只切 + 提示 key
+    // 自定义 provider: 立刻问 baseUrl + API Key
     if (pickedProvider.id.startsWith('custom_')) {
-      this.output.printInfo(chalk.cyan(`\n  切换到 ${pickedProvider.id},需要 baseUrl:`));
-      const url = await this.askOnce('  baseUrl (例如 https://api.example.com/v1): ');
+      const url = await this.askOnce(chalk.cyan('baseUrl (例如 https://api.example.com/v1) > '));
       if (!url || !url.trim()) {
         this.output.printError('需要 baseUrl,已取消。');
         return;
       }
-      const keyRaw = await this.askOnce(`  API Key (可回车跳过,env ${pickedProvider.envKey} 也行): `);
+      const keyRaw = await this.askOnce(chalk.cyan(`API Key (可回车跳过,env ${pickedProvider.envKey} 也行) > `));
       await this.applyProviderSwitchInternal(
         pickedProvider.id,
         url.trim(),
@@ -837,7 +874,7 @@ export class REPLLoop {
       return;
     }
 
-    // 内置 provider
+    // 内置 provider: 切 + 提示 key
     const envHasKey = !!process.env[pickedProvider.envKey];
     let cfgHasKey = false;
     try {
@@ -866,38 +903,57 @@ export class REPLLoop {
 
   /**
    * /edit [n] — short-hand for the edit wizard.
-   *   `/edit`           → list saved models, ask which to edit.
-   *   `/edit 1`         → jump to wizard for saved model #1.
-   *   `/edit Qwen3-32B` → jump to wizard for the model whose id matches.
+   *   `/edit`             → open a TUI picker (↑/↓) over all saved models.
+   *   `/edit Qwen3-32B`   → jump straight to wizard for that id.
+   *
+   * 2.1 — switched from "type a number" to `@inquirer/select`, matching the
+   * new `/model` UX.
    */
-  private async runEditShortcut(): Promise<void> {
+  private async runEditShortcut(opts?: { initialId?: string }): Promise<void> {
     if (!this.ai) return;
     const saved = this.loadSavedModels().sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0));
     if (saved.length === 0) {
       this.output.printWarning('没有已保存的模型。先用 /model 添加几条。');
       return;
     }
+
     this.output.printHeader('✏️  /edit / 修改 — 修改已保存模型');
-    saved.forEach((m, i) => {
-      const meta = [];
-      if (m.ctx) meta.push(`ctx=${m.ctx}M`);
-      if (m.thinking) meta.push(`think=${m.thinking}`);
-      if (m.note) meta.push(`note=${m.note}`);
-      const extra = meta.length ? chalk.gray(`  [${meta.join(' · ')}]`) : '';
-      this.output.printInfo(`  ${(i + 1).toString().padStart(2)}. ${chalk.cyan(m.id)}${extra}`);
-    });
-    this.output.printInfo('');
-    const arg = await this.askOnce('  编号或完整 id / number or id: ');
-    if (arg === null) return;
-    const trimmed = arg.trim();
-    let target: SavedModel | null = null;
-    if (/^\d+$/.test(trimmed)) {
-      target = saved[Number.parseInt(trimmed, 10) - 1] ?? null;
-    } else {
-      target = saved.find(m => m.id.toLowerCase() === trimmed.toLowerCase()) ?? null;
+    this.output.printInfo(chalk.gray('  ↑/↓ 选择,回车确认,Ctrl+C 取消'));
+
+    // Direct id shortcut
+    if (opts?.initialId) {
+      const target = saved.find(m => m.id.toLowerCase() === opts.initialId!.toLowerCase()) ?? null;
+      if (!target) {
+        this.output.printError(`未找到 "${opts.initialId}".`);
+        return;
+      }
+      await this.runEditModelWizard(target);
+      return;
     }
+
+    const picked = await select({
+      message: '选择要修改的模型 / Pick a model to edit:',
+      pageSize: Math.min(15, saved.length + 3),
+      choices: saved.map(m => {
+        const meta: string[] = [];
+        if (m.ctx) meta.push(`ctx=${m.ctx}M`);
+        if (m.thinking) meta.push(`think=${m.thinking}`);
+        if (m.note) meta.push(`note=${m.note}`);
+        return {
+          name: `${chalk.cyan(m.id)}${chalk.gray(meta.length ? '  [' + meta.join(' · ') + ']' : '')}`,
+          value: m.id,
+          description: meta.length ? meta.join(' · ') : '(no ctx / thinking / note yet)',
+        };
+      }).concat([{ name: chalk.gray('─ 关闭 / Close'), value: '__close__', description: '不修改,直接退出 /edit 选择器' }]),
+    }).catch((err: any) => {
+      if (err?.name === 'ExitPromptError') return '__close__';
+      throw err;
+    });
+
+    if (picked === '__close__') return;
+    const target = saved.find(m => m.id === picked);
     if (!target) {
-      this.output.printError(`未识别 / not found: "${trimmed}".`);
+      this.output.printError(`未找到 "${picked}".`);
       return;
     }
     await this.runEditModelWizard(target);

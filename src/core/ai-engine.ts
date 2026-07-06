@@ -91,7 +91,8 @@ export class AIEngine {
 
   async *chatStream(
     messages: ChatMessage[],
-    maxIterations: number = 10
+    maxIterations: number = 10,
+    signal?: AbortSignal,
   ): AsyncGenerator<string, AIResponse, unknown> {
     let currentMessages = [...messages];
     let iterations = 0;
@@ -106,9 +107,10 @@ export class AIEngine {
 
       let fullResponse = '';
 
-      for await (const chunk of this.streamRequest(currentMessages)) {
+      for await (const chunk of this.streamRequest(currentMessages, signal)) {
         fullResponse += chunk;
         yield chunk;
+        if (signal?.aborted) break;
       }
 
       const response = this.parseResponse(fullResponse);
@@ -182,10 +184,15 @@ export class AIEngine {
 
   /**
    * S01 Core: Stream request — yields chunks as they arrive
-   * Uses async generator for backpressure control and lazy evaluation
+   * Uses async generator for backpressure control and lazy evaluation.
+   *
+   * Pass `signal` to make the underlying fetch + reader actually abort
+   * when Ctrl+C is pressed; without it the network call continues to
+   * completion in the background even after the for-await loop breaks.
    */
   private async *streamRequest(
-    messages: ChatMessage[]
+    messages: ChatMessage[],
+    signal?: AbortSignal,
   ): AsyncGenerator<string, void, unknown> {
     const apiKey = this.config.apiKey || this.getApiKey();
 
@@ -193,6 +200,7 @@ export class AIEngine {
       // Mock streaming for demo
       const mock = this.getMockResponse(messages);
       for (const char of mock) {
+        if (signal?.aborted) return;
         await new Promise(r => setTimeout(r, 10));
         yield char;
       }
@@ -228,11 +236,22 @@ export class AIEngine {
       body = this.buildOpenAIRequest(messages, true);
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        // Caller (processInput) detects this and skips persisting the
+        // truncated response. Just bail without yielding anything.
+        return;
+      }
+      throw err;
+    }
 
     if (!response.ok || !response.body) {
       yield `\n${chalk.red(`[API Error: ${response.status}]`)}`;
@@ -244,6 +263,10 @@ export class AIEngine {
 
     try {
       while (true) {
+        if (signal?.aborted) {
+          try { await reader.cancel(); } catch {}
+          return;
+        }
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -254,7 +277,7 @@ export class AIEngine {
         }
       }
     } finally {
-      reader.releaseLock();
+      try { reader.releaseLock(); } catch {}
     }
   }
 

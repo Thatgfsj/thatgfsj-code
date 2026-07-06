@@ -15,6 +15,53 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.1.0] - 2026-07-06
+
+### Fixed (治本)
+- **「已中断」污染循环根本原因**：之前 `SessionManager` 上挂的
+  anti-pollution filter 是下游防御，实际触发污染的根因是两层 bug：
+  1. `processInput` 在用户按 Ctrl+C 后，**仍然把截断的 `fullResponse` 写入
+     `SessionManager`**。下一轮 LLM 看到一段没下文的"...I should"，
+     模型会基于训练数据生成 `[已中断]` 字面补救文本作为回复开头，
+     然后被 filter 拦下 — 用户看到的"已中断循环"实际上是这个数据流。
+  2. `AIEngine.streamRequest` 的 `fetch()` 调用**没有接受 `AbortSignal`**，
+     即使用户按 Ctrl+C，HTTP 请求实际并未取消，只是外层 `for await`
+     跳出循环。generator 在 background 继续跑，直到 fetch 自然完成。
+
+  **修复**：
+  - `processInput`: 新增 `_wasAborted` 标志。SIGINT 时设 true；当 true 时，
+    **跳过 `session.addMessage('assistant', fullResponse)`**，根本不写入
+    history。filter 仍然保留作为兜底。
+  - `AIEngine.chatStream(messages, maxIter, signal)` / `streamRequest(messages, signal)`:
+    `signal` 转发给 `fetch` 让 HTTP 请求真正中止；迭代循环也会检查
+    `signal.aborted` 提前 break；最后用 `reader.cancel()` 释放连接。
+
+### Changed
+- **`/model` 改为真正的 TUI 选项框**：之前 `/model` 让用户输入编号选择
+  (`1` `2` `a` `e` 等)，现在用 `@inquirer/select` 提供上下键 + 回车的
+  选择列表 (与 Claude Code / Codex 的选项器一致)：
+  - 主列表是「已保存的模型」(按 `addedAt` 倒序)，每行展示 `id` / `ctx` / `thinking` / `note`。
+  - 末尾追加 4 个动作:
+    - `+ 添加新模型 / Add new model`
+    - `✏  修改已保存 / Edit saved`
+    - `📋  内置模型列表 (只读) / Builtin list`
+    - `─ 关闭 / Close (Esc, Ctrl+C)`
+  - 当前选中的模型用 `⮕ ` + ` ✓ 当前` 双标记,直接选自己 = 退出选择器。
+- **`/edit` 同样改用 `@inquirer/select`**：列出已保存模型 (含 ctx/thinking/note 元数据),下键选一条进入修改向导。
+- **`/provider` 同样改用 `@inquirer/select`**：列出 10 个 provider (8 内置
+  + `custom_openai` + `custom_anthropic`),描述里直接显示所需 env-var
+  和"中转站"提示。
+- **`/model <id>` / `/model Qwen3-32B` 保留快捷路径**:带 id 时直接切换,
+  不显示选项框(向后兼容老 CLI 调用)。
+- **`/edit <id>` 同样保留快捷路径**。
+
+### Tests
+- **3 个新单元测试** (`tests/unit-abort.test.js`) 锁定 abort 行为契约:
+  aborted stream 不写入 history;成功 stream 写入;`chatStream` 接受 `signal`。
+- **55/55 tests passing**(原 52 + 新增 3)。
+
+---
+
 ## [2.0.0] - 2026-07-06
 
 > ℹ️ **版本号说明**：之前 v0.3.1 是首个正式 0.3.x 发布，但 npm 页面显示
