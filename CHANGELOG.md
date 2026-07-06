@@ -4,6 +4,49 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.6 / 产品 0.4.3] - 2026-07-06  - 修复工具结果不显示
+
+> 双版本号方案:
+>
+> | 位置 | 版本 | 含义 |
+> |---|---|---|
+> | `package.json` `"version"` | `2.2.6` | npm 包版本,正常递增 (+0.0.1) |
+> | `src/cmd/index.tsx` `.version(...)` | `0.4.3` | **产品版本** (`gfcode --version` 看到的) |
+
+### Fixed
+
+**Bug: 工具调用结果不显示** — 在 1.0.4 源码栈下用户报告"⚙ shell date" 这条
+命令发起后,**结果完全看不到**,只看到 AI 后续的文字回复 ("好嘞，那我给你
+演示一组工具——并行调用"). 模型明明看到了工具结果 (因为它的后续回复引用了
+结果),但 UI 上不显示结果文本。
+
+通过代码 review + 单测复现,定位到三个潜在原因,全部修复:
+
+1. **`src/tui/components/ToolCall.tsx`** — `tool.result ? ... : null` 用 truthy
+   判断,**空字符串结果被当 falsy 跳过渲染**。改成 `tool.result !== undefined ? ... : null`。
+   同样修复: `wrap="truncate"` 在 Ink 里会把超长行**静默切掉不显示**,
+   改成 `wrap="wrap"` 让长行自动换行。还把 `result.truncated` 的指示从
+   模糊的 `"..."` 改成 `(+N more lines)` 显示实际被截掉的行数。
+2. **加 ⏳ pending 指示器** — 工具调用发起到结果返回之间的中间状态,
+   之前没有视觉反馈,看起来像是"卡住了"。现在显示 `⏳ running...`
+3. **`src/tui/hooks/useChat.ts`** — 流结束 push 到 messages 时,assemble
+   一个 `[tool: name → result]` 摘要附加到 assistant 的 content 里。
+   这是 belt-and-suspenders 兜底: 即使 Ink 的 `<ToolCall/>` 渲染路径
+   因为任何边缘 case 失败 (例如太长的输出 wrap 问题),用户依然能在
+   AI 的文字回复里看到工具结果。
+
+### 仍然不修的 (但要意识到)
+- 用户的 paste 里还有另一条命令 `echo "=== 当前时间 ===" && date && echo
+  "=== 系统信息 ===" && system` — 这里 `system` 不是合法命令,
+  会返回错误。这不是代码 bug,是用户/模型自己写的命令有问题。本次 patch
+  不修改这个。
+
+### 不在本次范围
+- Anthropic / Gemini provider 的 `delta.tool_calls` 流式解析 (仍是 TODO)
+- 工具输入参数命名前缀 (`command` vs `cmd` 不一致) — 下次 patch
+
+---
+
 ## [2.2.5 / 产品 0.4.2] - 2026-07-06  - 压缩 <think> 思考块 (类似 opencode)
 
 > 双版本号方案:

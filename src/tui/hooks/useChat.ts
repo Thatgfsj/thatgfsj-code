@@ -128,6 +128,23 @@ export function useChat(app: App) {
             ? `${summarizeThinking(split)}\n${split.conclusion}`
             : fullContent);
 
+      // v2.2.6 (tool-result belt-and-suspenders): if any tool call
+      // returned text, also append a compact "[tool: name → result]"
+      // summary to the persisted/displayed content. This guarantees
+      // the user sees the tool output regardless of whether the Ink
+      // <ToolCall/> component renders it correctly. Past sessions
+      // have had cases where the streaming ToolCall rendering failed
+      // silently (e.g. result was empty string, wrap=truncate cut
+      // long output off-screen) and the user had no idea what the
+      // tool actually returned.
+      const toolSummary = currentToolCalls.length > 0
+        ? '\n\n' + currentToolCalls.map((tc) => {
+            const r = tc.result !== undefined ? tc.result : '(no result)';
+            const short = r.length > 200 ? r.slice(0, 197) + '...' : r;
+            return `[tool: ${tc.name} → ${short}]`;
+          }).join('\n')
+        : '';
+
       setState(prev => ({
         ...prev,
         messages: [
@@ -135,7 +152,7 @@ export function useChat(app: App) {
           ...(shouldPersist
             ? [{
                 role: 'assistant' as const,
-                content: displayContent,
+                content: displayContent + toolSummary,
                 toolCalls: currentToolCalls.length > 0 ? currentToolCalls : undefined,
               }]
             : []),

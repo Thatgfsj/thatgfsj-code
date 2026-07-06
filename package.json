@@ -1,6 +1,6 @@
 {
   "name": "thatgfsj-code",
-  "version": "2.2.5",
+  "version": "2.2.6",
   "description": "Thatgfsj Code - AI Coding Assistant",
   "main": "dist/cmd/index.js",
   "type": "module",

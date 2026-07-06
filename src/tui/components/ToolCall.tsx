@@ -40,9 +40,9 @@ function truncateOutput(output: string, maxLines = 8): { text: string; truncated
   return { text: lines.slice(0, maxLines).join('\n'), truncated: true };
 }
 
-export function ToolCall({ tool }: Props) {
+export function ToolCall({ tool, width }: Props) {
   const label = formatToolName(tool.name, tool.args);
-  const result = tool.result ? truncateOutput(tool.result) : null;
+  const result = tool.result !== undefined ? truncateOutput(tool.result) : null;
 
   return (
     <Box flexDirection="column" marginBottom={0} paddingLeft={1}>
@@ -53,15 +53,46 @@ export function ToolCall({ tool }: Props) {
         {label && <Text color="#64748B"> {label}</Text>}
       </Box>
 
-      {/* Result */}
-      {result && (
+      {/* Result — v2.2.6 fix:
+          - Use `!== undefined` (not truthy) so empty string results
+            still render (truthy check dropped them, making it look
+            like the tool result was missing).
+          - Switch wrap from "truncate" to "wrap" so long lines don't
+            silently disappear off-screen.
+          - Always render the Box even when result is empty (just
+            with a "(no output)" marker), so the visual frame stays
+            consistent.
+          - If truncated, show explicit "(+N more lines)" indicator
+            so users know the result was clipped. */}
+      {result !== null && (
         <Box paddingLeft={2} flexDirection="column">
-          {result.text.split('\n').map((line, i) => (
-            <Text key={i} color={tool.isError ? '#EF4444' : '#64748B'} wrap="truncate">
-              {line}
-            </Text>
-          ))}
-          {result.truncated && <Text dimColor>  ...</Text>}
+          {result.text.length === 0 ? (
+            <Text color="#94A3B8" dimColor>(no output)</Text>
+          ) : (
+            <>
+              {result.text.split('\n').map((line, i) => (
+                <Text
+                  key={i}
+                  color={tool.isError ? '#EF4444' : '#64748B'}
+                  wrap="wrap"
+                >
+                  {line || ' '}
+                </Text>
+              ))}
+              {result.truncated && (
+                <Text color="#94A3B8" dimColor>
+                  {'  '}(+{tool.result!.split('\n').length - 8} more lines)
+                </Text>
+              )}
+            </>
+          )}
+        </Box>
+      )}
+      {/* v2.2.6: if result is undefined (still running), show a
+          pending indicator so the user knows the tool is in flight. */}
+      {result === null && tool.result === undefined && (
+        <Box paddingLeft={2}>
+          <Text color="#94A3B8" dimColor>  ⏳ running...</Text>
         </Box>
       )}
     </Box>
