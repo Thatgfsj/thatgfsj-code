@@ -243,14 +243,27 @@ Be concise but thorough. Show your reasoning.`;
 
     const spinner = ora(chalk.gray('Thinking...')).start();
     let fullResponse = '';
+    let firstChunk = true;
 
+    // v2.2.1: 单次 CLI 模式也修了一下"跳到顶部"的问题。具体做法:
+    //   - spinner 在第一个 chunk 到来时 stop()
+    //   - 立刻补一个换行,把 cursor 推到下一行首
+    //   - 后续 chunk 写到这一行,不再和 spinner 留下的提示混在一起
+    //   - 流结束后再补一个换行,确保 divider 永远落在 AI 输出下方
     for await (const chunk of ai.chatStream(session.getMessages())) {
-      spinner.stop();
+      if (firstChunk) {
+        spinner.stop();
+        process.stdout.write('\n');
+        firstChunk = false;
+      }
       process.stdout.write(chunk);
       fullResponse += chunk;
     }
+    // 如果模型一个 chunk 都没出 (异常路径),stop spinner 兜底
+    if (firstChunk) spinner.stop();
+    process.stdout.write('\n');
 
-    console.log(chalk.gray('\n' + '─'.repeat(40)));
+    console.log(chalk.gray('─'.repeat(40)));
 
     // 把助手回复写回会话,便于后续轮次保留上下文
     session.addMessage('assistant', fullResponse);

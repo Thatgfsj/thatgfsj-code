@@ -7,11 +7,55 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 ## [Unreleased]
 
 ### Planned
-- 实现真实的 provider 工具调用解析（OpenAI `delta.tool_calls`、Anthropic
-  `tool_use` block、Gemini `functionCall`），让已注册的 Tool 真正参与 Agent Loop
+- Anthropic / Gemini 的 tool_use / functionCall SSE 流式解析（v2.2.1
+  已经在请求体里把 `tools` 字段发出去了,但 SSE 解析器对这两个 provider
+  还是只解 text delta — tool-call 部分等下个 patch）
 - `install.sh` / `install.ps1` 默认分支自适应（`master` ↔ `main`）
 - 移除 README 中失效的 `git.io/thatgfsj` 短链，全部改回 `raw.githubusercontent.com`
 - MCP 客户端 `this.process?.connected` → `this.process?.stdin?.writable`
+
+---
+
+## [2.2.1] - 2026-07-06  - 终端"跳到顶部"修复 + 真实启用工具调用
+
+> v2.2.0 之后用户报告两个问题：(1) AI 回答时终端内容视觉上"跳到顶部"，
+> 看起来断断续续看不清；(2) AI 调用工具时被中断。这个 patch 只解决这两
+> 个问题,不做任何无关重构 — 不动 startup 性能、不重写 REPLInput、不改
+> SessionManager 截断策略。
+
+### Fixed
+
+**1. 终端"跳到顶部" — 流结束光标位置不稳定**
+- `src/repl/loop.ts:processInput` 流结束后从 `console.log()` 改成强制
+  `process.stdout.write('\n\n')`,无论最后一个 chunk 是否带 `\n`,光标
+  都落在 AI 输出**下方至少 1 行**。`@inquirer/input` 下一轮画 `> ` 提示符
+  不会再跑到 AI 输出同一行/上方。
+- "🤖 Thinking..." 那行现在用 ANSI `\r\x1b[2K` 在第一个 chunk 到达时清
+  掉,不会留下 spinner 痕迹。
+- `src/index.ts:executeTask` 单次 CLI 模式同样修复:`spinner.stop()` 后
+  立刻补换行,divider 永远落在 AI 输出下方。
+
+**2. 工具调用真正可用 — 解锁整条 Agent Loop**
+- `src/core/ai-engine.ts` 引入 `StreamAccumulator` 内部类,把 OpenAI SSE
+  协议里的 `delta.tool_calls` (按 `index` 累加 id/name/arguments) 和
+  `delta.content` 同时累积。
+- 删掉 `extractToolCalls` 占位 (`return undefined`),`chatStream` 现在
+  流结束后从 accumulator 拿到完整的 `ToolCall[]`,真正进入工具执行分支。
+- `executeToolCall` 不再硬编码 `confirmAction: () => false`,而是使用
+  `AIEngine.setConfirmAction(fn)` 注入的回调。REPL 在 init 里通过
+  `@inquirer/confirm` 询问用户;单次 CLI 模式保持 auto-approve
+  (无交互,默认信任)。
+- `buildAnthropicRequest` 和 `buildGeminiRequest` 现在发送 `tools` 字段,
+  并把 `role: 'tool'` 消息分别转成 Anthropic 的 `tool_result` block 和
+  Gemini 的 `functionResponse` part — 之前这两个 provider 完全收不到工
+  具 schema。
+- `buildOpenAIRequest` 修复一个小 bug:assistant 消息不带 `tool_calls`
+  时不再发送 `tool_calls: undefined`。
+
+### Note
+- Anthropic 和 Gemini provider 的 SSE **流式** tool-call 解析仍然是
+  TODO (只解 text delta),但请求体已经带上 `tools`,所以模型至少能"看
+  到"工具有哪些。属于下个 patch 范围,本次不动。
 
 ---
 

@@ -1,7 +1,7 @@
 /**
  * AI Engine - Core AI interaction module
  * Supports multiple providers: MiniMax, SiliconFlow, OpenAI, Anthropic
- * 
+ *
  * Implements S01: Agent Loop pattern with async generator for streaming
  * Core pattern: while(true) { response → execute tools → append results → repeat }
  */
@@ -11,9 +11,128 @@ import { ChatMessage, AIResponse, AIConfig, Tool, ToolCall } from './types.js';
 
 export { AIResponse, ChatMessage };
 
+/**
+ * Best-effort JSON.parse that returns {} on failure. Used when extracting
+ * tool-call `arguments` from a streamed response, where partial JSON
+ * strings may fail to parse until the model finishes emitting.
+ */
+function safeParseArgs(raw: string | undefined): Record<string, any> {
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+/**
+ * Internal accumulator that lives for the duration of one streamed
+ * response. It captures both text deltas (which we yield to the caller)
+ * AND tool-call deltas (which we aggregate into a complete ToolCall[]).
+ *
+ * Previously (v2.2.0) the SSE parser only extracted `delta.content` and
+ * threw away every `delta.tool_calls` chunk, so the agent loop's
+ * "if (response.tool_calls...)" branch was unreachable. v2.2.1 wires
+ * this back together by accumulating tool calls across multiple chunks
+ * the same way OpenAI does server-side.
+ *
+ * v2.2.1 supports the OpenAI-compatible streaming protocol fully
+ * (covers OpenAI / SiliconFlow / MiniMax / Kimi / DeepSeek / Ollama /
+ *  any other OpenAI-shape backend). Anthropic and Gemini providers
+ *  still send `tools` in the request body, but the SSE parser for
+ *  their tool-call streaming chunks is left as a TODO — the model will
+ *  fall back to text-only responses on those providers until 2.2.2.
+ */
+class StreamAccumulator {
+  /** Complete text accumulated so far (also kept so we can echo it back). */
+  fullText: string = '';
+  /** Tool calls keyed by their `index` field (OpenAI shape). */
+  private toolCalls: Map<number, ToolCall> = new Map();
+  /** Provider-reported finish reason, if any. */
+  finishReason: string | null = null;
+
+  /**
+   * OpenAI-compatible SSE chunk. Returns the text delta to yield, OR
+   * null if this chunk only contained tool-call deltas.
+   */
+  ingestOpenAI(line: string): string | null {
+    if (!line.startsWith('data: ') || line === 'data: [DONE]') return null;
+    let payload: any;
+    try {
+      payload = JSON.parse(line.slice(6));
+    } catch {
+      return null;
+    }
+    const choice = payload?.choices?.[0];
+    if (!choice) return null;
+    if (choice.finish_reason) this.finishReason = choice.finish_reason;
+
+    const delta = choice.delta ?? {};
+    let textDelta: string | null = null;
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
+      textDelta = delta.content;
+      this.fullText += textDelta;
+    }
+
+    // Accumulate tool_calls: each delta may carry only one field of one call.
+    if (Array.isArray(delta.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        const idx = typeof tc.index === 'number' ? tc.index : 0;
+        let existing = this.toolCalls.get(idx);
+        if (!existing) {
+          existing = {
+            id: tc.id || `call_${idx}`,
+            type: 'function',
+            function: { name: '', arguments: '' },
+          };
+          this.toolCalls.set(idx, existing);
+        }
+        if (tc.id) existing.id = tc.id;
+        if (tc.function?.name) existing.function.name += tc.function.name;
+        if (typeof tc.function?.arguments === 'string') {
+          existing.function.arguments += tc.function.arguments;
+        }
+      }
+    }
+    return textDelta;
+  }
+
+  /**
+   * Anthropic SSE chunk. v2.2.1 only extracts text here; tool_use block
+   * streaming is the TODO listed in the changelog.
+   */
+  ingestAnthropic(chunk: string): string | null {
+    const match = chunk.match(/"type"\s*:\s*"text_delta"\s*,\s*"text"\s*:\s*"([^"]*)"/);
+    if (!match) return null;
+    this.fullText += match[1];
+    return match[1];
+  }
+
+  /**
+   * Gemini SSE chunk. v2.2.1 only extracts text here; functionCall
+   * streaming is the TODO listed in the changelog.
+   */
+  ingestGemini(chunk: string): string | null {
+    const match = chunk.match(/"text"\s*:\s*"([^"]*)"/);
+    if (!match) return null;
+    this.fullText += match[1];
+    return match[1];
+  }
+
+  /** Final tool calls sorted by their original `index`. Empty if none. */
+  finalizeToolCalls(): ToolCall[] | undefined {
+    if (this.toolCalls.size === 0) return undefined;
+    return Array.from(this.toolCalls.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([, tc]) => tc);
+  }
+}
+
 export class AIEngine {
   private config: AIConfig;
   private tools: Map<string, Tool> = new Map();
+  /**
+   * Optional confirm callback injected by the REPL (or CLI single-shot).
+   * If unset, tools that ask for confirmation are auto-approved — the
+   * single-shot CLI flow has no way to ask the user mid-stream.
+   */
+  private confirmAction: ((msg: string) => Promise<boolean>) | null = null;
 
   constructor(config: AIConfig) {
     this.config = config;
@@ -87,6 +206,16 @@ export class AIEngine {
   }
   private hooks?: import('./hooks.js').HookManager | null = null;
 
+  /**
+   * v2.2.1: inject the confirmation prompt used when a Tool calls
+   * `ctx.confirmAction(msg)`. The REPL passes an @inquirer/confirm-based
+   * prompt; the single-shot CLI passes `null` (=> auto-approve) so the
+   * non-interactive flow doesn't deadlock.
+   */
+  setConfirmAction(fn: ((msg: string) => Promise<boolean>) | null) {
+    this.confirmAction = fn;
+  }
+
   // ==================== S01: Async Generator Agent Loop ====================
 
   async *chatStream(
@@ -105,31 +234,36 @@ export class AIEngine {
         await this.hooks.emit('beforeAgentLoop', { messages: currentMessages, iteration: iterations });
       }
 
-      let fullResponse = '';
+      // v2.2.1: collect both text deltas AND tool-call deltas in a single
+      // accumulator. streamRequest() now yields text deltas only; the
+      // accumulator also tracks tool_calls as it parses them.
+      const accumulator = new StreamAccumulator();
 
-      for await (const chunk of this.streamRequest(currentMessages, signal)) {
-        fullResponse += chunk;
+      for await (const chunk of this.streamRequest(currentMessages, signal, accumulator)) {
         yield chunk;
         if (signal?.aborted) break;
       }
 
-      const response = this.parseResponse(fullResponse);
+      const toolCalls = accumulator.finalizeToolCalls();
+      const responseContent = accumulator.fullText;
 
-      if (response.tool_calls && response.tool_calls.length > 0) {
+      if (toolCalls && toolCalls.length > 0) {
         currentMessages.push({
           role: 'assistant',
-          content: response.content,
-          tool_calls: response.tool_calls
+          content: responseContent,
+          tool_calls: toolCalls,
         });
 
         // Execute each tool
-        for (const toolCall of response.tool_calls) {
+        for (const toolCall of toolCalls) {
           // S08 Hook: beforeToolCall
           if (this.hooks) {
+            let parsedParams: Record<string, any> = {};
+            try { parsedParams = JSON.parse(toolCall.function.arguments || '{}'); } catch {}
             await this.hooks.emit('beforeToolCall', {
               toolName: toolCall.function.name,
-              toolParams: JSON.parse(toolCall.function.arguments || '{}'),
-              toolCallId: toolCall.id
+              toolParams: parsedParams,
+              toolCallId: toolCall.id,
             });
           }
 
@@ -139,9 +273,9 @@ export class AIEngine {
           if (this.hooks) {
             await this.hooks.emit('afterToolCall', {
               toolName: toolCall.function.name,
-              toolParams: JSON.parse(toolCall.function.arguments || '{}'),
+              toolParams: safeParseArgs(toolCall.function.arguments),
               toolResult: result,
-              toolCallId: toolCall.id
+              toolCallId: toolCall.id,
             });
           }
 
@@ -149,21 +283,21 @@ export class AIEngine {
             role: 'tool',
             content: result.output || result.error || '',
             tool_call_id: toolCall.id,
-            name: toolCall.function.name
+            name: toolCall.function.name,
           };
           currentMessages.push(toolResultMsg);
 
-          yield `\n${chalk.gray(`[tool: ${toolCall.function.name}]`)}`;
+          yield `\n${chalk.gray(`[tool: ${toolCall.function.name}] ${result.error ? '✗' : '✓'}`)}`;
         }
 
         continue;
       }
 
       // No tool calls — exit loop
-      if (response.content) {
+      if (responseContent) {
         currentMessages.push({
           role: 'assistant',
-          content: response.content
+          content: responseContent,
         });
       }
 
@@ -172,19 +306,28 @@ export class AIEngine {
         await this.hooks.emit('afterAgentLoop', { messages: currentMessages, iteration: iterations });
       }
 
-      return response;
+      return {
+        content: responseContent,
+        role: 'assistant',
+      };
     }
 
     // Max iterations reached
     return {
       content: '[Agent loop exceeded maximum iterations]',
-      role: 'assistant'
+      role: 'assistant',
     };
   }
 
   /**
    * S01 Core: Stream request — yields chunks as they arrive
    * Uses async generator for backpressure control and lazy evaluation.
+   *
+   * v2.2.1: the `accumulator` parameter is mutated as we read the
+   * stream — it captures text deltas, tool-call deltas, and finish
+   * reasons. We yield only the text delta portion here; the chatStream
+   * caller reads `accumulator.finalizeToolCalls()` after the stream
+   * completes.
    *
    * Pass `signal` to make the underlying fetch + reader actually abort
    * when Ctrl+C is pressed; without it the network call continues to
@@ -193,6 +336,7 @@ export class AIEngine {
   private async *streamRequest(
     messages: ChatMessage[],
     signal?: AbortSignal,
+    accumulator?: StreamAccumulator,
   ): AsyncGenerator<string, void, unknown> {
     const apiKey = this.config.apiKey || this.getApiKey();
 
@@ -260,6 +404,10 @@ export class AIEngine {
 
     const decoder = new TextDecoder();
     const reader = response.body.getReader();
+    // Reuse caller-provided accumulator or create a fresh one. We need
+    // *some* accumulator to feed tool-call deltas into, even though
+    // chatStream normally passes its own.
+    const acc = accumulator ?? new StreamAccumulator();
 
     try {
       while (true) {
@@ -271,74 +419,25 @@ export class AIEngine {
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const text = this.extractChunkText(chunk, isAnthropicFormat, isGeminiFormat);
-        if (text) {
-          yield text;
+
+        if (isAnthropicFormat) {
+          const text = acc.ingestAnthropic(chunk);
+          if (text) yield text;
+        } else if (isGeminiFormat) {
+          const text = acc.ingestGemini(chunk);
+          if (text) yield text;
+        } else {
+          // OpenAI / OpenAI-compatible SSE — multiple `data:` lines per
+          // chunk, each may carry a delta.
+          for (const line of chunk.split('\n')) {
+            const text = acc.ingestOpenAI(line);
+            if (text) yield text;
+          }
         }
       }
     } finally {
       try { reader.releaseLock(); } catch {}
     }
-  }
-
-  /**
-   * Extract text from streaming chunk based on provider format
-   */
-  private extractChunkText(
-    chunk: string,
-    isAnthropic: boolean,
-    isGemini: boolean
-  ): string {
-    if (isAnthropic) {
-      // Anthropic streaming format: data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"..."}}
-      const match = chunk.match(/"type"\s*:\s*"text_delta"\s*,\s*"text"\s*:\s*"([^"]*)"/);
-      return match ? match[1] : '';
-    } else if (isGemini) {
-      // Gemini format
-      const match = chunk.match(/"text"\s*:\s*"([^"]*)"/);
-      return match ? match[1] : '';
-    } else {
-      // OpenAI SSE format: data: {"choices":[{"delta":{"content":"..."}}]}
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-          try {
-            const data = JSON.parse(line.slice(6));
-            const content = data.choices?.[0]?.delta?.content;
-            if (content) return content;
-          } catch {
-            // Skip invalid JSON
-          }
-        }
-      }
-      return '';
-    }
-  }
-
-  /**
-   * Parse full response text into structured AIResponse
-   */
-  private parseResponse(fullText: string): AIResponse {
-    // For now return content as-is; tool call parsing happens via content patterns
-    return {
-      content: fullText,
-      role: 'assistant',
-      tool_calls: this.extractToolCalls(fullText)
-    };
-  }
-
-  /**
-   * Extract tool calls from response content
-   *
-   * NOTE: 当前为占位实现,实际不会从流式内容中解析工具调用。这意味着
-   * `chatStream` 内的 `if (response.tool_calls ...)` 分支永远不会进入,
-   * 已注册的 `Tool` 不会被调用,Agent 等价于一个聊天客户端。这是有意为之的
-   * 局限性 — 真实工具调用解析需要每个提供商走 JSON mode / native tool_calls
-   * 流(chunks 里的 `delta.tool_calls` 已被 `extractChunkText` 丢弃)。
-   * 修复此问题需要更大的重构,不属于 0.2.2 patch 的范围。
-   */
-  private extractToolCalls(_content: string): ToolCall[] | undefined {
-    return undefined;
   }
 
   // ==================== Legacy chat() — delegates to chatStream ====================
@@ -369,22 +468,37 @@ export class AIEngine {
       return { error: `Tool "${name}" not found` };
     }
 
+    let params: Record<string, any> = {};
     try {
-      const params = JSON.parse(args);
+      params = JSON.parse(args);
+    } catch {
+      return { error: `Tool "${name}" received invalid JSON arguments: ${args}` };
+    }
+
+    try {
       const result = await tool.execute(params, {
-        confirmAction: async (msg: string): Promise<boolean> => {
-          console.log(chalk.yellow(`\n⚠️  Tool wants to execute: ${msg}`));
-          return false; // Default deny in CLI mode
-        }
+        confirmAction: this.confirmAction ?? (async () => true),
+        signal: this.streamAbortSignal,
       });
 
       return {
         output: result.success ? (result.output || JSON.stringify(result.data)) : undefined,
-        error: result.error
+        error: result.error,
       };
     } catch (error: any) {
       return { error: `Tool execution failed: ${error.message}` };
     }
+  }
+
+  /**
+   * v2.2.1: short-lived hook so Tools can react to Ctrl+C during their
+   * own execute() call. The REPL sets this before each chatStream call
+   * (via setCurrentAbortSignal), tools that support an AbortSignal
+   * (e.g. long-running shell commands) can honor it.
+   */
+  private streamAbortSignal: AbortSignal | undefined;
+  setCurrentAbortSignal(signal: AbortSignal | undefined) {
+    this.streamAbortSignal = signal;
   }
 
   // ==================== Request Builders ====================
@@ -393,52 +507,171 @@ export class AIEngine {
     const tools = this.getToolsForAPI();
     return {
       model: this.config.model || 'Qwen/Qwen2.5-7B-Instruct',
-      messages: messages.map(m => ({
-        role: m.role,
-        content: m.content,
-        name: m.name,
-        tool_call_id: m.tool_call_id,
-        tool_calls: m.tool_calls
-      })),
+      messages: messages.map(m => {
+        const out: Record<string, any> = {
+          role: m.role,
+          content: m.content ?? '',
+        };
+        if (m.name) out.name = m.name;
+        if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+        if (m.tool_calls && m.tool_calls.length > 0) out.tool_calls = m.tool_calls;
+        return out;
+      }),
       temperature: this.config.temperature || 0.7,
       max_tokens: this.config.maxTokens || 4096,
       stream,
-      ...(tools.length > 0 && { tools })
+      ...(tools.length > 0 && { tools }),
     };
   }
 
   private buildAnthropicRequest(messages: ChatMessage[], stream: boolean) {
-    const anthropicMessages = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content
-      }));
+    // Convert our internal ChatMessage[] into Anthropic's wire format.
+    //  - 'system'    → top-level `system` field
+    //  - 'assistant' with tool_calls → content array with text + tool_use blocks
+    //  - 'tool'      → merged into the next 'user' message as a tool_result block
+    //                  (Anthropic requires tool_result on user-role turns)
+    const systemParts: string[] = [];
+    const converted: Array<{ role: 'user' | 'assistant'; content: any }> = [];
 
-    return {
+    const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = [];
+
+    const flushToolResults = () => {
+      if (toolResults.length === 0) return;
+      converted.push({ role: 'user', content: toolResults.splice(0) });
+    };
+
+    for (const m of messages) {
+      if (m.role === 'system') {
+        systemParts.push(m.content);
+        continue;
+      }
+      if (m.role === 'tool') {
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: m.tool_call_id || '',
+          content: m.content || '',
+        });
+        continue;
+      }
+      // Flush any pending tool_result blocks before continuing the turn.
+      flushToolResults();
+      if (m.role === 'assistant') {
+        const blocks: any[] = [];
+        if (m.content) blocks.push({ type: 'text', text: m.content });
+        if (m.tool_calls) {
+          for (const tc of m.tool_calls) {
+            blocks.push({
+              type: 'tool_use',
+              id: tc.id,
+              name: tc.function.name,
+              input: safeParseArgs(tc.function.arguments),
+            });
+          }
+        }
+        converted.push({ role: 'assistant', content: blocks.length > 0 ? blocks : '' });
+      } else if (m.role === 'user') {
+        converted.push({ role: 'user', content: m.content });
+      }
+    }
+    flushToolResults();
+
+    const tools = this.getToolsForAPI().map((t: any) => ({
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters,
+    }));
+
+    const body: any = {
       model: this.config.model || 'claude-3-haiku-20240307',
-      messages: anthropicMessages,
+      messages: converted,
       max_tokens: this.config.maxTokens || 4096,
       temperature: this.config.temperature || 0.7,
-      stream
+      stream,
     };
+    if (systemParts.length > 0) {
+      body.system = systemParts.join('\n\n');
+    }
+    if (tools.length > 0) {
+      body.tools = tools;
+    }
+    return body;
   }
 
   private buildGeminiRequest(messages: ChatMessage[]) {
-    const contents = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }]
-      }));
+    // Convert our internal ChatMessage[] into Gemini's wire format.
+    //  - 'system' is dropped (Gemini doesn't have a top-level system
+    //    slot; we keep it out of the loop on purpose)
+    //  - 'tool'   → 'user' turn with a `functionResponse` part
+    //  - assistant tool_calls → 'model' turn with `functionCall` parts
+    const contents: any[] = [];
 
-    return {
+    const pushTurn = (role: 'user' | 'model', parts: any[]) => {
+      if (parts.length === 0) return;
+      contents.push({ role, parts });
+    };
+
+    let userBuf: any[] = [];
+    let modelBuf: any[] = [];
+
+    const flushUser = () => {
+      if (userBuf.length > 0) { pushTurn('user', userBuf); userBuf = []; }
+    };
+    const flushModel = () => {
+      if (modelBuf.length > 0) { pushTurn('model', modelBuf); modelBuf = []; }
+    };
+
+    for (const m of messages) {
+      if (m.role === 'system') continue;
+      if (m.role === 'tool') {
+        // Gemini requires tool results to live on a user turn.
+        flushModel();
+        userBuf.push({
+          functionResponse: {
+            name: m.name || '',
+            response: { result: m.content || '' },
+          },
+        });
+        continue;
+      }
+      if (m.role === 'assistant') {
+        flushUser();
+        if (m.content) modelBuf.push({ text: m.content });
+        if (m.tool_calls) {
+          for (const tc of m.tool_calls) {
+            modelBuf.push({
+              functionCall: {
+                name: tc.function.name,
+                args: safeParseArgs(tc.function.arguments),
+              },
+            });
+          }
+        }
+        continue;
+      }
+      // user
+      flushModel();
+      if (m.content) userBuf.push({ text: m.content });
+    }
+    flushModel();
+    flushUser();
+
+    const toolsRaw = this.getToolsForAPI().map((t: any) => ({
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters,
+    }));
+
+    const body: any = {
       contents,
       generationConfig: {
         temperature: this.config.temperature || 0.7,
-        maxOutputTokens: this.config.maxTokens || 4096
-      }
+        maxOutputTokens: this.config.maxTokens || 4096,
+      },
     };
+    if (toolsRaw.length > 0) {
+      body.tools = [{ functionDeclarations: toolsRaw }];
+    }
+    return body;
   }
 
   private getApiKey(): string {

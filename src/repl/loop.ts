@@ -11,6 +11,7 @@
 import chalk from 'chalk';
 import readline from 'readline';
 import select from '@inquirer/select';
+import confirm from '@inquirer/confirm';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -67,6 +68,12 @@ export class REPLLoop {
     const config = await ConfigManager.load();
 
     this.ai = new AIEngine(config);
+
+    // v2.2.1: inject the REPL's confirmation prompt so registered Tools
+    // can ask "may I run this?" via ctx.confirmAction(msg). Without this,
+    // AIEngine.executeToolCall used to hardcode "deny", which made the
+    // tool-call loop effectively useless.
+    this.ai.setConfirmAction(async (msg) => this.askConfirm(msg));
 
     const builtInTools = getBuiltInTools();
     for (const tool of builtInTools) {
@@ -254,10 +261,14 @@ export class REPLLoop {
   /**
    * Process user input with AI (S01: streaming, no prompt reset)
    *
-   * 关键修复:
+   * 关键修复 (v2.2.1):
    *   - 不再调用 rl.question,所以不会 reset 终端
    *   - chunk 直接 process.stdout.write,完整保留所有输出,用户可滚动查看
-   *   - spinner 在第一个 chunk 到达时停止,然后正常流式
+   *   - "Thinking..." 那行在第一个 chunk 到达时通过 ANSI 清掉 (\r\x1b[2K),
+   *     避免遗留文字
+   *   - 流结束后固定补 2 个换行 (而不是依赖最后一个 chunk 是否带 \n),
+   *     这样无论上游怎么流,光标都落在干净新行上,@inquirer/input 的 > 提示符
+   *     不会再出现"跳到顶部"的视觉错位
    */
   private async processInput(input: string): Promise<void> {
     if (!this.ai || !this.session) {
@@ -268,11 +279,14 @@ export class REPLLoop {
     this.session.addMessage('user', input);
 
     // 视觉提示用户:AI 开始工作,但不阻塞,可滚动
-    this.output.printInfo(chalk.gray('🤖 Thinking...\n'));
+    this.output.printInfo(chalk.gray('🤖 Thinking...'));
+    // 确保 cursor 在新行上,这样第一个 chunk 来的清除 ANSI 才能正确工作
+    process.stdout.write('\n');
 
     let fullResponse = '';
     let firstChunk = true;
     this.streamAbort = new AbortController();
+    this.ai.setCurrentAbortSignal(this.streamAbort.signal);
 
     try {
       const stream = this.ai.chatStream(
@@ -282,8 +296,10 @@ export class REPLLoop {
       );
       for await (const chunk of stream) {
         if (firstChunk) {
-          // 第一个 chunk 到来,把 "Thinking..." 那行通过 ANSI 清除
-          // 但不能清光——只把光标移到下一行的开头即可,内容自然出现在前面
+          // 第一个 chunk 到来,把上一行的 "🤖 Thinking..." 通过 ANSI 清除:
+          // \r 回到行首, \x1b[2K 清除整行,然后开始输出 chunk。
+          // 这样不会留下 spinner 的痕迹。
+          process.stdout.write('\r\x1b[2K');
           firstChunk = false;
         }
         // 关键:直接 stdout.write,允许任意长度、可滚动
@@ -293,16 +309,20 @@ export class REPLLoop {
         if (this.streamAbort.signal.aborted) break;
       }
 
-      console.log(); // 流结束换行
+      // v2.2.1: 强制补 2 个换行,保证无论最后一个 chunk 是否带 \n,
+      // 光标都稳定落在 AI 输出下方至少 1 行,下一轮的 > 提示符不会跑到
+      // AI 输出的同一行/上方 (这是用户报告的 "跳到顶部" 现象)。
+      process.stdout.write('\n\n');
     } catch (error: any) {
       if (error?.name === 'AbortError' || this.streamAbort.signal.aborted) {
-        console.log();
+        process.stdout.write('\n');
         this.output.printWarning('[cancelled]');
       } else {
         this.output.printError(error.message);
       }
     } finally {
       this.streamAbort = null;
+      this.ai.setCurrentAbortSignal(undefined);
     }
 
     // 治本修复:被 abort 的截断响应 **不要** 写入 SessionManager。
@@ -324,6 +344,24 @@ export class REPLLoop {
       this.session.truncate(20);
     }
     this._wasAborted = false;
+  }
+
+  /**
+   * v2.2.1: ask the user to confirm a Tool action. Backed by
+   * @inquirer/confirm, which uses raw-mode TUI like @inquirer/input
+   * (no native readline, works on Windows). If the stream is currently
+   * active (Ctrl+C in flight) we deny so the tool doesn't keep running.
+   */
+  private async askConfirm(msg: string): Promise<boolean> {
+    if (this.streamAbort?.signal.aborted) return false;
+    try {
+      return await confirm({
+        message: chalk.yellow(`⚠️  Tool wants to execute: ${msg}`),
+        default: false,
+      });
+    } catch {
+      return false;
+    }
   }
 
   private showContext(): void {
