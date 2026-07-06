@@ -5,18 +5,25 @@
  * Claude Code-like interactive CLI
  */
 
-// 强制 UTF-8 编码 (Windows) - 必须在任何输出之前
+// 强制 UTF-8 编码 (Windows)。
 // 注意:此项目是 ESM（package.json "type":"module"），绝不能在源码里直接
 // 调用顶层 `require()`，否则会在所有平台上抛 ReferenceError。Windows 上
 // 需要用 `createRequire(import.meta.url)` 才能拿到 CJS 风格的 `require`。
+//
+// 2.1.2 — chcp 65001 改为异步 fire-and-forget。原先的 `execSync` 会阻塞
+// 主进程 60-80ms (实测),变成 chcp 还没返回就开始打印 banner,看起来很慢。
+// 现代 Windows 终端 (Win10 1903+) 默认已经是 UTF-8,所以这一步只是一个
+// 兼容性兜底,允许延后。我们用 setImmediate 立即开始 banner 的打印。
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
 if (process.platform === 'win32') {
-  try {
-    // 执行 chcp 65001 设置代码页
-    require('child_process').execSync('chcp 65001', { stdio: 'ignore', windowsHide: true });
-  } catch {}
+  // Fire-and-forget — don't block the banner.
+  setImmediate(() => {
+    try {
+      require('child_process').exec('chcp 65001 >NUL 2>&1', { windowsHide: true });
+    } catch {}
+  });
 }
 
 import { program } from 'commander';
@@ -25,7 +32,7 @@ import ora from 'ora';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import {
-  existsSync, readdirSync, statSync, mkdirSync, writeFileSync,
+  existsSync, mkdirSync, writeFileSync,
   readFileSync
 } from 'fs';
 
@@ -35,11 +42,21 @@ import pkg from '../package.json' with { type: 'json' };
 import { AIEngine } from './core/ai-engine.js';
 import { SessionManager } from './core/session.js';
 import { ConfigManager } from './core/config.js';
-import { FileTool, ShellTool, GitTool, SearchTool } from './tools/index.js';
-import { WelcomeScreen } from './repl/welcome.js';
-import { REPLLoop } from './repl/loop.js';
+// 2.1.2 — FileTool/ShellTool/GitTool/SearchTool/WelcomeScreen/REPLLoop
+// 现在改为按需动态 import。`node dist/index.js` 启动时只需要 commander + chalk
+// + ora + AIEngine + SessionManager + ConfigManager。这些是
+// `node dist/index.js -i` (REPL 模式) 必备的最小集。
+const fileURLEP = import.meta.url;
+async function lazyLoadTools() {
+  const [{ FileTool, ShellTool, GitTool, SearchTool }, { REPLLoop }, { WelcomeScreen }] = await Promise.all([
+    import('./tools/index.js'),
+    import('./repl/loop.js'),
+    import('./repl/welcome.js'),
+  ]);
+  return { FileTool, ShellTool, GitTool, SearchTool, REPLLoop, WelcomeScreen };
+}
 
-const __filename = fileURLToPath(import.meta.url);
+const __filename = fileURLToPath(fileURLEP);
 const __dirname = dirname(__filename);
 const VERSION: string = pkg.version;
 
@@ -62,6 +79,7 @@ program
   .command('init')
   .description('初始化配置/设置向导')
   .action(async () => {
+    const { WelcomeScreen } = await lazyLoadTools();
     await WelcomeScreen.interactiveSetup();
   });
 
@@ -118,6 +136,7 @@ program
   .action(async (prompt, options) => {
     // Check for API key and show welcome if needed
     const hasApiKey = checkApiKey();
+    const { WelcomeScreen, REPLLoop } = await lazyLoadTools();
 
     if (!hasApiKey) {
       WelcomeScreen.show();
@@ -159,40 +178,21 @@ function getProjectContext(): string {
   const info: string[] = [];
 
   try {
-    // Package info
+    // Package info (one read of cwd/package.json — cheap, sync is fine).
     const pkgPath = join(cwd, 'package.json');
     if (existsSync(pkgPath)) {
       info.push(`📦 Project: ${cwd}`);
-      // 使用顶部静态导入的 readFileSync,避免在 ESM 模块里 require('fs')
       const userPkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
       info.push(`   Name: ${userPkg.name || 'unknown'}`);
       if (userPkg.dependencies && Object.keys(userPkg.dependencies).length > 0) {
         info.push(`   Deps: ${Object.keys(userPkg.dependencies).length} packages`);
       }
+      // 2.1.2: 不再递归遍历 cwd 数所有 .ts/.js/.py 等源文件。Big projects
+      // 里的 node_modules / monorepo 会让 readdirSync 在启动时阻塞 100-300ms,
+      // 是启动"感觉慢"的最大可控项之一。如果用户真的关心文件数,可以用
+      // `git ls-files | wc -l` 替代,而不是阻塞 REPL bootstrap。
     } else {
       info.push(`📁 Working dir: ${cwd}`);
-    }
-
-    // Count files
-    let fileCount = 0;
-    const countFiles = (dir: string) => {
-      try {
-        const items = readdirSync(dir);
-        for (const item of items) {
-          if (item === 'node_modules' || item === '.git') continue;
-          const fullPath = join(dir, item);
-          const stat = statSync(fullPath);
-          if (stat.isDirectory()) {
-            countFiles(fullPath);
-          } else if (/\.(ts|js|py|go|rs|java|cpp|c|h)$/.test(item)) {
-            fileCount++;
-          }
-        }
-      } catch {}
-    };
-    countFiles(cwd);
-    if (fileCount > 0) {
-      info.push(`   Files: ${fileCount} code files`);
     }
   } catch {}
 
@@ -215,11 +215,13 @@ async function executeTask(prompt: string, options: any) {
     const ai = new AIEngine(config);
     const session = new SessionManager();
 
-    // Register tools - all available tools
-    const shellTool = new ShellTool();
-    const fileTool = new FileTool();
-    const gitTool = new GitTool();
-    const searchTool = new SearchTool();
+    // Register tools - all available tools. Lazy-loaded so startup cold path
+    // doesn't pay for them unless executeTask actually runs.
+    const { ShellTool: _ST, FileTool: _FT, GitTool: _GT, SearchTool: _XT } = await import('./tools/index.js');
+    const shellTool = new _ST();
+    const fileTool = new _FT();
+    const gitTool = new _GT();
+    const searchTool = new _XT();
 
     ai.registerTool(shellTool);
     ai.registerTool(fileTool);
@@ -281,6 +283,7 @@ async function startInteractive() {
   console.log(chalk.gray('\n' + '─'.repeat(40) + '\n'));
 
   try {
+    const { REPLLoop } = await lazyLoadTools();
     const repl = new REPLLoop();
     await repl.start();
   } catch (error: any) {

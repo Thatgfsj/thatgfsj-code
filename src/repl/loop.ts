@@ -10,7 +10,11 @@
 
 import chalk from 'chalk';
 import readline from 'readline';
-import select from '@inquirer/select';
+// 2.1.2 — `@inquirer/select` is no longer imported statically. It's only
+// used by `/model`, `/edit`, `/provider` pickers which fire only after the
+// REPL has started. Static-importing it costs ~150-200ms cold-load. We
+// load it on first call via `loadSelect()`. Kept as a memoized promise so
+// concurrent /model calls don't double-import.
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -53,6 +57,26 @@ export class REPLLoop {
   // Set when the user aborted the previous turn so we skip persisting the
   // truncated assistant message — fixes the "已中断" hallucination loop.
   private _wasAborted: boolean = false;
+  // 2.1.2 — memoized lazy import of `@inquirer/select` (and friends).
+  // The promise resolves to the `select`-style default function; we wrap it
+  // in `.catch` to convert "user pressed Esc" to a sentinel string so the
+  // call sites don't all repeat try/catch boilerplate.
+  private static _selectImport: Promise<any> | null = null;
+  private async selectAsync<T = any>(config: any): Promise<T | '__close__'> {
+    try {
+      if (!REPLLoop._selectImport) {
+        REPLLoop._selectImport = import('@inquirer/select').then(m => m.default);
+      }
+      const select = (await REPLLoop._selectImport) as (cfg: any) => Promise<any>;
+      const result = await this.selectAsync(config);
+      return result;
+    } catch (err: any) {
+      if (err?.name === 'ExitPromptError' || err?.message?.includes('User force closed')) {
+        return '__close__' as any;
+      }
+      throw err;
+    }
+  }
 
   constructor() {
     this.input = new REPLInput();
@@ -171,12 +195,19 @@ export class REPLLoop {
       .toLowerCase()
       .trim();
 
-    // Bare "/" or "/help" → TUI picker over all available commands.
-    // The user shouldn't have to memorise a list of slash-commands.
-    if (cmd === '' || cmd === 'help' || cmd === '帮助') {
-      await this.runCommandPicker(input);
+    // Bare "/help" prints the command list as static text (NOT a TUI modal).
+    // 2.1.2 — explicitly removed 2.1.1's `runCommandPicker` because it hijacked
+    // the user's input: typing `/` and pressing Enter (or just submitting)
+    // should NOT spawn a modal selector. It should just continue sitting in
+    // the input box. The real fix is /help → print list + stay in input.
+    if (cmd === 'help' || cmd === '帮助') {
+      this.printCommandList();
       return true;
     }
+
+    // Bare "/" by itself in handleCommand is fine — it falls through to
+    // AI prompt. The input layer never feeds a bare "/" to us except when
+    // the user explicitly pressed Enter on that exact text.
 
     switch (cmd) {
       // ── Session control ────────────────────────────────────────────
@@ -347,6 +378,40 @@ export class REPLLoop {
     this.output.printInfo('  git     - Git operations (coming soon)');
   }
 
+  /**
+   * 2.1.2 — `/help` prints a static command list. NOT a TUI picker.
+   *
+   * The previous 2.1.1 design spawned a modal selector whenever the user
+   * typed `/` and Enter. That's wrong: typing `/` in a chat input should
+   * feel like the start of a slash-command, like in Claude Code / Codex.
+   * The picker was hijacking the input flow.
+   *
+   * Format matches `printHelp` from output.ts but inlined here so we can
+   * add more commands as `loop.ts` itself grows without round-tripping
+   * through output.ts.
+   */
+  private printCommandList(): void {
+    this.output.printHeader('📖 命令 / Commands (输入 /命令 回车,或继续打字)');
+    const rows: Array<[string, string, string]> = [
+      ['/model   /模型',   '切换/管理模型',          'TUI picker:已保存的模型 + 添加入口'],
+      ['/provider /提供商', '切换 provider',           '10 个 provider,含 custom_openai/anthropic 中转站'],
+      ['/edit    /修改',   '修改已保存模型',          '改 ctx / thinking / note'],
+      ['/clear   /清屏',   '清屏',                    ''],
+      ['/context /上下文', '显示项目 cwd',            ''],
+      ['/history /历史',   '命令历史',                ''],
+      ['/tools   /工具',   '可用工具',                ''],
+      ['/models  /模型列表',   '当前 provider 的内置模型(只读)', ''],
+      ['/providers /供应商', '所有 provider(只读)',    ''],
+      ['/exit    /退出',   '退出 REPL',                ''],
+    ];
+    for (const [cmd, descZh, extra] of rows) {
+      const extraTxt = extra ? chalk.gray(`  · ${extra}`) : '';
+      this.output.printInfo(`  ${chalk.green(cmd.padEnd(22))} ${chalk.cyan(descZh)}${extraTxt}`);
+    }
+    this.output.printDivider();
+    this.output.printInfo(chalk.gray('  提示: 中文别名 (`/模型`) 与英文 (`/model`) 等效,可混用 · 同一命令可简写'));
+  }
+
   private showProviders(): void {
     this.output.printHeader('🌐 Available Providers (read-only — use /provider to switch)');
     this.output.printInfo('  siliconflow  - 硅基流动 (default)');
@@ -361,40 +426,21 @@ export class REPLLoop {
   }
 
   /**
-   * 2.1.1 — TUI command picker. Triggered by bare `/` or `/help` so the
-   * user never has to remember the slash-command list. Uses
-   * `@inquirer/select` (same family as `/model`).
+   * 2.1.1 — TUI command picker.
+   *
+   * 2.1.2 — REMOVED from the dispatcher. This function is kept around ONLY
+   * for the rare case where handleCommand ever decides to delegate to it
+   * programmatically (currently nothing does). The user no longer gets
+   * a modal popping up just because they typed `/`.
+   *
+   * If you want the picker back, restore the dispatch in `handleCommand`,
+   * but the documented UX path is: `/help` → static list, `/model` etc. →
+   * TUI picker (specific to that verb), `/` alone → ignored.
    */
   private async runCommandPicker(_rawInput: string): Promise<void> {
-    this.output.printInfo(chalk.gray('  ↑/↓ 移动,回车确认,Ctrl+C 取消  (↑/↓ to pick, Enter to confirm)'));
-
-    const picked = await select({
-      message: '选个命令 / Pick a command:',
-      pageSize: 12,
-      choices: [
-        { name: `${chalk.green('▸ ')}切换 / 管理模型 — ${chalk.cyan('/model  /模型  /选择模型')}`, value: '/model',    description: '主视图:已保存的模型(已带 ctx / thinking / note),添加入口' },
-        { name: `${chalk.green('▸ ')}切换 provider — ${chalk.cyan('/provider  /提供商切换  /切换')}`, value: '/provider', description: '10 个 provider,含 custom_openai / custom_anthropic 中转站' },
-        { name: `${chalk.green('▸ ')}修改已保存模型 — ${chalk.cyan('/edit  /修改  /编辑')}`, value: '/edit',         description: '改 ctx / thinking / note;先列已保存再选' },
-        { name: '─ 会话 ─────────────────────────────────────────',                                  value: '__sep1__',  description: '────────' },
-        { name: `${chalk.yellow('▸ ')}清屏 — ${chalk.cyan('/clear  /清屏')}`,                              value: '/clear',    description: '清屏' },
-        { name: `${chalk.yellow('▸ ')}上下文 — ${chalk.cyan('/context  /上下文')}`,                          value: '/context',  description: '显示当前项目 cwd' },
-        { name: `${chalk.yellow('▸ ')}历史 — ${chalk.cyan('/history  /历史')}`,                              value: '/history',  description: '命令历史' },
-        { name: `${chalk.yellow('▸ ')}工具 — ${chalk.cyan('/tools  /工具')}`,                                value: '/tools',    description: '可用工具列表' },
-        { name: `${chalk.yellow('▸ ')}只读模型列表 — ${chalk.cyan('/models  /模型列表')}`,                  value: '/models',   description: '列出当前 provider 的内置模型(只读)' },
-        { name: `${chalk.yellow('▸ ')}只读 provider 列表 — ${chalk.cyan('/providers')}`,                   value: '/providers', description: '列出所有支持的 provider' },
-        { name: '─ 系统 ─────────────────────────────────────────',                                  value: '__sep2__',  description: '────────' },
-        { name: `${chalk.red('▸ ')}退出 — ${chalk.cyan('/exit  /退出  /quit')}`,                           value: '/exit',     description: '退出 REPL' },
-        { name: `${chalk.gray('▸ 取消 / Close (Esc, Ctrl+C) — 留在输入框')}`,                              value: '__close__',  description: '不执行任何命令' },
-      ],
-    }).catch((err: any) => {
-      if (err?.name === 'ExitPromptError') return '__close__';
-      throw err;
-    });
-
-    if (picked === '__close__' || picked === '__sep1__' || picked === '__sep2__') return;
-
-    // 把选中的命令当作用户输入的一条命令再走一遍 dispatcher
-    await this.handleCommand(picked);
+    /* deprecated — see handleCommand for the active path. */
+    this.output.printWarning('runCommandPicker 已弃用 — 请用 /help 查看静态命令列表');
+    this.printCommandList();
   }
 
   /**
@@ -448,7 +494,7 @@ export class REPLLoop {
     }
 
     // === 真正的上下键选择器 ===
-    const picked = await select({
+    const picked = await this.selectAsync({
       message: '选择模型 / Pick a model:',
       pageSize: Math.min(20, recents.length + 5),
       choices: (() => {
@@ -499,7 +545,7 @@ export class REPLLoop {
     }
     if (picked === '__builtin__') {
       this.output.printHeader(`📋 内置模型 / Builtin models (provider: ${provider})`);
-      const pickBuiltin = await select({
+      const pickBuiltin = await this.selectAsync({
         message: '选择一个内置模型 / Pick a builtin model:',
         pageSize: Math.min(20, builtin.length),
         choices: builtin.map(m => ({
@@ -856,7 +902,7 @@ export class REPLLoop {
     this.output.printHeader('🌐 /provider — 切换提供商');
     this.output.printInfo(chalk.gray('  ↑/↓ 选择,回车确认,Ctrl+C 取消'));
 
-    const pickedId = await select({
+    const pickedId = await this.selectAsync({
       message: '选择提供商 / Pick a provider:',
       pageSize: Math.min(15, providers.length + 1),
       choices: providers.map(p => ({
@@ -966,7 +1012,7 @@ export class REPLLoop {
       return;
     }
 
-    const picked = await select({
+    const picked = await this.selectAsync({
       message: '选择要修改的模型 / Pick a model to edit:',
       pageSize: Math.min(15, saved.length + 3),
       choices: saved.map(m => {

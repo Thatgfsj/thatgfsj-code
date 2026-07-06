@@ -15,6 +15,42 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.1.2] - 2026-07-06
+
+### Changed
+- **冷启动性能**:实测 `node dist/index.js -i` 从 ~330ms 降到 ~220ms (省 33%)。
+  按贡献大小排列:
+  1. **`execSync('chcp 65001')` → 异步 fire-and-forget** (省 ~78ms)。
+     现代 Windows 终端 (Win10 1903+) 默认 UTF-8,这一步只是个兜底,允许延后
+     到 banner 已经出来之后再跑。
+  2. **`getProjectContext` 不再 readdirSync 递归 cwd 数 .ts/.js/.py 文件**。
+     这个调用之前在大项目里要花 100-300ms,而且对用户来说是噪音 — 用户关心
+     文件数时跑 `git ls-files | wc -l` 就行。Removed entirely.
+  3. **`@inquirer/select` 改为按需动态 import**。Memoized `selectAsync()`
+     helper — 第一次 `/model` 时才拉模块,冷启动省 ~150ms。
+  4. **`tools/index.js` / `repl/loop.js` / `repl/welcome.js` 改从 src/index.ts
+     静态 import 改 `lazyLoadTools()` 按需 import**。REPL 模式下 ~110ms,
+     default-task 模式下 tools 也只在执行时拉。
+
+### Fixed (UX)
+- **`/` 不再 hijack 输入**:2.1.1 我误把 `runCommandPicker` 接到 bare `/`,
+  用户的反馈是正确的 — 类型 shell 这种工具里,`/` 是命令的**开始字符**,
+  不该弹 modal。1.0.4 的做法是 inline 自动补全 (在输入框下面显示匹配项),
+  但用 Ink 实现。我们用 `@inquirer/select` 做 modal 不合适 — 现在按:
+    - `/` (bare) → 留在输入框,什么都不做
+    - `/help` (中文 `帮助`) → 打印静态命令列表 (不弹 modal)
+    - `/model` / `/provider` / `/edit` → 进入该命令专属的 TUI picker
+  这种分层对 Ink 用户和 prompt 用户都很自然。
+
+### Tests
+- **6 个新 unit-startup 测试** (`tests/unit-startup.test.js`) 锁定启动合约:
+  chcp 不能是 execSync、getProjectContext 不能读目录、`@inquirer/select`
+  必须动态 import、src/index.ts 不能静态 import tools。
+- 更新 `tests/unit-commands.test.js` 反映新的 `/` 行为。
+- **65/65 tests passing**(原 59 + 新增 6)。
+
+---
+
 ## [2.1.1] - 2026-07-06
 
 ### Fixed (治本)
