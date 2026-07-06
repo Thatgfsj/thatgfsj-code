@@ -10,6 +10,7 @@ import { ToolRegistry } from '../tools/index.js';
 import { HookManager } from '../hooks/index.js';
 import { SystemPromptBuilder } from '../prompts/index.js';
 import { SkillRegistry } from '../skills/index.js';
+import { compressThinking } from '../utils/thinking.js';
 import type { ChatMessage, ChatResponse } from '../types.js';
 
 export class App {
@@ -20,6 +21,12 @@ export class App {
   hooks: HookManager;
   prompts: SystemPromptBuilder;
   skills: SkillRegistry;
+  /**
+   * v2.2.5 (product 0.4.2): toggle <think> block compression. Default
+   * true. Toggled by `--show-thinking` on the CLI or `/thinking on|off`
+   * in the REPL.
+   */
+  showThinking: boolean = false;
 
   private constructor(
     config: ConfigManager,
@@ -86,8 +93,11 @@ export class App {
    *
    * v2.2.4 (port from v2.1.0): persistence of the assistant message
    * uses addMessageSafe, which drops the message if it contains
-   * pollution markers like "[已中断]". Without this, the next turn's
-   * LLM echoes the marker back, creating a hallucination loop.
+   * pollution markers like "[已中断]".
+   *
+   * v2.2.5 (product 0.4.2): persistence also strips <think> blocks
+   * (and similar reasoning delimiters) when showThinking is false,
+   * so the conversation log stays compact.
    */
   async runPrompt(prompt: string): Promise<string> {
     this.session.addMessage('user', prompt);
@@ -106,8 +116,9 @@ export class App {
     }
 
     console.log();
-    // Use addMessageSafe so a polluted message gets dropped.
-    this.session.addMessageSafe('assistant', fullResponse);
+    // v2.2.5: compress <think> blocks before persisting.
+    const toPersist = compressThinking(fullResponse, this.showThinking);
+    this.session.addMessageSafe('assistant', toPersist);
     return fullResponse;
   }
 }

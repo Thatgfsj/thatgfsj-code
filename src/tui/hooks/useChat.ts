@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import type { MessageData } from '../components/ChatMessage.js';
 import type { ToolCallData } from '../components/ToolCall.js';
 import type { App } from '../../app/index.js';
+import { compressThinking, splitThinking, summarizeThinking } from '../../utils/thinking.js';
 
 interface ChatState {
   messages: MessageData[];
@@ -109,14 +110,23 @@ export function useChat(app: App) {
         (fullContent.trim() || currentToolCalls.length > 0);
 
       if (shouldPersist) {
-        // Note: we don't re-persist currentToolCalls here — those
-        // are the TUI's local `ToolCallData[]` (just name/args),
-        // not the canonical `ToolCall[]` (with id/type/function)
-        // that the OpenAI protocol expects. The LLMService agent
-        // loop already saves them in canonical form. We just save
-        // the displayable text content for the conversation log.
-        app.session.addMessageSafe('assistant', fullContent);
+        // v2.2.5: strip <think> blocks from the persisted message
+        // when compression is enabled. Same rationale as in
+        // cmd/index.tsx — keeps history compact, avoids re-feeding
+        // reasoning into the next turn's context window.
+        const toPersist = compressThinking(fullContent, app.showThinking);
+        app.session.addMessageSafe('assistant', toPersist);
       }
+
+      // v2.2.5: build a displayable version. When thinking is hidden
+      // we still want the user to see a one-line indicator of how
+      // much reasoning the model did, plus the conclusion.
+      const split = splitThinking(fullContent);
+      const displayContent = app.showThinking
+        ? fullContent
+        : (split.thinking
+            ? `${summarizeThinking(split)}\n${split.conclusion}`
+            : fullContent);
 
       setState(prev => ({
         ...prev,
@@ -125,7 +135,7 @@ export function useChat(app: App) {
           ...(shouldPersist
             ? [{
                 role: 'assistant' as const,
-                content: fullContent,
+                content: displayContent,
                 toolCalls: currentToolCalls.length > 0 ? currentToolCalls : undefined,
               }]
             : []),

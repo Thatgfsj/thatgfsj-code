@@ -54,6 +54,7 @@ import { program } from 'commander';
 import chalk from 'chalk';
 import { App } from '../app/index.js';
 import { WelcomeScreen } from '../tui/welcome.js';
+import { compressThinking, summarizeThinking, splitThinking } from '../utils/thinking.js';
 
 process.on('uncaughtException', (error) => {
   console.error(chalk.red('\n  Error:'), error.message);
@@ -68,11 +69,12 @@ process.on('unhandledRejection', (reason) => {
 program
   .name('gfcode')
   .description('Thatgfsj Code - AI Coding Assistant')
-  .version('0.4.1')
+  .version('0.4.2')
   .argument('[prompt]', 'Task to execute (omit to start interactive mode)')
   .option('-m, --model <model>', 'Specify model')
   .option('-i, --interactive', 'Force interactive mode')
-  .action(async (prompt: string | undefined, options: { model?: string; interactive?: boolean }) => {
+  .option('--show-thinking', 'Show full <think>...</think> reasoning blocks (default: compress to one-line summary)')
+  .action(async (prompt: string | undefined, options: { model?: string; interactive?: boolean; showThinking?: boolean }) => {
     try {
       const app = await App.create();
 
@@ -124,17 +126,30 @@ program
         const abortCtrl = new AbortController();
         const onSigInt = () => { abortCtrl.abort(); };
         process.once('SIGINT', onSigInt);
+        // v2.2.5 (product 0.4.2): compress <think> blocks at render time
+        // AND before persisting to history. Without this, every assistant
+        // message balloons history with reasoning the user has already
+        // seen compressed, and context windows blow up fast.
+        const showThinking = !!options.showThinking;
 
         try {
           process.stdout.write(chalk.gray('  Thinking...'));
           const stream = app.streamResponse();
 
+          // v2.2.5: stream-time rendering stays simple — we just buffer
+          // the full response. Post-process at the end (compress
+          // thinking blocks once). This avoids a state machine for
+          // "are we inside <think> right now" mid-stream which would
+          // be flaky if the model splits the tag across chunks.
           for await (const chunk of stream) {
+            if (abortCtrl.signal.aborted) break;
             // Clear the entire "Thinking..." line — must use enough
             // spaces to overwrite any longer thinking indicator.
             process.stdout.write('\r' + ' '.repeat(80) + '\r');
 
-            // Parse tool messages
+            // Parse tool messages — these should NOT be compressed even
+            // when thinking is hidden, because they carry real signal
+            // (tool name + args + result).
             if (chunk.includes('@@TOOL@@')) {
               const parts = chunk.split('\n');
               for (const part of parts) {
@@ -142,18 +157,12 @@ program
                   try {
                     const data = JSON.parse(part.slice(8));
                     if (data.action === 'call') {
-                      // v2.2.4: visible separator between AI text and
-                      // tool execution. Without this, long tool output
-                      // bleeds into the next AI message visually.
                       console.log();
                       console.log(chalk.cyan(`  ⚙ ${data.name}: ${formatArgs(data.args)}`));
                       console.log(chalk.gray('  ' + '─'.repeat(40)));
                     } else if (data.action === 'result') {
                       const output = data.output || data.error || '';
                       const lines = output.split('\n');
-                      // v2.2.4: truncate to 20 lines + show count
-                      // if we cut off (registry dumps / dir listings
-                      // can be hundreds of lines).
                       const MAX_TOOL_LINES = 20;
                       const truncated = lines.length > MAX_TOOL_LINES;
                       const visible = truncated ? lines.slice(0, MAX_TOOL_LINES) : lines;
@@ -167,31 +176,67 @@ program
                     }
                   } catch {}
                 } else if (part) {
-                  // v2.2.4: AI text before/after tool calls should be
-                  // indented like the rest of the conversation. Old
-                  // code prefixed with `  │ ` (vertical bar) which
-                  // visually merged with tool output — confusing.
+                  // Mid-stream text chunk — leave it raw. The post-
+                  // process step below will compress any <think>
+                  // blocks before printing them as the final rendered
+                  // output. (We can't reliably strip mid-stream
+                  // because the closing </think> might be in a later
+                  // chunk.)
                   process.stdout.write(chalk.cyan('  │ ') + part);
                 }
               }
             } else {
-              // Plain AI text — wrap in '│ ' indent to match the
-              // conversation frame above.
-              process.stdout.write(chalk.cyan('  │ ') + chunk);
+              // Plain AI text chunk — buffer only. Same reasoning:
+              // post-process at end avoids mid-stream delimiter
+              // races.
+              fullResponse += chunk;
+              // Show the chunk as it streams, but we'll re-render the
+              // final compressed version below. To avoid double-
+              // printing, only echo when we're NOT going to post-
+              // process (i.e., when showThinking is true and we want
+              // to see everything live).
+              if (showThinking) {
+                process.stdout.write(chalk.cyan('  │ ') + chunk);
+              }
             }
-            fullResponse += chunk;
-            if (abortCtrl.signal.aborted) break;
+          }
+
+          // v2.2.5: post-process. Strip <think> blocks, summarize,
+          // and print the cleaned conclusion if we suppressed it
+          // during streaming.
+          if (!showThinking && !abortCtrl.signal.aborted && fullResponse) {
+            const split = splitThinking(fullResponse);
+            if (split.thinking) {
+              // Clear what we already streamed (we suppressed text
+              // chunks during streaming, so there's nothing to clear
+              // unless showThinking was on; in that case the text
+              // already contains the <think> block live and there's
+              // no point double-printing).
+              const summary = summarizeThinking(split);
+              if (summary) {
+                console.log(chalk.gray(`  ${summary}`));
+              }
+              if (split.conclusion) {
+                console.log(chalk.cyan('  │ ') + split.conclusion);
+              }
+            } else if (fullResponse.trim()) {
+              // No thinking block found — print the conclusion if we
+              // hadn't already (showThinking=false suppresses
+              // streaming text).
+              console.log(chalk.cyan('  │ ') + fullResponse);
+            }
           }
 
           console.log();
-          // v2.2.4: skip persistence on abort. The model may have
-          // emitted "[已中断]" or other truncation markers; persisting
-          // them creates the hallucination loop on next turn.
+          // v2.2.4: skip persistence on abort.
           if (!abortCtrl.signal.aborted) {
-            // Defensive: even if the abort signal wasn't tripped,
-            // drop the assistant message if SessionManager's filter
-            // considers it polluted (e.g. it contains '[已中断]').
-            const accepted = app.session.addMessageSafe('assistant', fullResponse);
+            // v2.2.5: persist only the conclusion (no <think> blocks)
+            // when compression is enabled. This keeps the conversation
+            // log readable AND keeps context-window usage low.
+            const toPersist = showThinking
+              ? fullResponse
+              : compressThinking(fullResponse, false);
+            const accepted = app.session.addMessageSafe('assistant', toPersist);
             if (!accepted) {
               console.error(chalk.yellow(
                 '  ⚠️  Dropped assistant message containing [已中断] marker.\n' +

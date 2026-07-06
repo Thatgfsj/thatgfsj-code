@@ -18,6 +18,7 @@ const CMD_ALIASES: Record<string, string> = {
   '/mcp': '/mcp',
   '/帮助': '/help',
   '/服务商': '/provider',
+  '/思考': '/thinking',
 };
 
 export const COMMAND_LIST = [
@@ -125,6 +126,26 @@ export function useCommands(app: App) {
       };
     }
 
+    // ── /thinking on|off ─────────────────────────────────
+    if (name === '/thinking' || name === '/思考') {
+      if (!arg) {
+        return {
+          handled: true,
+          output: `思考块显示: ${app.showThinking ? '开启 (显示完整 <think>...</think>)' : '关闭 (压缩为单行提示)'}`,
+        };
+      }
+      const want = arg.toLowerCase();
+      if (want === 'on' || want === '开启' || want === 'true' || want === '1') {
+        app.showThinking = true;
+        return { handled: true, output: '✓ 已开启完整思考块显示' };
+      }
+      if (want === 'off' || want === '关闭' || want === 'false' || want === '0') {
+        app.showThinking = false;
+        return { handled: true, output: '✓ 已关闭思考块显示 (压缩为单行提示)' };
+      }
+      return { handled: true, output: `用法: /thinking on|off (当前: ${app.showThinking ? 'on' : 'off'})` };
+    }
+
     // ── /help ───────────────────────────────────────────
     if (name === '/help') {
       return {
@@ -135,6 +156,7 @@ export function useCommands(app: App) {
           '  /服务商          更换服务商',
           '  /新建            新建会话',
           '  /压缩            压缩上下文',
+          '  /思考 [on|off]   切换思考块显示',
           '  /技能 [id]       管理技能',
           '  /mcp             MCP 设置',
           '  /帮助            查看帮助',

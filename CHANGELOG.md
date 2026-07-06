@@ -4,68 +4,67 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [2.2.4 / 产品 0.4.1] - 2026-07-06  - 修三个 v2.2.3 暴露的实际 bug
+## [2.2.5 / 产品 0.4.2] - 2026-07-06  - 压缩 <think> 思考块 (类似 opencode)
 
 > 双版本号方案:
 >
 > | 位置 | 版本 | 含义 |
 > |---|---|---|
-> | `package.json` `"version"` | `2.2.4` | npm 包版本,正常递增 (+0.0.1) |
-> | `src/cmd/index.tsx` `.version(...)` | `0.4.1` | **产品版本** (`gfcode --version` 看到的) |
+> | `package.json` `"version"` | `2.2.5` | npm 包版本,正常递增 (+0.0.1) |
+> | `src/cmd/index.tsx` `.version(...)` | `0.4.2` | **产品版本** (`gfcode --version` 看到的) |
 
 ### Fixed
 
-**Bug 1: 终端中文乱码** — `chcp 65001` 调用被一个空的 `try/catch`
-吞掉了,而且 `process.stdout` 没设默认编码,Windows 上中文输出照样走
-GBK 编码。修复:
+**Bug: 思考过程太长,刷屏** — 在 1.0.4 源码栈下,即使是"非推理"模型
+(Qwen / DeepSeek-V3 chat / Kimi 等) 也会在回复里发整段 `<think>...</think>`
+块,经常是几十行内部独白。这块内容对用户来说没有可读价值,只
+是噪音 — 用户在 v2.2.4 的会话日志里能看到这问题特别严重。
 
-- `src/cmd/index.tsx` 顶部 `chcp 65001` 加上 `>NUL` (避免污染 stdout)
-- `process.stdout.setDefaultEncoding('utf8')` + `process.stderr.setDefaultEncoding('utf8')`
-  在 import 之前强制执行,无论 `chcp` 成不成功都走 UTF-8。
+参考 opencode 的做法 (`packages/opencode/src/session/prompt.ts:244`
+里的 `<think>[\s\S]*?<\/think>` 正则),引入压缩模式:
 
-**Bug 2: `[已中断]` 污染循环 (这个最严重)** — 在 v2.2.3 的会话日志
-里能看到这个 bug 反复触发。原因有两个:
+- 新文件 `src/utils/thinking.ts`,导出三个 helper:
+  - `splitThinking(content)` — 把 `<think>...` / `<reasoning>...</reasoning>` /
+    `[THINK]...[/THINK]` 三种块格式剥离开,返回 `{thinking, conclusion,
+    thinkingLines, thinkingHint}`。
+  - `summarizeThinking(split)` — 输出 `💭 thought for N lines: <first hint>`
+    单行摘要。
+  - `compressThinking(content, showThinking)` — `showThinking=false` 时把
+    思考块压成一行 + 结论;`showThinking=true` 时原样返回。
+- 三个调用点全部接入压缩:
+  - `src/cmd/index.tsx`: 流式阶段**不**实时打印 AI 文字 (避免半个 <think>
+    块被切到屏幕上),流结束后用 `splitThinking + summarizeThinking` 输出
+    一行摘要 + 结论。**持久化时只保存结论**,让 history 不被思考块撑大。
+  - `src/app/index.ts:runPrompt`: 持久化前 `compressThinking(fullResponse,
+    showThinking)`。
+  - `src/tui/hooks/useChat.ts`: 同上,持久化 + 显示内容都走压缩。
 
-1. `src/tui/hooks/useChat.ts` 在 abort 时**字面上**给 assistant 消息
-   加了 `'\n\n[已中断]'` 后缀然后持久化 (`app.session.addMessage(...)`)。
-   下一轮 LLM 看到这条历史,把 `[已中断]` 当成上下文的一部分复读回
-   来,形成自反馈循环。
+### Added
 
-2. `src/session/index.ts` 没有 anti-pollution 过滤器,v2.1.0 的 `looksPolluted`
-   没移植到 1.0.4 这条线。
+- **CLI flag `--show-thinking`**: 在命令行下开启完整思考块显示 (调试用)
+- **`App.showThinking` 字段**: 默认 `false`,可通过 REPL 命令切换
+- **REPL 命令 `/thinking on|off`** (中文别名 `/思考`): 在 Ink TUI 模式下
+  切换思考块显示
 
-修复:
+### 设计选择
 
-- 端口 v2.1.0 的 `SessionManager.addMessageSafe()` + `looksPolluted()` +
-  `getDroppedCount()` 到 `src/session/index.ts`。Pollution 模式覆盖:
-  `/^\s*\[已中断\]/m`, `/已中断[^\\n]{0,40}/`, `/response truncated/i`,
-  `/output cut off/i`, `/\[interrupted\]/i`。
-- `src/cmd/index.tsx`、`src/app/index.ts:runPrompt`、`src/tui/hooks/useChat.ts`
-  三个调用点全部改成 `addMessageSafe`,abort 时不持久化 (wasAborted 守卫)。
-- `useChat.ts` 的 `'\n\n[已中断]'` 后缀删除 — 之前那个后缀**就是**
-  触发污染循环的源头。
+为什么不沿用 opencode 的"协议级分离 reasoning"?
+- opencode 把 reasoning 当成单独的 stream part 处理 (`MessageV2.ReasoningPart`),
+  那需要模型支持 reasoning API (Anthropic extended thinking / OpenAI o1-style)。
+- 我们用的多数 provider (Qwen / DeepSeek / Kimi) 把 reasoning 直接当作
+  content 的一部分输出,所以必须在**显示层**做正则剥离。
 
-**Bug 3: 工具输出和 AI 文字混在一起** — v2.2.3 的渲染器 (`src/cmd/index.tsx`)
-打印 `@@TOOL@@{...}` 标记时,工具输出前后的视觉边界缺失,长工具输出
-(注册表 dump、目录列表) 直接 bleed 进下一轮 AI 消息,屏幕读起来像
-拼贴画。
+为什么不实时 (mid-stream) 压缩?
+- 流式 chunk 是任意切分的,`<think>` 标签可能跨 chunk。实时检测需要
+  state machine,延迟和边界处理都很脆弱。
+- 流结束后压缩更可靠,而且不影响用户对结论的实时阅读(用户其实只在乎结论)。
 
-修复 (`src/cmd/index.tsx`):
+### 不在本次范围
+- `/thinking` 命令目前是全局开关,不支持 per-message 切换
+- 没有提供"展开"按钮 — 用户要看完整内容只能 `--show-thinking` 跑一遍
+- 持久化时去掉了 thinking 内容,这意味着**重放历史时也看不到完整思考**;
+  这是有意为之 (context window 优先),如需调试可以 `app.showThinking = true` 后
+  重新发起对话
+- Anthropic / Gemini SSE tool_call 流式解析 仍是 TODO
 
-- 工具调用前一行空行 + `─` 分隔线 (`⚙ name: args` 后)
-- 工具输出加 `│` 缩进,**截断到 20 行** (超出显示 `... (N more lines truncated)`)
-- 工具结果后再加一道 `─` 分隔线
-- AI 文字 (普通 chunk) 统一加 `│` 缩进,与工具输出视觉一致
-- "Thinking..." 清除行从 40 个空格扩到 80 个空格 (防止长 indicator 残留)
-
-### 不在本次范围 (留给后续 patch)
-- Anthropic / Gemini provider 的 `delta.tool_calls` 流式解析
-  (1.0.4 已经有 `LLMService` agent loop,但 `extractChunkText` 在两个
-  provider 上仍只解 text delta)
-- MCP 客户端健康检查 (`this.process?.connected` → `this.process?.stdin?.writable`)
-- Ink TUI 的 streaming 状态在 abort 时偶尔闪烁
-  (看到 `[已中断]` 的根本原因已修,视觉残影是次要问题)
-
-### Note
-- 本 patch 是 "修复 1.0.4 源码栈的实际问题",**不是引入新功能**。
-- npm `latest` 应当指向 `2.2.4`。
+---
