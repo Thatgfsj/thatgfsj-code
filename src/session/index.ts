@@ -12,20 +12,47 @@ import { ContextCompactor } from './compactor.js';
  * turn's LLM sees the marker and starts echoing it back, creating a
  * self-reinforcing "[已中断]" hallucination loop.
  *
- * Kept conservative: only matches explicit truncation markers the model
- * itself uses, NOT general mentions in normal conversation.
+ * v2.2.6.1 tightening (smoke-test driven): the design here is a
+ * two-tier check:
+ *   1. STRONG markers — unambiguous pollution, always drop:
+ *      - `[已中断]` bracketed (the model emits this exact form)
+ *      - `[interrupted]` bracketed English equivalent
+ *   2. WEAK markers — only drop if the message is also short (<200
+ *      chars). Long messages mentioning "response truncated" are
+ *      legitimate conversation (e.g. user complaints about past
+ *      behavior), not pollution.
+ *
+ * Earlier drafts matched bare `已中断` substrings and "response
+ * truncated" anywhere in the message — both were too greedy and
+ * dropped legitimate Chinese/English conversation.
  */
-const POLLUTION_PATTERNS: RegExp[] = [
-  /^\s*\[已中断\]/m,                 // marker at line start
-  /\u5df2\u4e2d\u65ad[^\n]{0,40}/,   // '已中断' followed by short truncation context
-  /response (was )?truncated/i,
-  /output (was )?cut off/i,
+const POLLUTION_STRONG: RegExp[] = [
+  /\[已中断\]/,
   /\[interrupted\]/i,
+];
+
+const POLLUTION_WEAK: RegExp[] = [
+  /^\s*[\*#>\-`]*\s*\[已中断\]/m,
+  /^\s*[\*#>\-`]*\s*\[interrupted\]/im,
+  /\bresponse (was )?(truncated|cut off|interrupted)\b/i,
+  /\boutput (was )?(truncated|cut off|interrupted)\b/i,
 ];
 
 function looksPolluted(content: string): boolean {
   if (!content) return false;
-  return POLLUTION_PATTERNS.some(p => p.test(content));
+  if (POLLUTION_STRONG.some(p => p.test(content))) return true;
+  // WEAK pattern gate:
+  //   - Message must be short (model got cut off mid-stream, so it
+  //     can't be long)
+  //   - Message must NOT end with '?' (questions are user complaints
+  //     about past behavior, not pollution)
+  //   - Message must NOT contain "last time" / "earlier" / "before"
+  //     (temporal references indicate user discussing past behavior)
+  if (content.length >= 200) return false;
+  if (/\?\s*$/.test(content.trim())) return false;
+  if (/\b(last time|earlier|before|previously|yesterday)\b/i.test(content)) return false;
+  if (POLLUTION_WEAK.some(p => p.test(content))) return true;
+  return false;
 }
 
 export class SessionManager {

@@ -4,6 +4,65 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.7 / 产品 0.4.4] - 2026-07-06  - 烟囱测试驱动的 anti-pollution 过滤收紧
+
+> 双版本号方案:
+>
+> | 位置 | 版本 | 含义 |
+> |---|---|---|
+> | `package.json` `"version"` | `2.2.7` | npm 包版本,正常递增 (+0.0.1) |
+> | `src/cmd/index.tsx` `.version(...)` | `0.4.4` | **产品版本** (`gfcode --version` 看到的) |
+
+### Fixed
+
+**Pollution 过滤误杀正常对话** — v2.2.4 引入的 anti-pollution 过滤
+(`SessionManager.looksPolluted`) 有两条过宽的模式:
+
+- `/\u5df2\u4e2d\u65ad[^\n]{0,40}/` — 把所有包含"已中断"字样的中文
+  都当污染,包括 `我看到这个进程已中断了` 这种合法对话
+- `/response (was )?truncated/i` — 把所有提到"response truncated"的句子
+  都当污染,包括用户问 `Why was the response truncated last time?`
+
+烟囱测试 `tests/smoke-pollution.mjs` 直接捕获了这两个误杀。
+
+### 修复策略 — 两层模式分级
+
+```
+STRONG (always drop):
+  [已中断]              必有方括号,模型原样输出
+  [interrupted]         English 等价
+
+WEAK (drop only when ALL gates pass):
+  ^...\[已中断\]       行首标记 (带可选 markdown 装饰)
+  ^...\[interrupted\]   行首标记
+  \bresponse (was )?(truncated|cut off|interrupted)\b
+  \boutput (was )?(truncated|cut off|interrupted)\b
+
+  + 消息长度 < 200 字符 (截断的响应通常较短)
+  + 不以 ? 结尾 (疑问句是用户讨论过往行为)
+  + 不包含 "last time" / "earlier" / "before" / "previously" / "yesterday"
+    (时间副词表明用户在回顾过去,不是污染)
+```
+
+### Smoke 测试新增
+
+- `tests/smoke-thinking.mjs` — 28 个用例覆盖 `splitThinking` / `compressThinking`
+  所有边缘情况 (空输入、多 delimiter、Chinese/English 混合、tag 跨行)
+- `tests/smoke-tool.mjs` — 18 个用例覆盖 ToolCall 渲染路径 (空结果、
+  pending、截断计数、错误、超长单行)
+- `tests/smoke-pollution.mjs` — 17 个用例覆盖 anti-pollution 过滤的
+  drop / keep 双向场景
+
+### Test summary (本 patch 后)
+```
+thinking:   28 / 28 pass
+tool:       18 / 18 pass
+pollution:  17 / 17 pass
+total:      63 / 63 pass
+```
+
+---
+
 ## [2.2.6 / 产品 0.4.3] - 2026-07-06  - 修复工具结果不显示
 
 > 双版本号方案:
