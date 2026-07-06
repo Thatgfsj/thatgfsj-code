@@ -1,36 +1,18 @@
 /**
  * REPL Input Handler
  *
- * 2.1.4 — REVERTED to a simple, safe prompt using Node's `readline`.
+ * 基于 @inquirer/input 实现，支持：
+ *   - 方向键（含数字小键盘方向键）行内移动 / 跳转词首尾
+ *   - Home / End / Backspace / Delete 行内编辑
+ *   - Ctrl+A / Ctrl+E 跳到行首/行尾（emacs 风格）
+ *   - Ctrl+C 中断当前输入（不清空整个会话），连续按两次空输入退出
+ *   - 命令历史：本地维护 history 数组，通过 default 预填上一条
  *
- * The 2.1.3 version tried to do inline command suggestions with raw ANSI
- * escape sequences. It compiled fine but caused OOM at runtime — every
- * prompt() call leaked:
- *   - a fresh readline interface (one per call — 100 turns = 100 rl instances)
- *   - a `process.stdin.on('keypress', ...)` listener that was never removed
- *   - closure state hooked to prompt-local Promise resolve() callbacks
- *
- * After a few minutes of use, V8 piled up hundreds of deferred resolves,
- * tens of MB of chalk strings, and ultimately OOM-killed the process.
- *
- * 2.1.4 simplifies back to plain readline + a single-shot "did you mean"
- * suggestion printed AFTER the user submits something that didn't match
- * a known command. So the flow is:
- *
- *   1. readline draws its own prompt
- *   2. user types + Enter
- *   3. if the input is `/foo` and `/foo` isn't a known command, we print
- *      "Did you mean …?" right above the new prompt
- *
- * This is far less ambitious than 2.1.3's "live filter" but it's stable,
- * has zero render-overlap bugs, and catches the most common typo case.
- *
- * The 1.0.4 / Claude Code "true inline completion" still requires Ink
- * or a different stack; we don't have it on this stack. We promise a
- * safe, predictable REPL — that's the priority.
+ * 不再使用 Node 内置 readline 的 rl.question()——它在 Windows 终端下
+ * 对小键盘方向键的 ANSI 转义序列不友好，会导致光标无法移动 (Bug #1)。
  */
 
-import readline from 'readline';
+import input from '@inquirer/input';
 import chalk from 'chalk';
 
 const MAX_HISTORY = 200;
@@ -39,179 +21,124 @@ export type PromptResult =
   | { kind: 'value'; value: string }       // 用户正常输入并提交（Enter）
   | { kind: 'cancelled' };                  // Ctrl+C 中断当前输入
 
-/**
- * Canonical slash command list. Used for:
- *   - /help text
- *   - "did you mean …?" when user types an unrecognized slash command
- *   - runCommandPicker (legacy 2.1.2 path, no longer wired by default)
- *
- * Keep this list aligned with the case-labels in REPLLoop::handleCommand.
- */
-export const COMMAND_LIST: ReadonlyArray<{
-  name: string;
-  aliases: string[];
-  desc: string;
-}> = [
-  { name: '/model',    aliases: ['/模型', '/选择模型'],     desc: '切换 / 管理模型' },
-  { name: '/provider', aliases: ['/服务商', '/提供商切换'], desc: '切换 provider' },
-  { name: '/edit',     aliases: ['/修改', '/编辑'],         desc: '修改已保存模型' },
-  { name: '/clear',    aliases: ['/清屏'],                   desc: '清屏' },
-  { name: '/context',  aliases: ['/上下文'],                 desc: '显示项目 cwd' },
-  { name: '/history',  aliases: ['/历史'],                   desc: '命令历史' },
-  { name: '/tools',    aliases: ['/工具'],                   desc: '可用工具列表' },
-  { name: '/models',   aliases: ['/模型列表'],               desc: '当前 provider 内置模型(只读)' },
-  { name: '/providers', aliases: ['/供应商'],                desc: '所有 provider(只读)' },
-  { name: '/exit',     aliases: ['/退出', '/quit'],         desc: '退出 REPL' },
-  { name: '/help',     aliases: ['/帮助'],                   desc: '显示命令列表(静态文本)' },
-];
-
-/** Find the closest match for a /foo that's NOT in COMMAND_LIST.
- *  Returns a short hint string or empty. */
-export function suggestCommand(input: string): string {
-  const candidate = input.trim().toLowerCase();
-  if (!candidate.startsWith('/') || candidate.length < 2) return '';
-  // Direct alias / name match (case-sensitive on aliases since 中文 matters)
-  for (const c of COMMAND_LIST) {
-    if (c.aliases.includes(candidate)) {
-      return `提示: '${input}' 是 '${c.name}' 的中文别名。`;
-    }
-  }
-  // Fuzzy: distance against all known names + aliases; pick the closest
-  let best: { cmd: typeof COMMAND_LIST[number]; score: number } | null = null;
-  for (const c of COMMAND_LIST) {
-    const names = [c.name, ...c.aliases];
-    for (const n of names) {
-      const s = fuzzyScore(candidate, n.toLowerCase());
-      if (s > 0 && (!best || s > best.score)) {
-        best = { cmd: c, score: s };
-      }
-    }
-  }
-  if (best) {
-    return `提示: 未识别 '${input}'。是否指 '${best.cmd.name}' (${best.cmd.desc}) ?`;
-  }
-  return `提示: 未识别 '${input}'。输入 /help 查看完整命令列表。`;
-}
-
-/** Crude similarity: returns a non-zero score if the strings share a
- *  common prefix or are within edit distance 2, else 0. */
-function fuzzyScore(a: string, b: string): number {
-  let pref = 0;
-  while (pref < a.length && pref < b.length && a[pref] === b[pref]) pref++;
-  if (pref === 0) return 0;
-  const rest = Math.abs(a.length - b.length) + (a.length - pref) + (b.length - pref);
-  return pref - rest * 0.5; // strong common prefix, weak penalty on distance
-}
-
 export class REPLInput {
   private history: string[] = [];
-  private historyIndex: number = -1;     // -1 means "not browsing history"
-  private currentDraft: string = '';     // preserved when leaving history
-  private consecutiveCancels: number = 0;
-  // 2.1.4: cool green prompt + persistent hint line above the readline frame
-  private defaultPrefix: string =
-    chalk.bold.cyan('▸ ') +
-    chalk.gray('(输入 / 命令 ·  ↑↓ 历史 ·  Ctrl+C 中断 / 二次退出) ');
+  private historyIndex: number = -1;        // -1 表示"未在历史中浏览"
+  private currentDraft: string = '';        // 离开历史时保留用户原始草稿
+  private defaultPrefix: string = chalk.green('\n> ');
+  private consecutiveCancels: number = 0;   // 连续空输入 + Ctrl+C 计数,达到阈值退出
 
+  /**
+   * Ask the user for input. Returns either a value or 'cancelled'.
+   * Loop decides what to do with cancellation (usually: continue session,
+   * unless user has cancelled an already-empty input twice in a row).
+   */
   async prompt(prefix?: string, abortSignal?: AbortSignal): Promise<PromptResult> {
     const prefill = this.computePrefill();
+    const previousDraft = prefill.kind === 'history' ? prefill.value : '';
 
-    // Single readline interface per prompt — guarantees cleanup on every
-    // code path. 2.1.3's bug was that we created new readline interfaces
-    // in render() and never closed them.
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: true,
-      // Don't print readline's own "[prompt]" prefix — we paint our own.
-      prompt: '',
+    // 用 abortSignal 绑到 inquirer:外面 Ctrl+C / 主进程事件可以取消
+    const value = await input({
+      message: prefix ?? this.defaultPrefix,
+      prefill: 'editable',                  // 关键:启用方向键 + 行内编辑,包括小键盘
+      default: previousDraft,               // 历史预填
+      // Ctrl+C 由 @inquirer/input 抛出一个 symbol-like 错误,我们捕获为 cancelled
+      validate: () => true,
+    }, abortSignal ? { signal: abortSignal } : undefined).catch((err: any) => {
+      // 区分真实错误与用户取消;inquirer 用 ExitPromptError (name: 'ExitPromptError')
+      if (err && (err.name === 'ExitPromptError' || err.message?.includes('User force closed'))) {
+        return null;
+      }
+      throw err;
     });
 
-    // Write our prefix + hint line BEFORE handing control to readline.
-    // We use \x1b[?25l/h to prevent flicker between our manual writes
-    // and readline's drawing.
-    try {
-      process.stdout.write(this.hideCursor);
-      process.stdout.write(prefix ?? this.defaultPrefix);
-      if (prefill) {
-        process.stdout.write(prefill);
-        rl.write(prefill);   // make it editable
-      }
-      process.stdout.write('\n');
-      process.stdout.write(this.showCursor);
-    } catch {
-      /* best effort */
+    if (value === null || value === undefined) {
+      this.consecutiveCancels++;
+      return { kind: 'cancelled' };
     }
 
-    return new Promise<PromptResult>((resolve) => {
-      let resolved = false;
-      const finalize = (r: PromptResult) => {
-        if (resolved) return;
-        resolved = true;
-        try { rl.close(); } catch {}
-        // Move to a fresh line so the next prompt or output starts cleanly.
-        try { process.stdout.write('\n'); } catch {}
-        resolve(r);
-      };
-
-      // Ctrl+C at the prompt -> cancel
-      rl.on('SIGINT', () => {
-        this.consecutiveCancels++;
-        finalize({ kind: 'cancelled' });
-      });
-
-      // External abort signal
-      if (abortSignal?.aborted) {
-        finalize({ kind: 'cancelled' });
-        return;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      // 避免把连续重复的内容都压入历史
+      if (this.history[this.history.length - 1] !== trimmed) {
+        this.history.push(trimmed);
+        if (this.history.length > MAX_HISTORY) this.history.shift();
       }
-      const onAbort = () => finalize({ kind: 'cancelled' });
-      abortSignal?.addEventListener('abort', onAbort, { once: true });
+    }
 
-      // Enter
-      rl.on('line', (line) => {
-        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
-        const trimmed = line.replace(/\r$/, '').trim();
-        if (trimmed.length > 0) {
-          if (this.history[this.history.length - 1] !== trimmed) {
-            this.history.push(trimmed);
-            if (this.history.length > MAX_HISTORY) this.history.shift();
-          }
-        }
-        this.consecutiveCancels = 0;
-        finalize({ kind: 'value', value: trimmed });
-      });
-
-      // rl.close() externally (e.g. stdin EOF) — treat as cancel
-      rl.on('close', () => {
-        if (!resolved) finalize({ kind: 'cancelled' });
-      });
-    });
+    this.consecutiveCancels = 0;
+    return { kind: 'value', value: trimmed };
   }
 
-  // ANSI helpers (kept tiny)
-  private hideCursor = '\u001b[?25l';
-  private showCursor = '\u001b[?25h';
-
+  /**
+   * Should we ask the loop to exit? Two consecutive Ctrl+C on empty input => exit.
+   */
   shouldExitOnCancel(): boolean {
     return this.consecutiveCancels >= 2;
   }
 
+  /**
+   * Programmatic cancel trigger (used by the global SIGINT handler in REPLLoop).
+   * Increments the cancel counter as if a Ctrl+C had been seen, and returns
+   * whether the loop should now exit. Idempotent across the prompt() flow:
+   * if the user has already entered a non-empty prompt this is a no-op for exit
+   * (the loop keeps running) — but for an empty REPL it eventually returns true.
+   */
   requestCancel(): boolean {
+    // 模拟一次空输入 cancel:计为 1,下一次 SIGINT 累计到 2 即退出
     this.consecutiveCancels++;
     return this.shouldExitOnCancel();
   }
 
+  /**
+   * Reset consecutive-cancel counter when the loop has decided to keep running.
+   */
   resetCancelCounter(): void {
     this.consecutiveCancels = 0;
   }
 
-  private computePrefill(): string {
+  /**
+   * Decide what to prefill. Two modes:
+   *   - 'history': when user is navigating up/down with arrows
+   *   - 'draft':   when user has cleared the input — preserve their draft
+   */
+  private computePrefill(): { kind: 'history' | 'draft' | 'none'; value: string } {
     if (this.historyIndex >= 0 && this.historyIndex < this.history.length) {
-      return this.history[this.historyIndex];
+      return { kind: 'history', value: this.history[this.historyIndex] };
     }
-    if (this.currentDraft) return this.currentDraft;
-    return '';
+    if (this.currentDraft) return { kind: 'draft', value: this.currentDraft };
+    return { kind: 'none', value: '' };
+  }
+
+  /**
+   * Save the user's in-progress draft so ↑↓ preserves their unsent typing.
+   */
+  saveDraft(text: string): void {
+    this.currentDraft = text;
+  }
+
+  /**
+   * Navigate up in history (called from a global key listener, if needed).
+   */
+  historyUp(): string {
+    if (this.history.length === 0) return this.currentDraft;
+    if (this.historyIndex < 0) this.historyIndex = this.history.length;
+    if (this.historyIndex > 0) this.historyIndex--;
+    return this.history[this.historyIndex] ?? '';
+  }
+
+  /**
+   * Navigate down in history.
+   */
+  historyDown(): string {
+    if (this.history.length === 0) return this.currentDraft;
+    if (this.historyIndex >= this.history.length) return this.currentDraft;
+    this.historyIndex++;
+    if (this.historyIndex >= this.history.length) {
+      this.historyIndex = this.history.length;
+      return this.currentDraft;
+    }
+    return this.history[this.historyIndex] ?? '';
   }
 
   getHistory(): readonly string[] {

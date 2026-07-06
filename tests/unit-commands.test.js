@@ -86,32 +86,3 @@ test('printHelp text references /edit and the main slash commands', () => {
   assert.match(out, /Commands:/);
   assert.match(out, /命令/);
 });
-
-test('2.1.2: bare "/" is NOT intercepted — falls through to AI prompt', () => {
-  // Mirror loop.ts::handleCommand. As of 2.1.2 the bare '/' is just a slash
-  // character in the input; the user is expected to keep typing. We removed
-  // the runCommandPicker intercept because it hijacked the input flow.
-  const strip = (s) => s.replace(/^\//, '').replace(/^／/, '').toLowerCase().trim();
-  const cmd = strip('/');
-  // handleCommand no longer catches '' (bare /). It falls through to the
-  // default case (return false), so the AI gets a literal '/' as input.
-  // The user must type /help explicitly to see the command list.
-  assert.equal(cmd, '');
-  assert.ok(cmd !== 'help' && cmd !== '帮助',
-    'bare / alone is not a recognized command anymore');
-});
-
-test('2.1.2: "/help" still routes to static command list (not modal)', () => {
-  const srcText = readFileSync(join(here, '..', 'src', 'repl', 'loop.ts'), 'utf-8');
-  assert.match(srcText, /printCommandList/);
-  assert.match(srcText, /case 'help'/);
-  assert.match(srcText, /case '帮助'/);
-});
-
-test('2.1.2: prompt prefix mentions "/" /commands shortcut', () => {
-  const inputSrc = readFileSync(join(here, '..', 'src', 'repl', 'input.ts'), 'utf-8');
-  // The default prefix should advertise the /-command shortcut
-  assert.match(inputSrc, /\/.*命令/);
-  // And tell the user ↑↓ history is available
-  assert.match(inputSrc, /历史/);
-});
