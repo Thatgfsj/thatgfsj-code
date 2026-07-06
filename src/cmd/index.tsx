@@ -55,6 +55,7 @@ import chalk from 'chalk';
 import { App } from '../app/index.js';
 import { WelcomeScreen } from '../tui/welcome.js';
 import { compressThinking, summarizeThinking, splitThinking } from '../utils/thinking.js';
+import { PRODUCT_VERSION } from '../version.js';
 
 process.on('uncaughtException', (error) => {
   console.error(chalk.red('\n  Error:'), error.message);
@@ -69,7 +70,7 @@ process.on('unhandledRejection', (reason) => {
 program
   .name('gfcode')
   .description('Thatgfsj Code - AI Coding Assistant')
-  .version('0.4.5')
+  .version(PRODUCT_VERSION)
   .argument('[prompt]', 'Task to execute (omit to start interactive mode)')
   .option('-m, --model <model>', 'Specify model')
   .option('-i, --interactive', 'Force interactive mode')

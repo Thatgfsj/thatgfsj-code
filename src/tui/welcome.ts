@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { PROVIDERS, getModelsForProvider, listProviders, isCustomProvider } from '../config/providers.js';
+import { PRODUCT_VERSION_DISPLAY } from '../version.js';
 import type { ProviderName } from '../config/types.js';
 
 const line = chalk.gray('─'.repeat(52));
@@ -18,7 +19,7 @@ export class WelcomeScreen {
     if (hasApiKey) return;
 
     console.log();
-    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(' v0.5.0'));
+    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(' ' + PRODUCT_VERSION_DISPLAY));
     console.log(chalk.gray('  AI Coding Assistant'));
     console.log(line);
     console.log();
@@ -35,7 +36,7 @@ export class WelcomeScreen {
   static async interactiveSetup(): Promise<void> {
     console.clear();
     console.log();
-    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(' - Setup'));
+    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(' ' + PRODUCT_VERSION_DISPLAY + ' - Setup'));
     console.log(line);
     console.log();
 

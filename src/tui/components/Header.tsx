@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Box, Text } from 'ink';
+import { PRODUCT_VERSION_DISPLAY } from '../../version.js';
 
 interface Props {
   provider: string;
@@ -14,7 +15,7 @@ export const Header = React.memo(function Header({ provider, model }: Props) {
         <Box>
           <Text color="#06B6D4" bold> ⚡ </Text>
           <Text color="#22D3EE" bold>THATGFSJ CODE</Text>
-          <Text dimColor> v1.0.4</Text>
+          <Text dimColor> {PRODUCT_VERSION_DISPLAY}</Text>
         </Box>
         <Box>
           <Text color="#06B6D4" bold> {provider} </Text>
