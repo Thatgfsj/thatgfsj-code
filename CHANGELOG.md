@@ -15,6 +15,40 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.2.0] - 2026-07-06  - 干净 reset 点 (REVERT 2.1.1–2.1.4)
+
+> **真实说明**:1.0.4 是用 Ink 写的全屏 REPL,有实时行内命令补全(`/foo` 时下方出现
+> 过滤列表)。2.x 的代码栈是纯 ESM + Node `readline`,**没有 Ink 渲染栈**,所以这个
+> UX 不能在 2.x 里 1:1 复刻。最近几次发布 (2.1.1–2.1.4) 反复 patch 这个问题,但每次
+> 都引入别的退化 (2.1.3 引发 OOM)。所以这一版本**回退到 v2.1.0** —— 最后一次
+> 稳定点 —— 然后发为 2.2.0。
+
+### 这是 2.2.0 的状态(和 v2.1.0 完全一样)
+
+**保留**:0.2.2 → 0.2.3 → 0.3.0 → 2.1.0 的所有修复 +
+  - ESM `require` 不再崩
+  - 中文命令别名 (`/模型` `/提供商` `/清屏` `/帮助` ...)
+  - `/model` /edit /provider 用真正的 **TUI selector 上下键选**(`@inquirer/select`)
+    + 显示已保存模型的 ctx / thinking / note 元数据
+  - 添加模型向导 (provider → key → url → name → ctx(M) → thinking)
+  - 自定义 provider:`custom_openai` / `custom_anthropic` (中转站)
+  - 修"已中断"污染循环 (abort 后不写 truncated + fetch 用 AbortSignal + reader.cancel)
+
+**做不到的(需要 Ink 或重写渲染栈)**:
+  - 输入 `/foo` 的实时行内补全列表 (1.0.4 风格)
+  - 输入框固定在屏幕底部 (1.0.4 风格)
+
+如果用户必须用 1.0.4 的 UX,推荐 `npm i -g thatgfsj-code@1.0.4`,那之前是 Ink-based 的
+全屏 REPL。
+
+### Reverted
+- 2.1.1 anti-pollution filter 改动 (已经移除了"已中断"防御,在 2.1.0 治本)
+- 2.1.2 启动优化 (chcp 异步,删除递归 readdir,延迟 inquirer)
+- 2.1.3 raw readline + ANSI 重绘 (引入了 OOM bug)
+- 2.1.4 静态 suggestCommand (放弃了行内补全)
+
+---
+
 ## [2.1.0] - 2026-07-06
 
 ### Fixed (治本)

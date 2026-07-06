@@ -2,7 +2,28 @@
 
 你的 CLI 工具 - 像 Claude Code 一样使用 AI 编程。
 
-> 当前版本: **0.2.2** · Node.js ≥ 18 · MIT 许可证
+> 当前版本: **2.2.0** · Node.js ≥ 18 · MIT 许可证
+
+---
+
+## ℹ️ 关于 1.0.4 vs 2.x 的 UX
+
+**`thatgfsj-code@1.0.4`** 是基于 Ink (React for CLI) 的全屏 REPL,有实时行内
+命令补全 (`/foo` 时下方出现过滤列表)。
+
+**2.x** (本仓库,2.0.0 起) 是纯 ESM + Node `readline` + `@inquirer/*`。
+**没有 Ink 渲染栈**,所以在 2.x 里**没有办法**实现 1.0.4 那种"输入 `/` 后下方
+行内 filter 列表"的 UX。
+
+**取舍**:2.x 提供更稳定、更易维护的 REPL 体验,但放弃了 live filter。如果你需要
+1.0.4 那种 UX,**用 \`npm i -g thatgfsj-code@1.0.4\`** 即可同时存在两个版本。
+
+2.x 仍然有 (相对 0.x 系列):
+- ✅ `/model` `/edit` `/provider` 用 `@inquirer/select` 上下键选
+- ✅ 中文命令别名 (`/模型` `/提供商` `/清屏` `/帮助` ...)
+- ✅ 自定义 provider (`custom_openai` / `custom_anthropic` 中转站)
+- ✅ "已中断"污染循环治本修复 (Ctrl+C 中断 + AbortSignal)
+- ✅ 添加模型向导 (provider → key → url → name → ctx(M) → thinking)
 
 ---
 
