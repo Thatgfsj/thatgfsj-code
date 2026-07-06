@@ -15,6 +15,49 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.1.1] - 2026-07-06
+
+### Fixed (治本)
+- **「已中断」误伤正常响应 — 把整个 anti-pollution filter 删了**：2.1.0 我
+  修了 underlying 的 abort write 入 history 的 bug，但保留了一个
+  `SessionManager.looksPolluted()` filter 当兜底。本地实测发现这个
+  filter 一直在**误杀**合法响应，触发的 regex 比如：
+  - `/[已中断/`  → 拦掉任何 LLM 说「我看你输入了 [已中断]」这种对话
+  - `/^think[\s\S]*?<\/think>\s*$/m` → 拦掉任何「think 块 + 正常答复」组合
+  - `/^\s*\[已中断\s*$/m` → 拦掉任何正好以 `[已中断` 开头的行
+
+  当模型说 `It looks like your message got cut off` 后面跟正常答复时，
+  既不匹配 `[已中断` 也不会匹配。但加上 think 块 (`<think>...</think>`)
+  时,任何一个字符差异就可能被拦。
+
+  **修复 (治本)**：把 `looksPolluted` 和 `POLLUTION_PATTERNS` 全部删除。
+  `addMessage` 现在是**纯 passthrough** — 你传什么就存什么，不再做内容
+  过滤。`getDroppedCount()` 保留但永远返回 0 (向后兼容旧调用)。
+
+  治本链：2.1.0 已经保证 truncated response 不写入 history →
+  LLM 自己产生的合法响应里也不会有 "已中断" 字符 →
+  filter 没有存在的必要,而且它在积极伤害普通对话。
+
+### Changed
+- **`/` 调出命令选择器**：2.1.0 的 `/model /edit /provider` 已经是 TUI 选择器，
+  但用户还得记得命令名。现在输入**单独的 `/`**（或 `/help`）会弹出一个
+  包含所有命令的 TUI 选择器（`@inquirer/select`），分三组：
+  - ⚙ 切换: `/model`、`/provider`、`/edit`
+  - 📋 会话: `/clear`、`/context`、`/history`、`/tools`、`/models`、`/providers`
+  - 🚪 系统: `/exit`、取消
+- **Prompt 提示符更显眼**：`▸` 加粗 cyan + 输入栏用 bold.white + 一行灰色
+  提示`(输入 / 看命令  ·  ↑↓ 历史  ·  Ctrl+C 中断)`,让用户在任何终端下
+  都能一眼看到输入框 + 关键快捷键。
+
+### Tests
+- `tests/unit-session.test.js` 整体重写：所有旧的 "drops X" 测试变成
+  "keeps X verbatim",还包括一个针对 think+body 这种被误杀场景的
+  regression 测试。
+- **57/57 tests passing**(原 55 + 新增 2: command picker 测试 + think+body
+  regression)。
+
+---
+
 ## [2.1.0] - 2026-07-06
 
 ### Fixed (治本)

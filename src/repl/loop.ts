@@ -165,11 +165,18 @@ export class REPLLoop {
    */
   private async handleCommand(input: string): Promise<boolean> {
     // Strip leading slash and full-width slash; trim whitespace; lowercase.
-    const cmd = input
+    let cmd = input
       .replace(/^\//, '')
       .replace(/^／/, '')
       .toLowerCase()
       .trim();
+
+    // Bare "/" or "/help" → TUI picker over all available commands.
+    // The user shouldn't have to memorise a list of slash-commands.
+    if (cmd === '' || cmd === 'help' || cmd === '帮助') {
+      await this.runCommandPicker(input);
+      return true;
+    }
 
     switch (cmd) {
       // ── Session control ────────────────────────────────────────────
@@ -307,20 +314,11 @@ export class REPLLoop {
 
     // 治本修复:被 abort 的截断响应 **不要** 写入 SessionManager。
     // 旧版本无条件写入,导致下一轮 LLM 看到不完整对话,可能在输出里复读
-    // "[已中断]" 之类的 sentinel,从而触发 SessionManager 的 anti-pollution
-    // filter — 看起来是个 filter bug,实际是上游故障。只要不写入 truncated
-    // 响应, 就不会有"已中断"字符串进 history,filter 也只是兜底。
-    if (this.session && !this._wasAborted) {
-      const accepted = this.session.addMessage('assistant', fullResponse);
-      if (!accepted) {
-        // 真有 LLM 自己吐出"已中断"的极端情况 — 兜底过滤,不应该发生。
-        this.output.printWarning(
-          chalk.yellow(
-            `⚠️  上轮回复包含 "[已中断]" 等污染标记,已自动丢弃以避免循环。本次回复不会基于它继续;请重说你的问题。\n` +
-            `(本次会话已累计过滤 ${this.session.getDroppedCount()} 条污染消息)`
-          )
-        );
-      }
+    // "[已中断]" 之类的 sentinel。SessionManager 自 2.1.1 起不再做
+    // anti-pollution filter — addMessage 是纯 passthrough,只要你传
+    // 进来我们就不丢。所以上游的"不写入 truncated"才是真正的治本。
+    if (this.session && !this._wasAborted && fullResponse) {
+      this.session.addMessage('assistant', fullResponse);
       this.session.truncate(20);
     }
     this._wasAborted = false;
@@ -360,6 +358,43 @@ export class REPLLoop {
     this.output.printInfo('  deepseek    - DeepSeek');
     this.output.printInfo('  ernie       - 文心一言 ERNIE');
     this.output.printInfo('  ollama      - 本地模型');
+  }
+
+  /**
+   * 2.1.1 — TUI command picker. Triggered by bare `/` or `/help` so the
+   * user never has to remember the slash-command list. Uses
+   * `@inquirer/select` (same family as `/model`).
+   */
+  private async runCommandPicker(_rawInput: string): Promise<void> {
+    this.output.printInfo(chalk.gray('  ↑/↓ 移动,回车确认,Ctrl+C 取消  (↑/↓ to pick, Enter to confirm)'));
+
+    const picked = await select({
+      message: '选个命令 / Pick a command:',
+      pageSize: 12,
+      choices: [
+        { name: `${chalk.green('▸ ')}切换 / 管理模型 — ${chalk.cyan('/model  /模型  /选择模型')}`, value: '/model',    description: '主视图:已保存的模型(已带 ctx / thinking / note),添加入口' },
+        { name: `${chalk.green('▸ ')}切换 provider — ${chalk.cyan('/provider  /提供商切换  /切换')}`, value: '/provider', description: '10 个 provider,含 custom_openai / custom_anthropic 中转站' },
+        { name: `${chalk.green('▸ ')}修改已保存模型 — ${chalk.cyan('/edit  /修改  /编辑')}`, value: '/edit',         description: '改 ctx / thinking / note;先列已保存再选' },
+        { name: '─ 会话 ─────────────────────────────────────────',                                  value: '__sep1__',  description: '────────' },
+        { name: `${chalk.yellow('▸ ')}清屏 — ${chalk.cyan('/clear  /清屏')}`,                              value: '/clear',    description: '清屏' },
+        { name: `${chalk.yellow('▸ ')}上下文 — ${chalk.cyan('/context  /上下文')}`,                          value: '/context',  description: '显示当前项目 cwd' },
+        { name: `${chalk.yellow('▸ ')}历史 — ${chalk.cyan('/history  /历史')}`,                              value: '/history',  description: '命令历史' },
+        { name: `${chalk.yellow('▸ ')}工具 — ${chalk.cyan('/tools  /工具')}`,                                value: '/tools',    description: '可用工具列表' },
+        { name: `${chalk.yellow('▸ ')}只读模型列表 — ${chalk.cyan('/models  /模型列表')}`,                  value: '/models',   description: '列出当前 provider 的内置模型(只读)' },
+        { name: `${chalk.yellow('▸ ')}只读 provider 列表 — ${chalk.cyan('/providers')}`,                   value: '/providers', description: '列出所有支持的 provider' },
+        { name: '─ 系统 ─────────────────────────────────────────',                                  value: '__sep2__',  description: '────────' },
+        { name: `${chalk.red('▸ ')}退出 — ${chalk.cyan('/exit  /退出  /quit')}`,                           value: '/exit',     description: '退出 REPL' },
+        { name: `${chalk.gray('▸ 取消 / Close (Esc, Ctrl+C) — 留在输入框')}`,                              value: '__close__',  description: '不执行任何命令' },
+      ],
+    }).catch((err: any) => {
+      if (err?.name === 'ExitPromptError') return '__close__';
+      throw err;
+    });
+
+    if (picked === '__close__' || picked === '__sep1__' || picked === '__sep2__') return;
+
+    // 把选中的命令当作用户输入的一条命令再走一遍 dispatcher
+    await this.handleCommand(picked);
   }
 
   /**

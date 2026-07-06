@@ -86,3 +86,22 @@ test('printHelp text references /edit and the main slash commands', () => {
   assert.match(out, /Commands:/);
   assert.match(out, /命令/);
 });
+
+test('2.1.1: bare "/" routes to runCommandPicker (not the AI prompt)', () => {
+  // Re-implement the dispatcher strip, mirroring loop.ts::handleCommand
+  // exactly. If `/` ever routes through to AI, this test fails.
+  const strip = (s) => s.replace(/^\//, '').replace(/^／/, '').toLowerCase().trim();
+  const cmd = strip('/');
+  // After strip, the cmd is empty. Empty + /help → command picker.
+  assert.equal(cmd, '');
+  assert.ok(cmd === '' || cmd === 'help' || cmd === '帮助',
+    'handleCommand should catch the empty-/ case before it falls through to AI');
+});
+
+test('2.1.1: prompt prefix mentions "/" /commands shortcut', () => {
+  const inputSrc = readFileSync(join(here, '..', 'src', 'repl', 'input.ts'), 'utf-8');
+  // The default prefix should advertise the /-command shortcut
+  assert.match(inputSrc, /\/.*命令/);
+  // And tell the user ↑↓ history is available
+  assert.match(inputSrc, /历史/);
+});

@@ -1,45 +1,29 @@
 /**
  * Session Manager - Manages conversation history
  *
- * F4 (anti-[已中断]):
- *   - addMessage 拦截含"已中断" / 链形 think 块等污染字符串
- *     （之前 AI 在失败重试时会把这些字面写进 history 造成病毒循环）
- *   - sanitize() 在 lastMessages 输出到 LLM 前再做一次去噪
+ * 2.1.1: Removed the anti-[已中断] filter that used to live here. That
+ * filter was originally added as a downstream workaround for a much
+ * deeper bug: `REPLLoop.processInput` would persist *truncated* assistant
+ * responses into history when the user pressed Ctrl+C, and the LLM would
+ * then generate a literal `[已中断]` token as a recovery fallback on the
+ * next turn, which got re-fed into itself indefinitely.
+ *
+ * The proper fix was to stop writing truncated responses into history at
+ * all (REPLLoop._wasAborted, in 2.1.0). With that fix in place the
+ * filter is obsolete — and worse, it was actively rejecting *legitimate*
+ * assistant replies such as:
+ *   - "I see you wrote [已中断] in your message. Did you mean…?"
+ *   - "<think>analysis</think>\n\nreply text here"
+ * i.e. the regex was matching texts that any reasonable LLM would produce
+ * in normal conversation.
+ *
+ * We now keep `addMessage` as a pure passthrough. If a future regression
+ * reintroduces the underlying abort-write bug, we want to see it as a
+ * missing-context error from the LLM (which is obvious), NOT a silent
+ * filter that drops messages the user can't see.
  */
 
 import { ChatMessage, Session } from './types.js';
-
-/**
- * Patterns that indicate the message is polluted by a previous broken
- * tool/stream retry loop. These should never be re-sent to the LLM.
- */
-const POLLUTION_PATTERNS: RegExp[] = [
-  /\[已中断/,                       // literally "[已中断" - sentinel from bad run
-  /\u5df2\u4e2d\u65ad/,              // 已中断 (escaped form)
-  /^\s*\[已中断\s*$/m,                // line that is exactly [已中断
-  /^<think>[\s\S]*?<\/think>\s*$/m,  // entire message that is just a think block
-  /\u{1F6AB}/u,                     // ⛔ emoji sometimes used as interrupt marker
-];
-
-function looksPolluted(content: string): boolean {
-  if (!content) return false;
-  // Strip obvious thinking fences and check the *remaining* core content.
-  const stripped = content
-    .replace(/<think>[\s\S]*?<\/think>/g, '')
-    .replace(/<\/?think>/g, '')
-    .trim();
-
-  for (const p of POLLUTION_PATTERNS) {
-    if (p.test(content)) return true;
-  }
-
-  // A message whose entire stripped form is shorter than 6 chars AND
-  // contains an interruption-related token is also suspect.
-  if (stripped.length < 6 && /(中断|interrupted|cancelled|已取消)/i.test(stripped)) {
-    return true;
-  }
-  return false;
-}
 
 export class SessionManager {
   private messages: ChatMessage[] = [];
@@ -53,26 +37,16 @@ export class SessionManager {
   }
 
   /**
-   * Add a message to the session.
-   * Returns true if accepted, false if dropped because it looked polluted.
+   * Add a message to the session. Pure passthrough — no filter, no
+   * "dropped" pathway. Returns `true` for symmetry with the prior API.
+   *
+   * If callers need to skip a message they can simply not call us.
    */
   addMessage(role: ChatMessage['role'], content: string): boolean {
-    if (role !== 'system' && looksPolluted(content)) {
-      this.droppedCount++;
-      // Keep a 1-line internal note so the user can see *something* happened,
-      // but the original polluted text does NOT go to the LLM context.
-      this.messages.push({
-        role: 'user',
-        content: '[system: dropped a polluted prior message containing "已中断" markers. Continue with the original task.]',
-        name: 'system'
-      });
-      return false;
-    }
-
     this.messages.push({
       role,
       content,
-      name: role === 'user' ? 'user' : undefined
+      name: role === 'user' ? 'user' : undefined,
     });
     return true;
   }

@@ -25,8 +25,11 @@ export class REPLInput {
   private history: string[] = [];
   private historyIndex: number = -1;        // -1 表示"未在历史中浏览"
   private currentDraft: string = '';        // 离开历史时保留用户原始草稿
-  private defaultPrefix: string = chalk.green('\n> ');
   private consecutiveCancels: number = 0;   // 连续空输入 + Ctrl+C 计数,达到阈值退出
+  // 2.1.1: 提示符更显眼了 — `▸` + chalk 加粗 cyan,输入区用 chalk.bold。
+  // 同时加一行提示,告诉用户 `/` 调出命令面板、↑↓ 翻历史。
+  private defaultPrefix: string =
+    chalk.bold.cyan('\n▸ ') + chalk.gray('(输入 / 看命令  ·  ↑↓ 历史  ·  Ctrl+C 中断)  ');
 
   /**
    * Ask the user for input. Returns either a value or 'cancelled'.
@@ -40,6 +43,10 @@ export class REPLInput {
     // 用 abortSignal 绑到 inquirer:外面 Ctrl+C / 主进程事件可以取消
     const value = await input({
       message: prefix ?? this.defaultPrefix,
+      theme: {
+        prefix: chalk.bold.cyan('▸'),
+        style: { answer: chalk.bold.white },
+      },
       prefill: 'editable',                  // 关键:启用方向键 + 行内编辑,包括小键盘
       default: previousDraft,               // 历史预填
       // Ctrl+C 由 @inquirer/input 抛出一个 symbol-like 错误,我们捕获为 cancelled
