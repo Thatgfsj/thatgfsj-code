@@ -7,7 +7,7 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
-import { Tool, ToolResult } from '../core/types.js';
+import type { Tool, ToolResult } from '../tools/types.js';
 
 // ==================== MCP Types ====================
 

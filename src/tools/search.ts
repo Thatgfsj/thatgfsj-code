@@ -2,7 +2,7 @@
  * Search Tool - Code search and file operations
  */
 
-import { Tool, ToolResult } from '../core/types.js';
+import type { Tool, ToolResult } from './types.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { readdirSync, statSync, readFileSync } from 'fs';

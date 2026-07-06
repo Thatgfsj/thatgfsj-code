@@ -1,107 +1,91 @@
 # Thatgfsj Code - Development Roadmap
 
-## ✅ 全部阶段已完成
+---
+
+## ✅ v0.9.0 - 稳定版 (当前版本)
+
+### 核心架构
+- [x] Ink (React) TUI 框架
+- [x] LLM Provider 抽象层 (OpenAI/Anthropic/Gemini)
+- [x] 15 个 Provider + 自定义中转站
+- [x] 模块化目录结构 (cmd/app/config/llm/session/tools/tui/skills/hooks/prompts)
+
+### 工具系统
+- [x] file (读/写/列表/删除)
+- [x] shell (执行命令)
+- [x] git (操作)
+- [x] search (搜索)
+- [x] nwt (项目记忆，30天自动归档)
+
+### Skills 系统
+- [x] 16 个内置 Skills (规划/调试/TDD/架构/浏览器等)
+- [x] /skills 命令管理
+- [x] 自动激活
+
+### UI/UX
+- [x] Ink TUI 流式输出
+- [x] Markdown 渲染 (marked-terminal)
+- [x] 工具调用显示 (opencode 风格)
+- [x] 状态栏
+- [x] 命令系统 (/model, /new, /compact, /skills, /mcp, /help)
+- [x] /model 交互式选择框
+
+### 智能功能
+- [x] 自动读取 CLAUDE.md/SKILLS.md (通用路径)
+- [x] NWT 项目历史自动注入系统提示
+- [x] 上下文自动压缩 (超限触发)
+- [x] API 错误检测 (401/403/429)
+- [x] 启动时检测 API Key
+
+### 安装
+- [x] npm install -g thatgfsj-code
+- [x] Windows PowerShell 一键安装
+- [x] Linux/macOS Bash 一键安装
+- [x] 自动下载 Node.js (如果没有)
+
+### 测试通过
+- [x] 简单任务: 读文件 + 回答
+- [x] 中等任务: 修改文件 + 验证
+- [x] 困难任务: 多步骤 + NWT 记录
+- [x] Git + Search + NWT 联合测试
+- [x] 多文件创建和修改
 
 ---
 
-## 阶段总结
+## 📋 未来计划
 
-### ✅ 第一阶段: REPL 优化
-- [x] 彩色 UI (Banner, 分隔线)
-- [x] 命令提示符
-- [x] Ctrl+C 中断
-- [x] 内置命令 (exit, clear, context, help, tools)
-- [x] 项目信息显示
-- [x] 流式 Spinner
-- [x] 多行输入检测
-- [x] 历史记录
-
-### ✅ 第二阶段: 工具框架
-- [x] Git 工具 (status, log, diff, commit, branch, checkout, pull, push)
-- [x] 代码搜索工具 (grep, find, tree, files)
-
-### ✅ 第三阶段: LLM 集成
-- [x] 意图识别 (chat/code/command/query/complex)
-- [x] 任务拆解
-- [x] Streaming 输出
-- [x] Ollama 本地模型支持
-
-### ✅ 第四阶段: 安全 + UX
-- [x] Diff 预览
-- [x] 项目感知 (自动读取 package.json, .gitignore)
-- [x] 记忆机制 (会话修改历史)
-- [x] 危险命令确认
+### v1.0.0
+- [ ] SQLite 会话持久化
+- [ ] Token 使用量显示
+- [ ] 命令 Tab 补全
+- [ ] 多会话管理
+- [ ] LSP 集成
+- [ ] 图片支持
 
 ---
 
-## 最终文件结构
+## 历史版本
 
-```
-src/
-├── index.ts           # CLI 入口
-├── repl/              # 交互式 REPL
-│   ├── input.ts
-│   ├── output.ts
-│   └── loop.ts
-├── agent/             # Agent 核心
-│   ├── core.ts
-│   ├── intent.ts
-│   └── streaming.ts
-├── tools/             # 工具
-│   ├── file.ts
-│   ├── shell.ts
-│   ├── git.ts
-│   ├── search.ts
-│   └── index.ts
-├── utils/             # 工具函数
-│   ├── diff-preview.ts
-│   ├── project-context.ts
-│   └── memory.ts
-└── core/              # 核心模块
-    ├── ai-engine.ts
-    ├── config.ts
-    ├── session.ts
-    ├── tool-registry.ts
-    └── types.ts
-```
+### ✅ v0.8.0 - 命令系统
+- /model, /new, /compact, /skills, /mcp 命令
 
----
+### ✅ v0.7.0 - Skills + NWT
+- 16 个内置 Skills, NWT 项目记忆
 
-## 使用方法
+### ✅ v0.6.0 - Ink TUI
+- React 组件化 UI, Markdown 渲染
 
-```bash
-# 交互模式
-gfcode
+### ✅ v0.5.0 - Provider 重写
+- 15 个 Provider, 自定义中转站
 
-# 单命令
-gfcode "创建文件 hello.js"
+### ✅ v0.4.0 - UI 优化
+- 流式输出, 工具调用显示
 
-# 指定模型
-gfcode -m Pro/moonshotai/Kimi-K2.5 "你的任务"
+### ✅ v0.3.0 - 架构重构
+- 模块化目录, Provider 抽象
 
-# 使用 Ollama
-$env:PROVIDER="ollama"
-$env:MODEL="llama2"
-gfcode "你好"
-```
+### ✅ v0.2.0 - 工具 + LLM
+- Git/搜索工具, 多 Provider
 
----
-
-## 可用工具
-
-| 工具 | 功能 |
-|------|------|
-| `file` | 读取/写入/删除文件 |
-| `shell` | 执行 Shell 命令 |
-| `git` | Git 操作 |
-| `search` | 代码搜索 |
-
-## 可用提供商
-
-| Provider | 说明 |
-|----------|------|
-| siliconflow | 硅基流动 (默认) |
-| minimax | MiniMax |
-| openai | OpenAI |
-| anthropic | Anthropic |
-| ollama | 本地模型 |
+### ✅ v0.1.0 - REPL 基础
+- 彩色 UI, 命令提示符

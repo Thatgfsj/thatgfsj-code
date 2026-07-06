@@ -1,14 +1,11 @@
 # 常见问题 FAQ
 
-> 贡献者请阅读 [`DEVELOPMENT.md`](../DEVELOPMENT.md)，版本变更见
-> [`CHANGELOG.md`](../CHANGELOG.md)。
-
 ## 目录
 
 1. [安装问题](#1-安装问题)
 2. [配置问题](#2-配置问题)
 3. [使用问题](#3-使用问题)
-4. [Provider 问题](#4-provider-问题)
+4. [ Provider 问题](#4-provider-问题)
 5. [其他问题](#5-其他问题)
 
 ---
@@ -35,10 +32,9 @@
 
 ### Q: 如何配置 API Key？
 
-**A**: 三种方式任选其一：
+**A**: 两种方式：
 1. 交互式配置（推荐）：运行 `gfcode init`
-2. 环境变量：设置对应的环境变量（详见 [API_KEY_GUIDE.md](./API_KEY_GUIDE.md)）
-3. 手动编辑 `~/.thatgfsj/config.json`
+2. 环境变量：设置对应的环境变量
 
 ### Q: 配置文件在哪里？
 
@@ -152,29 +148,11 @@ gfcode --version
 
 ### Q: 如何更新到最新版本？
 
-**A**:
 ```bash
-# 源码安装
 git pull
 npm install
 npm run build
-
-# 全局 npm 包
-npm install -g thatgfsj-code@latest
 ```
-
-### Q: 启动瞬间报 `ReferenceError: require is not defined`？
-
-**A**: 这是 0.2.1 之前的 bug，已经在 **0.2.2** 修复（用 `createRequire(import.meta.url)`）。
-如果你看到这个错，升级到最新版本即可：
-```bash
-npm install -g thatgfsj-code@latest
-```
-
-### Q: REPL 中 Ctrl+C 不能退出？
-
-**A**: 0.2.2 起，空输入连续按两次 Ctrl+C 即可退出。0.2.1 之前该路径只会打
-warning，不会退出；升级版本解决。
 
 ### Q: 遇到其他错误怎么办？
 

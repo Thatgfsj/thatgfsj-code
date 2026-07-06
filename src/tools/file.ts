@@ -2,7 +2,7 @@
  * File Tool - File operations
  */
 
-import { Tool, ToolResult } from '../core/types.js';
+import type { Tool, ToolResult } from './types.js';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync } from 'fs';
 import { join, dirname, basename, extname } from 'path';
 
@@ -62,8 +62,34 @@ export class FileTool implements Tool {
     if (!existsSync(path)) {
       return { success: false, error: `File not found: ${path}` };
     }
-    
-    const content = readFileSync(path, 'utf-8');
+
+    const buffer = readFileSync(path);
+
+    // Check for binary files (first 8KB)
+    const sample = buffer.slice(0, 8192);
+    for (let i = 0; i < sample.length; i++) {
+      if (sample[i] === 0) {
+        return { success: false, error: `Binary file detected: ${path}` };
+      }
+    }
+
+    // Try UTF-8 first, fallback to latin1
+    let content: string;
+    try {
+      content = buffer.toString('utf-8');
+      // Check for replacement characters (encoding error indicator)
+      if (content.includes('\uFFFD')) {
+        content = buffer.toString('latin1');
+      }
+    } catch {
+      content = buffer.toString('latin1');
+    }
+
+    // Truncate large files
+    const MAX_SIZE = 8000;
+    if (content.length > MAX_SIZE) {
+      content = content.slice(0, MAX_SIZE) + '\n\n... [truncated, file too large]';
+    }
     return { success: true, output: content };
   }
 
