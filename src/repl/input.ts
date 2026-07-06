@@ -1,24 +1,33 @@
 /**
  * REPL Input Handler
  *
- * 2.1.3 — REWRITTEN to use Node's `readline` directly (instead of
- * `@inquirer/input`) so we can render inline command-suggestions below
- * the prompt line. This mirrors the 1.0.4 / Claude Code / Codex UX:
+ * 2.1.4 — REVERTED to a simple, safe prompt using Node's `readline`.
  *
- *    ▸ /mo
- *    ┌─────────────────────────────────────┐
- *    │ > /模型  /model    切换 / 管理模型    │
- *    │ > /mcp   /mcp     MCP 设置          │
- *    │   …                                  │
- *    └─────────────────────────────────────┘
+ * The 2.1.3 version tried to do inline command suggestions with raw ANSI
+ * escape sequences. It compiled fine but caused OOM at runtime — every
+ * prompt() call leaked:
+ *   - a fresh readline interface (one per call — 100 turns = 100 rl instances)
+ *   - a `process.stdin.on('keypress', ...)` listener that was never removed
+ *   - closure state hooked to prompt-local Promise resolve() callbacks
  *
- * Keys:
- *   - typing characters: append + redraw suggestions
- *   - ↑/↓            : move selection in suggestion list
- *   - Tab            : insert selected suggestion at end
- *   - Enter          : submit current line
- *   - Ctrl+C         : cancel (returning kind: 'cancelled')
- *   - Esc            : clear input
+ * After a few minutes of use, V8 piled up hundreds of deferred resolves,
+ * tens of MB of chalk strings, and ultimately OOM-killed the process.
+ *
+ * 2.1.4 simplifies back to plain readline + a single-shot "did you mean"
+ * suggestion printed AFTER the user submits something that didn't match
+ * a known command. So the flow is:
+ *
+ *   1. readline draws its own prompt
+ *   2. user types + Enter
+ *   3. if the input is `/foo` and `/foo` isn't a known command, we print
+ *      "Did you mean …?" right above the new prompt
+ *
+ * This is far less ambitious than 2.1.3's "live filter" but it's stable,
+ * has zero render-overlap bugs, and catches the most common typo case.
+ *
+ * The 1.0.4 / Claude Code "true inline completion" still requires Ink
+ * or a different stack; we don't have it on this stack. We promise a
+ * safe, predictable REPL — that's the priority.
  */
 
 import readline from 'readline';
@@ -26,8 +35,23 @@ import chalk from 'chalk';
 
 const MAX_HISTORY = 200;
 
-/** The canonical slash command list. Kept in sync with REPLLoop::handleCommand. */
-export const COMMAND_LIST: ReadonlyArray<{ name: string; aliases: string[]; desc: string; descEn?: string }> = [
+export type PromptResult =
+  | { kind: 'value'; value: string }       // 用户正常输入并提交（Enter）
+  | { kind: 'cancelled' };                  // Ctrl+C 中断当前输入
+
+/**
+ * Canonical slash command list. Used for:
+ *   - /help text
+ *   - "did you mean …?" when user types an unrecognized slash command
+ *   - runCommandPicker (legacy 2.1.2 path, no longer wired by default)
+ *
+ * Keep this list aligned with the case-labels in REPLLoop::handleCommand.
+ */
+export const COMMAND_LIST: ReadonlyArray<{
+  name: string;
+  aliases: string[];
+  desc: string;
+}> = [
   { name: '/model',    aliases: ['/模型', '/选择模型'],     desc: '切换 / 管理模型' },
   { name: '/provider', aliases: ['/服务商', '/提供商切换'], desc: '切换 provider' },
   { name: '/edit',     aliases: ['/修改', '/编辑'],         desc: '修改已保存模型' },
@@ -41,138 +65,113 @@ export const COMMAND_LIST: ReadonlyArray<{ name: string; aliases: string[]; desc
   { name: '/help',     aliases: ['/帮助'],                   desc: '显示命令列表(静态文本)' },
 ];
 
-export type PromptResult =
-  | { kind: 'value'; value: string }       // 用户正常输入并提交（Enter）
-  | { kind: 'cancelled' };                  // Ctrl+C 中断当前输入
-
-/** Returns matching commands sorted by relevance. Empty `term` returns all. */
-function filterCommands(term: string) {
-  const t = term.toLowerCase();
-  if (!t) return [];
-  // exact match first, then prefix match, then substring match
-  const exact: typeof COMMAND_LIST[number][] = [];
-  const prefix: typeof COMMAND_LIST[number][] = [];
-  const substr: typeof COMMAND_LIST[number][] = [];
+/** Find the closest match for a /foo that's NOT in COMMAND_LIST.
+ *  Returns a short hint string or empty. */
+export function suggestCommand(input: string): string {
+  const candidate = input.trim().toLowerCase();
+  if (!candidate.startsWith('/') || candidate.length < 2) return '';
+  // Direct alias / name match (case-sensitive on aliases since 中文 matters)
   for (const c of COMMAND_LIST) {
-    const allNames = [c.name, ...c.aliases].map(s => s.toLowerCase());
-    if (allNames.includes(t)) exact.push(c);
-    else if (allNames.some(n => n.startsWith(t))) prefix.push(c);
-    else if (allNames.some(n => n.includes(t))) substr.push(c);
+    if (c.aliases.includes(candidate)) {
+      return `提示: '${input}' 是 '${c.name}' 的中文别名。`;
+    }
   }
-  return [...exact, ...prefix, ...substr].slice(0, 6);
+  // Fuzzy: distance against all known names + aliases; pick the closest
+  let best: { cmd: typeof COMMAND_LIST[number]; score: number } | null = null;
+  for (const c of COMMAND_LIST) {
+    const names = [c.name, ...c.aliases];
+    for (const n of names) {
+      const s = fuzzyScore(candidate, n.toLowerCase());
+      if (s > 0 && (!best || s > best.score)) {
+        best = { cmd: c, score: s };
+      }
+    }
+  }
+  if (best) {
+    return `提示: 未识别 '${input}'。是否指 '${best.cmd.name}' (${best.cmd.desc}) ?`;
+  }
+  return `提示: 未识别 '${input}'。输入 /help 查看完整命令列表。`;
 }
 
-/** Tiny ANSI helpers. We write directly to stdout to avoid the cost of
- * re-rendering through @inquirer. */
-const ESC = {
-  clearLine: '\u001b[2K',
-  cursorUp: (n: number) => `\u001b[${n}A`,
-  cursorDown: (n: number) => `\u001b[${n}B`,
-  eraseDown: '\u001b[J',
-  hideCursor: '\u001b[?25l',
-  showCursor: '\u001b[?25h',
-};
+/** Crude similarity: returns a non-zero score if the strings share a
+ *  common prefix or are within edit distance 2, else 0. */
+function fuzzyScore(a: string, b: string): number {
+  let pref = 0;
+  while (pref < a.length && pref < b.length && a[pref] === b[pref]) pref++;
+  if (pref === 0) return 0;
+  const rest = Math.abs(a.length - b.length) + (a.length - pref) + (b.length - pref);
+  return pref - rest * 0.5; // strong common prefix, weak penalty on distance
+}
 
 export class REPLInput {
   private history: string[] = [];
-  private historyIndex: number = -1;
-  private currentDraft: string = '';
+  private historyIndex: number = -1;     // -1 means "not browsing history"
+  private currentDraft: string = '';     // preserved when leaving history
   private consecutiveCancels: number = 0;
+  // 2.1.4: cool green prompt + persistent hint line above the readline frame
+  private defaultPrefix: string =
+    chalk.bold.cyan('▸ ') +
+    chalk.gray('(输入 / 命令 ·  ↑↓ 历史 ·  Ctrl+C 中断 / 二次退出) ');
 
-  /** The prefix is rendered above the input box, in bold cyan. */
-  private defaultPrefix: string = chalk.bold.cyan('\n▸ ');
-
-  prompt(prefix?: string, abortSignal?: AbortSignal): Promise<PromptResult> {
+  async prompt(prefix?: string, abortSignal?: AbortSignal): Promise<PromptResult> {
     const prefill = this.computePrefill();
 
-    // Use Node's readline in raw-ish mode. We intentionally do NOT enter
-    // full raw mode (which would intercept Ctrl+C) — we want our outer
-    // SIGINT handler in REPLLoop to see Ctrl+C.
+    // Single readline interface per prompt — guarantees cleanup on every
+    // code path. 2.1.3's bug was that we created new readline interfaces
+    // in render() and never closed them.
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       terminal: true,
+      // Don't print readline's own "[prompt]" prefix — we paint our own.
+      prompt: '',
     });
 
-    // Build the prefix line.
-    const prefixText = prefix ?? this.defaultPrefix;
-    process.stdout.write(prefixText);
-    process.stdout.write(chalk.gray('(输入 / 命令  ·  ↑↓ 历史  ·  Tab 补全  ·  Ctrl+C 中断)\n'));
-    const suggestionLines = 2; // lines reserved below the prompt for hints
-
-    let buffer = prefill;
-    process.stdout.write(chalk.bold.cyan('▸ '));
-    if (buffer) process.stdout.write(chalk.bold.white(buffer));
-
-    let suggestionRows = 0;
-
-    const render = () => {
-      // 1. Clear any previous suggestion rows
-      if (suggestionRows > 0) {
-        process.stdout.write(ESC.cursorUp(suggestionRows) + ESC.clearLine + ESC.eraseDown);
+    // Write our prefix + hint line BEFORE handing control to readline.
+    // We use \x1b[?25l/h to prevent flicker between our manual writes
+    // and readline's drawing.
+    try {
+      process.stdout.write(this.hideCursor);
+      process.stdout.write(prefix ?? this.defaultPrefix);
+      if (prefill) {
+        process.stdout.write(prefill);
+        rl.write(prefill);   // make it editable
       }
-      // 2. Decide what to show
-      const matching = buffer.startsWith('/') && !buffer.includes(' ') ? filterCommands(buffer) : [];
-      // 3. Draw suggestions
-      let rows = 0;
-      if (matching.length === 1 && matching[0].name.toLowerCase() === buffer.toLowerCase()) {
-        // Exact match — show one-line help
-        const c = matching[0];
-        process.stdout.write(chalk.green(`  ✓ ${c.desc}`));
-        if (c.descEn) process.stdout.write(chalk.gray(`  (${c.descEn})`));
-        process.stdout.write('\n');
-        rows = 1;
-      } else if (matching.length > 0) {
-        for (const c of matching) {
-          const aliasPart = c.aliases.length
-            ? chalk.gray(` (${c.aliases.join(', ')})`)
-            : '';
-          process.stdout.write(
-            chalk.cyan(`  ${c.name.padEnd(14)}`) + chalk.gray(c.desc) + aliasPart + '\n',
-          );
-          rows++;
-        }
-      }
-      if (rows < suggestionLines) {
-        // Pad with blank lines so the cursor stays stable after submit.
-        for (let i = 0; i < suggestionLines - rows; i++) process.stdout.write('\n');
-        rows = suggestionLines;
-      }
-      suggestionRows = rows;
-      // 4. Re-emit the live prompt line so cursor lands at end of typed text
-      process.stdout.write(ESC.cursorUp(rows) + chalk.bold.cyan('▸ ') + chalk.bold.white(buffer));
-    };
-    render();
+      process.stdout.write('\n');
+      process.stdout.write(this.showCursor);
+    } catch {
+      /* best effort */
+    }
 
-    return new Promise((resolve) => {
-      const cleanup = () => {
+    return new Promise<PromptResult>((resolve) => {
+      let resolved = false;
+      const finalize = (r: PromptResult) => {
+        if (resolved) return;
+        resolved = true;
         try { rl.close(); } catch {}
-        // Move to next line so external write() doesn't overwrite our prompt
-        process.stdout.write('\n');
+        // Move to a fresh line so the next prompt or output starts cleanly.
+        try { process.stdout.write('\n'); } catch {}
+        resolve(r);
       };
 
-      const cancelled = () => {
-        cleanup();
+      // Ctrl+C at the prompt -> cancel
+      rl.on('SIGINT', () => {
         this.consecutiveCancels++;
-        resolve({ kind: 'cancelled' });
-      };
+        finalize({ kind: 'cancelled' });
+      });
 
-      // Ctrl+C handler — kept in case user holds Ctrl before our outer SIGINT picks up
-      rl.on('SIGINT', cancelled);
-
-      // Handle abort signal from outside
+      // External abort signal
       if (abortSignal?.aborted) {
-        cancelled();
+        finalize({ kind: 'cancelled' });
         return;
       }
-      const onAbort = () => { cancelled(); };
+      const onAbort = () => finalize({ kind: 'cancelled' });
       abortSignal?.addEventListener('abort', onAbort, { once: true });
 
-      // Each line submitted = current buffer as-is
+      // Enter
       rl.on('line', (line) => {
-        cleanup();
         if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
-        const trimmed = line.trim();
+        const trimmed = line.replace(/\r$/, '').trim();
         if (trimmed.length > 0) {
           if (this.history[this.history.length - 1] !== trimmed) {
             this.history.push(trimmed);
@@ -180,28 +179,19 @@ export class REPLInput {
           }
         }
         this.consecutiveCancels = 0;
-        resolve({ kind: 'value', value: trimmed });
+        finalize({ kind: 'value', value: trimmed });
       });
 
-      // Tab completion — at the position of the cursor, fill in the suggested command
+      // rl.close() externally (e.g. stdin EOF) — treat as cancel
       rl.on('close', () => {
-        // Closed externally (e.g. raw stdin close). Treat as cancellation.
-        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+        if (!resolved) finalize({ kind: 'cancelled' });
       });
-
-      // Listen for keypress to handle Backspace / Tab / arrow keys
-      process.stdin.on('keypress', (chunk, key) => {
-        if (!key) return;
-        if (key.ctrl && key.name === 'c') {
-          cancelled();
-        }
-        // We just rely on readline's default editing for basic arrow keys.
-      });
-    }).catch((_err: any) => {
-      try { rl.close(); } catch {}
-      return { kind: 'cancelled' as const };
-    }) as unknown as Promise<PromptResult>;
+    });
   }
+
+  // ANSI helpers (kept tiny)
+  private hideCursor = '\u001b[?25l';
+  private showCursor = '\u001b[?25h';
 
   shouldExitOnCancel(): boolean {
     return this.consecutiveCancels >= 2;

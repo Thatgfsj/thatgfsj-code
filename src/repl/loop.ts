@@ -18,7 +18,7 @@ import readline from 'readline';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { REPLInput, type PromptResult } from './input.js';
+import { REPLInput, type PromptResult, suggestCommand } from './input.js';
 import { REPLOutput } from './output.js';
 import { WelcomeScreen } from './welcome.js';
 import { AIEngine } from '../core/ai-engine.js';
@@ -203,6 +203,14 @@ export class REPLLoop {
     if (cmd === 'help' || cmd === '帮助') {
       this.printCommandList();
       return true;
+    }
+
+    // 2.1.4 — fuzzy-suggest a near match for unmatched slash-commands.
+    // Note: `input` is the original text the user typed, before we lowercased
+    // and stripped slashes. suggestCommand needs Chinese characters to work.
+    if (input.startsWith('/') || input.startsWith('／')) {
+      const hint = suggestCommand(input);
+      if (hint) this.output.printInfo(chalk.gray(`  ${hint}`));
     }
 
     // Bare "/" by itself in handleCommand is fine — it falls through to

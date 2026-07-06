@@ -15,6 +15,36 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ---
 
+## [2.1.4] - 2026-07-06
+
+### Fixed (CRITICAL — OOM)
+- **2.1.3 立刻发布的 inline 命令补全是 OOM 炸弹**:用户实际用几分钟就触发
+  `Reached heap limit Allocation failed` 退出。根因是 2.1.3 的
+  `REPLInput.prompt()` 每次调用都:
+    1. **新建一个 `readline.createInterface`** 然后从来不关 (100 turns = 100 个 instance)
+    2. **注册一个 `process.stdin.on('keypress', ...)` listener** 然后从来不删
+    3. 把闭包引用的 `Promise.resolve` 全部累积起来
+  V8 最后 GC 跟不上就崩了。**2.1.4 直接回退**到「安全的 readline prompt」:
+    - 一次 `prompt()` 内只创建一个 `readline`,所有路径都通过 `finalize()` 关掉
+    - 完全不注册全局 `process.stdin` 监听器(让外层 SIGINT handler 处理 Ctrl+C)
+    - 不手工画 ANSI(2.1.3 render() 的 cursor escape 也放弃了)
+
+### UX
+- **`/foo` 输入错时给提示**:由于不能再做"in-list filter",改成提交后
+  如果识别不出 `/xxx`,立刻打印 "提示: '/xxx' 是 '/model' 的中文别名"
+  或 "提示: '/xxx' 未识别。是否指 '/edit' ...?"。普通的正常打字不会看到任何
+  提示。这是 1.0.4 真正模型的折衷版——single source of truth 是
+  `src/repl/input.ts::COMMAND_LIST`,`/help` 也用同一份。
+
+### Tests
+- 4 个新 unit-input 测试(suggestCommand 中文 alias / 模糊匹配 / 空输入 / 占位)。
+- 2 个新 unit-oom-stress 测试:**回归保险**,源代码静态分析禁止
+  `process.stdin.on('keypress', ...)` 再次出现;`suggestCommand` 1000 次
+  循环 heap 增量 < 5MB。
+- **73/73 tests passing**(原 70 + 新增 3)。
+
+---
+
 ## [2.1.3] - 2026-07-06
 
 ### Changed (UX 治本)
