@@ -116,12 +116,21 @@ export class App {
   async *streamResponse(messages?: ChatMessage[]): AsyncGenerator<StreamChunk, ChatResponse> {
     const msgs = messages || this.session.getMessages();
     const inner = this.llm.chatStream(msgs);
+    const debugUsage = !!process.env.GFCODE_DEBUG_USAGE;
     let next = await inner.next();
     while (!next.done) {
       // Forward chunks unchanged, but capture usage into the persistent
       // cache stats store so the TUI Header / /cache command can read it.
       if (next.value && next.value.type === 'usage') {
         try { this.cacheStats.record(next.value.usage); } catch { /* best-effort */ }
+        if (debugUsage) {
+          // v3.0.0 DEBUG: dump raw usage fields to stderr so the user can
+          // confirm whether the upstream provider/relay forwards cache stats.
+          // Enable with: GFCODE_DEBUG_USAGE=1 gfcode ...
+          process.stderr.write(
+            '[debug_usage] ' + JSON.stringify(next.value.usage) + '\n'
+          );
+        }
       }
       yield next.value;
       next = await inner.next();

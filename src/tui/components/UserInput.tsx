@@ -46,6 +46,26 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
       }
       if (key.tab || key.return) {
         const selected = filteredCommands[selectedCmd] || filteredCommands[0];
+        // v3.0.0 bug fix: previously we set `value = selected.name + ' '` and
+        // returned, which forced the user to press Enter a SECOND time to
+        // actually execute the command. For single-word commands like
+        // /模型 /新建 /压缩 /帮助 /技能 etc. that meant: "press Enter twice
+        // to switch model", which is confusing and a reproduce-and-exit
+        // vector if the user panics and Ctrl+C's in the middle.
+        //
+        // Fix: when Enter is pressed on a command-list item, EXECUTE the
+        // command directly. If the user wants to append args (e.g. /模型
+        // <name>), they can type them after the slash. Tab still writes
+        // the name into the input so the user can append text.
+        if (key.return) {
+          setSelectedCmd(0);
+          setValue('');
+          setHistory(prev => [...prev, selected.name]);
+          setHistoryIdx(-1);
+          onSubmit(selected.name);
+          return;
+        }
+        // Tab: write the name into the input so the user can append args.
         setValue(selected.name + ' ');
         setSelectedCmd(0);
         return;

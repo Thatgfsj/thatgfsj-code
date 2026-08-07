@@ -154,6 +154,7 @@ export function TuiApp({ app }: Props) {
       {viewMode === 'model_select' ? (
         <ModelSelector
           currentModel={app.config.get().model}
+          currentProvider={app.config.get().provider}
           onSelect={(model) => {
             app.config.save({ model });
             saveModelToHistory(model);
