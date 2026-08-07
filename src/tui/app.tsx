@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import { Header } from './components/Header.js';
 import { ChatList } from './components/ChatList.js';
@@ -46,6 +46,14 @@ export function TuiApp({ app }: Props) {
   const [initUrl, setInitUrl] = useState('');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
+
+  // v3.0.0: cache stats snapshot for the Header. Re-read whenever messages
+  // change (i.e. a round just completed and recorded new usage). Polling on
+  // an interval would be wasteful; React re-render is the trigger.
+  const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
+  useEffect(() => {
+    setCacheSnapshot(app.cacheStats.snapshot());
+  }, [messages.length]);
 
   const addMsg = useCallback((content: string) => {
     setSystemMessages(prev => [...prev, { role: 'assistant', content }]);
@@ -124,7 +132,12 @@ export function TuiApp({ app }: Props) {
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Header provider={app.config.get().provider} model={app.config.get().model} />
+      <Header
+        provider={app.config.get().provider}
+        model={app.config.get().model}
+        cacheHitRate={cacheSnapshot.hitRate > 0 ? cacheSnapshot.hitRate : null}
+        cacheSavingsCNY={cacheSnapshot.estimatedSavingsCNY}
+      />
       <ChatList
         messages={allMessages}
         streaming={streaming}

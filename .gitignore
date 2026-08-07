@@ -7,3 +7,7 @@ dist/
 coverage/
 *.tgz
 hello.txt
+# NWT (project-scoped timeline; created on first run)
+.nwt/
+# Local cache stats — created on first chat round
+.thatgfsj-cache-stats.json

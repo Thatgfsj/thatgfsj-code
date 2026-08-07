@@ -13,14 +13,38 @@ interface Props {
   onCancel: () => void;
 }
 
-type InitStep = 'provider' | 'api_key' | 'model' | 'custom_model' | 'custom_url';
+type InitStep =
+  | 'provider'
+  | 'api_key'
+  | 'model'
+  | 'custom_model'
+  | 'custom_url'
+  | 'cache_strategy'
+  | 'cache_ttl';
 
+interface CacheChoice {
+  enabled: boolean;
+  ttl: '5m' | '1h';
+}
+
+/**
+ * v3.0.0: InitWizard gained two new steps after model selection:
+ *   - cache_strategy: enable / disable prompt caching
+ *   - cache_ttl:      5m vs 1h (only if enabled)
+ *
+ * The defaults mirror ConfigManager.DEFAULT_CONFIG (enabled, 5m). Users on
+ * OpenAI / DeepSeek / Gemini can ignore these — those providers do
+ * automatic caching and the flag is purely advisory there. The flag
+ * matters for Anthropic users who want to opt out of cache_control
+ * markers or pick a longer TTL.
+ */
 export function InitWizard({ onComplete, onCancel }: Props) {
   const [step, setStep] = useState<InitStep>('provider');
   const [selectedProvider, setSelectedProvider] = useState<ProviderName>('siliconflow');
   const [apiKey, setApiKey] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [customUrl, setCustomUrl] = useState('');
+  const [cacheChoice, setCacheChoice] = useState<CacheChoice>({ enabled: true, ttl: '5m' });
 
   const providers = listProviders();
   const models = getModelsForProvider(selectedProvider);
@@ -30,7 +54,20 @@ export function InitWizard({ onComplete, onCancel }: Props) {
     const configPath = join(dir, 'config.json');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    const config: Record<string, any> = { provider, model, apiKey: key, temperature: 0.7, maxTokens: 4096, contextLength: 50 };
+    const config: Record<string, any> = {
+      provider,
+      model,
+      apiKey: key,
+      temperature: 0.7,
+      maxTokens: 4096,
+      contextLength: 50,
+      // v3.0.0: cache policy from wizard
+      cache: {
+        enabled: cacheChoice.enabled,
+        ttl: cacheChoice.ttl,
+        strategy: 'auto',
+      },
+    };
     if (url) config.baseUrl = url;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
 
@@ -105,8 +142,8 @@ export function InitWizard({ onComplete, onCancel }: Props) {
               setStep('custom_model');
             } else {
               setSelectedModel(item.value);
-              saveConfig(selectedProvider, item.value, apiKey, customUrl || undefined);
-              onComplete(selectedProvider, item.value, apiKey, customUrl || undefined);
+              // v3.0.0: prompt the user for cache strategy after model.
+              setStep('cache_strategy');
             }
           }}
         />
@@ -120,6 +157,54 @@ export function InitWizard({ onComplete, onCancel }: Props) {
       <Box flexDirection="column" paddingLeft={1}>
         <Text color="#06B6D4" bold>输入模型名称:</Text>
         <Text color="#F59E0B">（请直接输入模型名并回车）</Text>
+      </Box>
+    );
+  }
+
+  // v3.0.0: prompt-cache strategy step
+  if (step === 'cache_strategy') {
+    const items = [
+      { label: '✓ 开启（推荐，节省 token 成本）', value: 'on' },
+      { label: '✗ 关闭（每次请求都重新计算）', value: 'off' },
+    ];
+    return (
+      <Box flexDirection="column" paddingLeft={1}>
+        <Text color="#06B6D4" bold>是否开启 Prompt Caching?</Text>
+        <Text dimColor>对 Anthropic / DeepSeek / Gemini 有效，OpenAI 兼容接口默认自动缓存。</Text>
+        <SelectInput
+          items={items}
+          onSelect={(item) => {
+            if (item.value === 'on') {
+              setCacheChoice(c => ({ ...c, enabled: true }));
+              setStep('cache_ttl');
+            } else {
+              setCacheChoice(c => ({ ...c, enabled: false }));
+              saveConfig(selectedProvider, selectedModel, apiKey, customUrl || undefined);
+              onComplete(selectedProvider, selectedModel, apiKey, customUrl || undefined);
+            }
+          }}
+        />
+      </Box>
+    );
+  }
+
+  // v3.0.0: TTL choice
+  if (step === 'cache_ttl') {
+    const items = [
+      { label: '5 分钟（写入成本低，适合短会话）', value: '5m' },
+      { label: '1 小时（写入成本高，适合长会话）', value: '1h' },
+    ];
+    return (
+      <Box flexDirection="column" paddingLeft={1}>
+        <Text color="#06B6D4" bold>Cache TTL:</Text>
+        <SelectInput
+          items={items}
+          onSelect={(item) => {
+            setCacheChoice(c => ({ ...c, ttl: item.value as '5m' | '1h' }));
+            saveConfig(selectedProvider, selectedModel, apiKey, customUrl || undefined);
+            onComplete(selectedProvider, selectedModel, apiKey, customUrl || undefined);
+          }}
+        />
       </Box>
     );
   }

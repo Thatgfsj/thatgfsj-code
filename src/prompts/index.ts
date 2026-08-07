@@ -15,6 +15,23 @@ export interface SystemPromptConfig {
   skillsPrompt?: string;
 }
 
+/**
+ * v3.0.0: a single named fragment of the system prompt. The provider layer
+ * attaches cache_control markers to volatile=false segments (Anthropic) and
+ * the fingerprint module hashes only the non-volatile portion.
+ */
+export interface SystemSegment {
+  /** Stable identifier, used in fingerprints and logging. */
+  name: string;
+  /** Rendered text content. May be empty string if the section was a no-op. */
+  content: string;
+  /**
+   * volatile=false: content never changes between requests within a session.
+   * volatile=true:  content may change (NWT events, current time).
+   */
+  volatile: boolean;
+}
+
 export class SystemPromptBuilder {
   private config: Required<SystemPromptConfig>;
 
@@ -30,17 +47,40 @@ export class SystemPromptBuilder {
   }
 
   build(): string {
-    const fragments: string[] = [
-      this.buildProjectInstructions(), // User config FIRST for better compliance
-      this.buildIdentity(),
-      this.buildToolInstructions(),
-      this.buildEnvironment(),
-      this.buildPermissionMode(),
-      this.buildNwtHistory(),
-      this.buildSkills(),
-      this.buildDateInfo(),
-    ];
-    return fragments.filter(Boolean).join('\n\n');
+    return this.buildSegments()
+      .map(s => s.content)
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  /**
+   * v3.0.0: build the system prompt as named segments instead of a flat
+   * string. The provider layer (Anthropic) can attach cache_control markers
+   * to the segments it caches, and the fingerprint module can hash the
+   * static portion to detect when the immutable prefix changed.
+   *
+   * Ordering rule (Reasonix-style): immutable prefix first, volatile tail
+   * last. NWT history and Date move to the tail because both can change
+   * between rounds (Date: every build; NWT: when a new event is logged).
+   * Keeping them out of the prefix means the upstream cache keeps its
+   * prefix checkpoint stable across those changes.
+   *
+   * Segments with empty content are filtered out — they neither contribute
+   * to the string output nor to any cache fingerprint.
+   */
+  buildSegments(): SystemSegment[] {
+    return [
+      // Immutable prefix (cacheable as a single block on Anthropic)
+      { name: 'project-instructions', content: this.buildProjectInstructions(), volatile: false },
+      { name: 'identity',              content: this.buildIdentity(),              volatile: false },
+      { name: 'tool-instructions',     content: this.buildToolInstructions(),     volatile: false },
+      { name: 'environment',           content: this.buildEnvironment(),           volatile: false },
+      { name: 'permission-mode',       content: this.buildPermissionMode(),       volatile: false },
+      { name: 'skills',                content: this.buildSkills(),                volatile: false },
+      // Volatile tail — not part of the cache prefix
+      { name: 'nwt-history',           content: this.buildNwtHistory(),           volatile: true  },
+      { name: 'date-info',             content: this.buildDateInfo(),             volatile: true  },
+    ].filter(s => s.content);
   }
 
   private buildIdentity(): string {

@@ -19,6 +19,7 @@ const CMD_ALIASES: Record<string, string> = {
   '/帮助': '/help',
   '/服务商': '/provider',
   '/思考': '/thinking',
+  '/缓存': '/cache',
 };
 
 export const COMMAND_LIST = [
@@ -26,6 +27,7 @@ export const COMMAND_LIST = [
   { name: '/服务商', desc: '更换服务商' },
   { name: '/新建', desc: '新建会话' },
   { name: '/压缩', desc: '压缩上下文' },
+  { name: '/缓存', desc: '缓存命中率' },
   { name: '/技能', desc: '管理技能' },
   { name: '/mcp', desc: 'MCP 设置' },
   { name: '/帮助', desc: '查看帮助' },
@@ -83,6 +85,61 @@ export function useCommands(app: App) {
       app.session.truncate();
       const after = app.session.getMessageCount();
       return { handled: true, output: `上下文已压缩: ${before} → ${after} 条消息` };
+    }
+
+    // ── /cache — prompt cache hit-rate + cost savings ───
+    // v3.0.0: surfaces CacheStatsStore snapshots. Sub-commands:
+    //   /cache          show full breakdown
+    //   /cache reset    zero the persistent stats
+    if (name === '/cache') {
+      if (arg === 'reset' || arg === '重置') {
+        app.cacheStats.reset();
+        return { handled: true, output: '✓ 缓存统计已重置' };
+      }
+      if (arg === 'off' || arg === '关') {
+        // Toggle disable: writes through to provider config (currently a
+        // no-op until M4.5 wires Config.cache). Print a hint.
+        return {
+          handled: true,
+          output: [
+            '✗ 关闭缓存功能：在 ~/.thatgfsj/config.json 添加 "cache": { "enabled": false } 后重启。',
+            '  （提示：完全关闭会大幅增加 token 成本；推荐保留开启）',
+          ].join('\n'),
+        };
+      }
+      const s = app.cacheStats.snapshot();
+      if (s.totalRequests === 0) {
+        return {
+          handled: true,
+          output: [
+            '⚡ 缓存统计',
+            '─────────────────────────',
+            '  暂无请求。开启一段对话后再来查看。',
+            '',
+            '/cache reset  ·  重置统计',
+          ].join('\n'),
+        };
+      }
+      const hitRateStr = (s.hitRate * 100).toFixed(1) + '%';
+      const recent = s.history.slice(-10);
+      const lines = [
+        '⚡ 缓存统计 (累计 ' + s.totalRequests + ' 轮)',
+        '─────────────────────────',
+        `  命中率:      ${hitRateStr}  (${s.totalReadTokens.toLocaleString()} / ${s.totalInputTokens.toLocaleString()} tokens)`,
+        `  累计创建:    ${s.totalCreationTokens.toLocaleString()} tokens`,
+        `  累计节省:    ¥${s.estimatedSavingsCNY.toFixed(4)}`,
+        '',
+        '最近 10 轮:',
+      ];
+      for (let i = 0; i < recent.length; i++) {
+        const r = recent[i];
+        const tag = r.read > 0 ? '⚡' : '💸';
+        const pct = (r.hitRate * 100).toFixed(0) + '%';
+        lines.push(`  #${s.history.length - recent.length + i + 1}  [${tag}] ${String(r.read).padStart(5)} / ${String(r.input).padStart(5)}  ${pct.padStart(4)}`);
+      }
+      lines.push('');
+      lines.push('/cache reset  ·  重置统计');
+      return { handled: true, output: lines.join('\n') };
     }
 
     // ── /skills [id] ────────────────────────────────────
@@ -156,6 +213,7 @@ export function useCommands(app: App) {
           '  /服务商          更换服务商',
           '  /新建            新建会话',
           '  /压缩            压缩上下文',
+          '  /缓存            查看缓存命中率',
           '  /思考 [on|off]   切换思考块显示',
           '  /技能 [id]       管理技能',
           '  /mcp             MCP 设置',

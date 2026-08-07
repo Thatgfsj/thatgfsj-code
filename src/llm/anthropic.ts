@@ -8,15 +8,40 @@
  * Streaming: SSE with "event: ..." and "data: {...}" lines
  *
  * Key differences from OpenAI:
- * - System message is separate (top-level "system" field)
+ * - System message is separate (top-level "system" field, an array of blocks)
  * - No "system" role in messages array
  * - Tool use blocks have type "tool_use" with "input" (not "arguments")
  * - Tool results use role "tool_result" (not "tool")
+ *
+ * v3.0.0: prompt caching support
+ *   - The top-level "system" field is now an array of content blocks. The
+ *     last block carries cache_control: { type: 'ephemeral', ttl: '5m' }
+ *     by default, so Anthropic caches the entire system prefix across rounds.
+ *     The previous buildRequest silently dropped any system messages after
+ *     the first (`find` + `system` string) — that bug is fixed here: we
+ *     forward every system message and let the provider concatenate.
+ *   - The last tool definition gets a cache_control marker too, so tool
+ *     schemas are cached on subsequent rounds (Anthropic charges full price
+ *     for uncached tool descriptions, which can be the largest single block
+ *     in tool-heavy sessions).
+ *   - The stream's trailing message_delta carries a `usage` object with
+ *     cache_creation_input_tokens / cache_read_input_tokens. We yield a
+ *     structured { type: 'usage' } chunk so the cache stats layer can
+ *     record hit-rates.
+ *   - JSON serialization uses stableStringify so the byte sequence of the
+ *     request body is deterministic across rounds. Although Anthropic does
+ *     not do byte-level prefix cache (it relies on its own fingerprint),
+ *     deterministic serialization makes the on-the-wire body easy to diff
+ *     when debugging cache misses.
  */
 
-import type { ChatMessage, ChatResponse, ChatOptions, ToolCall } from '../types.js';
+import type { ChatMessage, ChatResponse, ChatOptions, ToolCall, StreamChunk, Usage } from '../types.js';
 import type { Tool } from '../tools/types.js';
-import type { LLMProvider, StreamChunk, ProviderConfig } from './provider.js';
+import type { LLMProvider, ProviderConfig } from './provider.js';
+import { stableStringify } from '../utils/stableStringify.js';
+
+/** Default TTL for cache_control breakpoints. '5m' is cheaper to write; '1h' is preferred when sessions are long. */
+const DEFAULT_CACHE_TTL: '5m' | '1h' = '5m';
 
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic';
@@ -69,11 +94,7 @@ export class AnthropicProvider implements LLMProvider {
     return {
       content,
       role: 'assistant',
-      usage: data.usage ? {
-        prompt_tokens: data.usage.input_tokens || 0,
-        completion_tokens: data.usage.output_tokens || 0,
-        total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
-      } : undefined,
+      usage: data.usage ? this.normalizeUsage(data.usage) : undefined,
       tool_calls: toolCalls,
     };
   }
@@ -95,6 +116,8 @@ export class AnthropicProvider implements LLMProvider {
     const toolUseBlocks: Map<number, { id: string; name: string; input: string }> = new Map();
     let currentBlockIndex = -1;
     let currentBlockType = '';
+    // Anthropic attaches usage info to the trailing message_delta event.
+    let capturedUsage: Usage | undefined;
 
     try {
       while (true) {
@@ -122,6 +145,11 @@ export class AnthropicProvider implements LLMProvider {
                   name: data.content_block.name || '',
                   input: '',
                 });
+              } else if (currentBlockType === 'thinking') {
+                // Anthropic extended thinking: emit as structured thinking chunks.
+                // TUI / session layer decides whether to surface these.
+                // (We don't push to fullContent — compressThinking strips
+                // these blocks from persistence.)
               }
             }
 
@@ -136,7 +164,28 @@ export class AnthropicProvider implements LLMProvider {
                 if (buf) {
                   buf.input += data.delta.partial_json || '';
                 }
+              } else if (data.delta?.type === 'thinking_delta') {
+                if (data.delta.thinking) {
+                  yield { type: 'thinking', content: data.delta.thinking };
+                }
               }
+            }
+
+            // message_delta carries the final usage (cache hit/miss stats).
+            // Per Anthropic docs: usage is only attached on the message_delta
+            // event of the LAST chunk (after message_stop), unless the
+            // `anthropic-beta: prompt-caching-2024-07-31` header is sent.
+            if (data.type === 'message_delta' && data.usage) {
+              capturedUsage = this.normalizeUsage({
+                ...capturedUsage,
+                ...data.usage,
+              });
+            }
+
+            // message_start may carry the initial input_tokens + cache info
+            // when prompt caching is active.
+            if (data.type === 'message_start' && data.message?.usage) {
+              capturedUsage = this.normalizeUsage(data.message.usage);
             }
           } catch {
             // Skip invalid JSON
@@ -163,18 +212,64 @@ export class AnthropicProvider implements LLMProvider {
       yield { type: 'tool_calls', toolCalls };
     }
 
-    return { content: fullContent, role: 'assistant', tool_calls: toolCalls.length > 0 ? toolCalls : undefined };
+    if (capturedUsage) {
+      yield { type: 'usage', usage: capturedUsage };
+    }
+
+    return {
+      content: fullContent,
+      role: 'assistant',
+      usage: capturedUsage,
+      tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    };
   }
 
   /**
-   * Build request body for Anthropic API
+   * Build request body for Anthropic API.
+   *
+   * v3.0.0 changes:
+   *   1. `system` is now an array of content blocks (was a single string).
+   *   2. ALL system messages are forwarded (the previous code used `find`
+   *      and dropped every system message after the first, which broke
+   *      `[Earlier conversation...]` summaries).
+   *   3. The LAST system block carries cache_control, marking the entire
+   *      system prefix as cacheable.
+   *   4. The LAST tool definition carries cache_control, marking the entire
+   *      tool list as cacheable.
+   *   5. Per-message cache_control markers are forwarded when set on
+   *      ChatMessage (rare, but supports fine-grained breakpoints).
+   *   6. JSON.parse on tool arguments is wrapped in try/catch — interrupted
+   *      streams can leave a half-parsed JSON string that previously
+   *      crashed the entire buildRequest.
    */
   protected buildRequest(messages: ChatMessage[], stream: boolean, options?: ChatOptions, tools?: Tool[]) {
-    // Anthropic uses separate system message
-    const systemMsg = messages.find(m => m.role === 'system');
-    const nonSystemMsgs = messages.filter(m => m.role !== 'system');
+    // 1) Collect ALL system messages, in order, as content blocks. The
+    //    final block (and only the final block, per Anthropic convention)
+    //    carries the cache_control marker.
+    const systemMessages = messages.filter(m => m.role === 'system');
+    const cacheTtl = (this.config.cache?.ttl) || DEFAULT_CACHE_TTL;
+    const cacheEnabled = this.config.cache?.enabled !== false; // default on for Anthropic
 
-    // Convert messages to Anthropic format
+    const systemBlocks = systemMessages.length === 0 ? undefined : systemMessages.map((m, i, arr) => {
+      const isLast = i === arr.length - 1;
+      // ChatMessage.content may be string | ContentBlock[] (the latter used
+      // for multimodal user messages). System messages are always plain
+      // strings in our codebase, but be defensive and handle both shapes.
+      const text = typeof m.content === 'string'
+        ? m.content
+        : m.content
+            .filter(b => b.type === 'text')
+            .map(b => (b as any).text)
+            .join('');
+      const block: any = { type: 'text', text };
+      if (isLast && cacheEnabled) {
+        block.cache_control = { type: 'ephemeral', ttl: cacheTtl };
+      }
+      return block;
+    });
+
+    // 2) Convert non-system messages to Anthropic wire format.
+    const nonSystemMsgs = messages.filter(m => m.role !== 'system');
     const anthropicMessages = nonSystemMsgs.map(m => {
       if (m.role === 'tool') {
         // Tool result message
@@ -194,50 +289,100 @@ export class AnthropicProvider implements LLMProvider {
           blocks.push({ type: 'text', text: m.content });
         }
         for (const tc of m.tool_calls) {
+          // Robust parse: aborted streams can leave a half-formed JSON
+          // string. Fall back to {} so the request still goes through and
+          // the model can re-request with corrected args.
+          let parsedArgs: unknown = {};
+          try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch { parsedArgs = {}; }
           blocks.push({
             type: 'tool_use',
             id: tc.id,
             name: tc.function.name,
-            input: JSON.parse(tc.function.arguments || '{}'),
+            input: parsedArgs,
           });
         }
         return { role: 'assistant', content: blocks };
       }
-      return {
+      // Forward per-message cache_control if the caller attached one
+      // (e.g. an inline breakpoint for a particular user message).
+      const baseContent = typeof m.content === 'string' ? m.content : m.content;
+      const msg: any = {
         role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content,
+        content: baseContent,
       };
+      if (m.cache_control) {
+        msg.cache_control = m.cache_control;
+      }
+      return msg;
     });
 
     const body: any = {
       model: this.config.model,
       max_tokens: options?.maxTokens ?? this.config.maxTokens ?? 4096,
       temperature: options?.temperature ?? this.config.temperature,
-      ...(systemMsg && { system: systemMsg.content }),
+      ...(systemBlocks ? { system: systemBlocks } : {}),
       messages: anthropicMessages,
       stream,
     };
 
+    // 3) Tools. Attach cache_control only to the LAST tool so Anthropic
+    //    caches the entire tool list as a single breakpoint.
     if (tools && tools.length > 0) {
-      body.tools = this.buildTools(tools);
+      const toolDefs = this.buildTools(tools);
+      if (cacheEnabled) {
+        toolDefs[toolDefs.length - 1].cache_control = { type: 'ephemeral', ttl: cacheTtl };
+      }
+      body.tools = toolDefs;
     }
 
     return body;
   }
 
   /**
-   * Execute the HTTP request
+   * Execute the HTTP request.
+   *
+   * v3.0.0: serialization via stableStringify; also send the
+   * `anthropic-beta: prompt-caching-2024-07-31` header so the API returns
+   * cache_read_input_tokens / cache_creation_input_tokens in the streaming
+   * usage fields. Some relay stations do not forward this header — that is
+   * fine, the rest of the provider still works (just without cache stats).
    */
   protected async doRequest(body: any): Promise<Response> {
     const url = `${this.config.baseUrl}/messages`;
-    return fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000); // 60s
+
+    try {
+      return await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.config.apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'prompt-caching-2024-07-31',
+        },
+        body: stableStringify(body),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Map Anthropic usage JSON to the canonical Usage shape. Anthropic reports
+   * input_tokens / output_tokens on the message_start event, and adds
+   * cache_creation_input_tokens / cache_read_input_tokens on message_delta.
+   * Either can arrive first depending on the streaming order, so we accept
+   * either and merge.
+   */
+  protected normalizeUsage(raw: any): Usage {
+    return {
+      prompt_tokens: raw.input_tokens || 0,
+      completion_tokens: raw.output_tokens || 0,
+      total_tokens: (raw.input_tokens || 0) + (raw.output_tokens || 0),
+      cache_creation_input_tokens: raw.cache_creation_input_tokens,
+      cache_read_input_tokens: raw.cache_read_input_tokens,
+    };
   }
 }

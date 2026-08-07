@@ -63,12 +63,22 @@ export class SessionManager {
   private maxMessages: number;
   /** v2.2.4: counter for messages dropped by the pollution filter. */
   private droppedCount: number = 0;
+  /**
+   * v3.0.0: callback invoked when the message count exceeds maxMessages.
+   * Reasonix principle: do not mutate messages to compact; instead, signal
+   * the TUI to suggest the user call /new (start a fresh session) so that
+   * the upstream prompt cache keeps a stable prefix. NWT auto-logs every
+   * meaningful event, so no history is lost — it just moves out of the
+   * live cache window.
+   */
+  public onSuggestNewSession?: (info: { currentLength: number; max: number }) => void;
 
-  constructor(maxMessages = 50) {
+  constructor(maxMessages = 50, options?: { onSuggestNewSession?: SessionManager['onSuggestNewSession'] }) {
     this.maxMessages = maxMessages;
     this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     this.createdAt = new Date();
     this.compactor = new ContextCompactor({ maxMessages });
+    this.onSuggestNewSession = options?.onSuggestNewSession;
   }
 
   addMessage(role: ChatMessage['role'], content: string, extras?: Partial<ChatMessage>): void {
@@ -109,27 +119,39 @@ export class SessionManager {
   }
 
   /**
-   * Auto-compact when messages exceed max.
-   * Keeps system messages + recent half. One summary replaces the rest.
+   * v3.0.0: "auto-compact" is now a no-op on `messages`. We instead invoke
+   * the registered `onSuggestNewSession` callback (if any) so the TUI can
+   * surface a "context is getting long, consider /new" hint. This keeps
+   * the messages array byte-stable across rounds, which is critical for
+   * prompt-cache hit-rate: any reordering or summary insertion would
+   * invalidate every cache breakpoint the upstream provider has set.
+   *
+   * Rationale (Reasonix-style): when context exceeds the model window or
+   * the configured maxMessages threshold, the right action is to start a
+   * NEW session, not to silently truncate or summarize. NWT auto-logs
+   * every meaningful event, so the user does not lose context — it just
+   * moves out of the live cache window. If the user wants a longer
+   * session, they can bump maxMessages in `~/.thatgfsj/config.json`.
+   *
+   * The original "fake compact" logic (insert `[Earlier conversation...]`
+   * summary) is preserved as `truncate()` for callers that explicitly
+   * want to compact (e.g. /new command hard-reset).
    */
   private autoCompact(): void {
     if (this.messages.length <= this.maxMessages) return;
 
-    const systemMsgs = this.messages.filter(m => m.role === 'system');
-    const others = this.messages.filter(m => m.role !== 'system');
-    const keepCount = Math.floor(this.maxMessages * 0.5);
-    const recent = others.slice(-keepCount);
-    const removed = others.length - keepCount;
-
-    if (removed <= 0) return;
-
-    // Remove old summaries before adding new one
-    const cleanSystem = systemMsgs.filter(m => !m.content.startsWith('[Earlier conversation'));
-    const summary: ChatMessage = {
-      role: 'system',
-      content: `[Earlier conversation: ${removed} messages compacted to save context]`,
-    };
-    this.messages = [...cleanSystem, summary, ...recent];
+    // Notify the TUI. The default TUI behavior is to render a toast:
+    //   ⚠️ 上下文超长（{currentLength}/{max}），建议调 /new 开新会话
+    //            (NWT 已自动归档历史)
+    try {
+      this.onSuggestNewSession?.({
+        currentLength: this.messages.length,
+        max: this.maxMessages,
+      });
+    } catch {
+      // Callback failure must not break the chat loop.
+    }
+    // Intentionally do NOT mutate this.messages. Prefix stability matters more.
   }
 
   truncate(maxMessages?: number): void {

@@ -69,7 +69,7 @@ process.on('unhandledRejection', (reason) => {
 program
   .name('gfcode')
   .description('Thatgfsj Code - AI Coding Assistant')
-  .version('0.4.4')
+  .version('0.5.0')
   .argument('[prompt]', 'Task to execute (omit to start interactive mode)')
   .option('-m, --model <model>', 'Specify model')
   .option('-i, --interactive', 'Force interactive mode')
@@ -136,67 +136,64 @@ program
           process.stdout.write(chalk.gray('  Thinking...'));
           const stream = app.streamResponse();
 
-          // v2.2.5: stream-time rendering stays simple — we just buffer
-          // the full response. Post-process at the end (compress
-          // thinking blocks once). This avoids a state machine for
-          // "are we inside <think> right now" mid-stream which would
-          // be flaky if the model splits the tag across chunks.
+          // v3.0.0: stream is now AsyncGenerator<StreamChunk> instead of
+          // string. Tool calls come as { type: 'tool_calls', toolCalls }
+          // with structured args; usage comes as { type: 'usage', usage }
+          // at end. We render text live, render tool dispatches inline, and
+          // capture the final response text into fullResponse for the
+          // post-process step below.
           for await (const chunk of stream) {
             if (abortCtrl.signal.aborted) break;
             // Clear the entire "Thinking..." line — must use enough
             // spaces to overwrite any longer thinking indicator.
             process.stdout.write('\r' + ' '.repeat(80) + '\r');
 
-            // Parse tool messages — these should NOT be compressed even
-            // when thinking is hidden, because they carry real signal
-            // (tool name + args + result).
-            if (chunk.includes('@@TOOL@@')) {
-              const parts = chunk.split('\n');
-              for (const part of parts) {
-                if (part.startsWith('@@TOOL@@')) {
-                  try {
-                    const data = JSON.parse(part.slice(8));
-                    if (data.action === 'call') {
-                      console.log();
-                      console.log(chalk.cyan(`  ⚙ ${data.name}: ${formatArgs(data.args)}`));
-                      console.log(chalk.gray('  ' + '─'.repeat(40)));
-                    } else if (data.action === 'result') {
-                      const output = data.output || data.error || '';
-                      const lines = output.split('\n');
-                      const MAX_TOOL_LINES = 20;
-                      const truncated = lines.length > MAX_TOOL_LINES;
-                      const visible = truncated ? lines.slice(0, MAX_TOOL_LINES) : lines;
-                      for (const line of visible) {
-                        console.log(chalk.gray('    │ ') + line);
-                      }
-                      if (truncated) {
-                        console.log(chalk.gray(`    │ ... (${lines.length - MAX_TOOL_LINES} more lines truncated)`));
-                      }
-                      console.log(chalk.gray('  ' + '─'.repeat(40)));
-                    }
-                  } catch {}
-                } else if (part) {
-                  // Mid-stream text chunk — leave it raw. The post-
-                  // process step below will compress any <think>
-                  // blocks before printing them as the final rendered
-                  // output. (We can't reliably strip mid-stream
-                  // because the closing </think> might be in a later
-                  // chunk.)
-                  process.stdout.write(chalk.cyan('  │ ') + part);
+            switch (chunk.type) {
+              case 'text': {
+                if (chunk.content) {
+                  fullResponse += chunk.content;
+                  // Show the chunk as it streams, but we'll re-render the
+                  // final compressed version below. To avoid double-
+                  // printing, only echo when we're NOT going to post-
+                  // process (i.e., when showThinking is true and we want
+                  // to see everything live).
+                  if (showThinking) {
+                    process.stdout.write(chalk.cyan('  │ ') + chunk.content);
+                  }
                 }
+                break;
               }
-            } else {
-              // Plain AI text chunk — buffer only. Same reasoning:
-              // post-process at end avoids mid-stream delimiter
-              // races.
-              fullResponse += chunk;
-              // Show the chunk as it streams, but we'll re-render the
-              // final compressed version below. To avoid double-
-              // printing, only echo when we're NOT going to post-
-              // process (i.e., when showThinking is true and we want
-              // to see everything live).
-              if (showThinking) {
-                process.stdout.write(chalk.cyan('  │ ') + chunk);
+              case 'thinking': {
+                // Reasoning content. Strip from persisted content via
+                // compressThinking; show live if user asked for it.
+                if (showThinking && chunk.content) {
+                  fullResponse += chunk.content;
+                  process.stdout.write(chalk.cyan('  │ ') + chunk.content);
+                }
+                break;
+              }
+              case 'tool_calls': {
+                if (chunk.toolCalls && chunk.toolCalls.length > 0) {
+                  for (const tc of chunk.toolCalls) {
+                    console.log();
+                    console.log(chalk.cyan(`  ⚙ ${tc.function.name}: ${formatArgs(tc.function.arguments)}`));
+                    console.log(chalk.gray('  ' + '─'.repeat(40)));
+                  }
+                }
+                break;
+              }
+              case 'usage': {
+                // v3.0.0: surface cache stats at the end of single-prompt
+                // mode so CLI users can see hit-rate without /cache command.
+                const u = chunk.usage;
+                const hit = u.prompt_cache_hit_tokens || u.cache_read_input_tokens || 0;
+                const miss = u.prompt_cache_miss_tokens || u.cache_creation_input_tokens || (u.prompt_tokens - hit);
+                if (hit > 0 || miss > 0) {
+                  const total = hit + miss;
+                  const rate = total > 0 ? ((hit / total) * 100).toFixed(1) : '0.0';
+                  console.log(chalk.gray(`  ⚡ cache: ${rate}% hit (${hit} / ${total} tokens)`));
+                }
+                break;
               }
             }
           }

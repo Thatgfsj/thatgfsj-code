@@ -16,6 +16,14 @@ const DEFAULT_CONFIG: Config = {
   maxTokens: 4096,
   contextLength: 50,
   provider: 'siliconflow',
+  // v3.0.0: prompt cache policy. Default = enabled, 5m TTL, auto strategy
+  // (Anthropic gets explicit cache_control markers; everything else falls
+  // through to the provider's built-in caching).
+  cache: {
+    enabled: true,
+    ttl: '5m',
+    strategy: 'auto',
+  },
 };
 
 export class ConfigManager {

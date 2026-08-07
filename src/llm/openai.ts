@@ -2,17 +2,22 @@
  * OpenAI-compatible Provider
  * Works with: OpenAI, SiliconFlow, DeepSeek, Kimi, Zhipu, MiniMax, Baichuan, Stepfun, Doubao, Ollama, ERNIE
  * Also works with any OpenAI-compatible relay station (中转站)
+ *
+ * v3.0.0+: caching-friendly wire format
+ *   - StreamChunk is now imported from ../types (single source of truth)
+ *   - buildRequest uses stableStringify so that the bytes sent are byte-equal
+ *     between requests with the same logical payload (required for DeepSeek
+ *     automatic prefix-cache hit)
+ *   - cache_control on individual ChatMessage is forwarded (Anthropic-style
+ *     markers are no-ops on OpenAI-compatible APIs but harmless)
+ *   - chatStream yields a final { type: 'usage' } chunk if the upstream
+ *     returned usage info (stream_options.include_usage already requested)
  */
 
-import type { ChatMessage, ChatResponse, ChatOptions, ToolCall } from '../types.js';
+import type { ChatMessage, ChatResponse, ChatOptions, ToolCall, StreamChunk } from '../types.js';
 import type { Tool } from '../tools/types.js';
 import type { LLMProvider, ProviderConfig } from './provider.js';
-
-export interface StreamChunk {
-  type: 'text' | 'tool_calls';
-  content?: string;
-  toolCalls?: ToolCall[];
-}
+import { stableStringify } from '../utils/stableStringify.js';
 
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai';
@@ -48,11 +53,7 @@ export class OpenAIProvider implements LLMProvider {
     return {
       content: choice?.message?.content || '',
       role: 'assistant',
-      usage: data.usage ? {
-        prompt_tokens: data.usage.prompt_tokens || 0,
-        completion_tokens: data.usage.completion_tokens || 0,
-        total_tokens: data.usage.total_tokens || 0,
-      } : undefined,
+      usage: data.usage ? this.normalizeUsage(data.usage) : undefined,
       tool_calls: choice?.message?.tool_calls,
     };
   }
@@ -72,6 +73,9 @@ export class OpenAIProvider implements LLMProvider {
     let buffer = '';
     // Accumulate streaming tool call chunks
     const toolCallBuffers: Map<number, { id: string; name: string; arguments: string }> = new Map();
+    // Some providers attach usage only on the last chunk (DeepSeek / OpenAI with
+    // stream_options.include_usage). We capture it here and yield at the end.
+    let capturedUsage: ChatResponse['usage'] | undefined;
 
     try {
       while (true) {
@@ -111,6 +115,11 @@ export class OpenAIProvider implements LLMProvider {
                 if (tc.function?.arguments) buf.arguments += tc.function.arguments;
               }
             }
+
+            // DeepSeek/OpenAI stream-end usage (only present on the last chunk)
+            if (data.usage) {
+              capturedUsage = this.normalizeUsage(data.usage);
+            }
           } catch {
             // Skip invalid JSON lines
           }
@@ -136,25 +145,43 @@ export class OpenAIProvider implements LLMProvider {
       yield { type: 'tool_calls', toolCalls };
     }
 
+    // Yield captured usage so TUI / cache stats can observe cache hits
+    if (capturedUsage) {
+      yield { type: 'usage', usage: capturedUsage };
+    }
+
     return {
       content: fullContent,
       role: 'assistant',
+      usage: capturedUsage,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
     };
   }
 
   /**
-   * Build the request body for OpenAI-compatible API
+   * Build the request body for OpenAI-compatible API.
+   *
+   * Why stableStringify matters: DeepSeek (and most OpenAI-compatible APIs)
+   * perform automatic prefix cache lookup by byte-level hash of the request
+   * payload. If the JSON we send today differs from yesterday's by even one
+   * reordered key, the cache misses. Insertion-order stability is good enough
+   * when the same code path runs every time, but we now use stableStringify
+   * as a belt-and-suspenders guarantee against accidental key reordering from
+   * future refactors (spread / Object.fromEntries / map merging).
    */
   protected buildRequest(messages: ChatMessage[], stream: boolean, options?: ChatOptions, tools?: Tool[]) {
     const body: any = {
       model: this.config.model,
       messages: messages.map(m => ({
         role: m.role,
+        // content is string | ContentBlock[]. OpenAI wire format accepts both:
+        // - string for plain text messages
+        // - array of {type,text} or {type,image_url} blocks for multimodal
         content: m.content,
         ...(m.name && { name: m.name }),
         ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
         ...(m.tool_calls && { tool_calls: m.tool_calls }),
+        ...(m.cache_control && { cache_control: m.cache_control }),
       })),
       temperature: options?.temperature ?? this.config.temperature,
       max_tokens: options?.maxTokens ?? this.config.maxTokens,
@@ -171,7 +198,8 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   /**
-   * Execute the HTTP request
+   * Execute the HTTP request. Serializes via stableStringify so the byte
+   * sequence is deterministic across requests.
    */
   protected async doRequest(body: any): Promise<Response> {
     const url = `${this.config.baseUrl}/chat/completions`;
@@ -185,12 +213,31 @@ export class OpenAIProvider implements LLMProvider {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.config.apiKey}`,
         },
-        body: JSON.stringify(body),
+        body: stableStringify(body),
         signal: controller.signal,
       });
       return response;
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  /**
+   * Map upstream usage JSON to the canonical Usage shape. Different providers
+   * attach different cache-related fields; we pass everything through so the
+   * cache stats layer can interpret per-provider.
+   */
+  protected normalizeUsage(raw: any): ChatResponse['usage'] {
+    return {
+      prompt_tokens: raw.prompt_tokens || 0,
+      completion_tokens: raw.completion_tokens || 0,
+      total_tokens: raw.total_tokens || 0,
+      // DeepSeek automatic prefix cache fields
+      prompt_cache_hit_tokens: raw.prompt_cache_hit_tokens,
+      prompt_cache_miss_tokens: raw.prompt_cache_miss_tokens,
+      // Anthropic prompt cache fields (passed through if relay forwards them)
+      cache_creation_input_tokens: raw.cache_creation_input_tokens,
+      cache_read_input_tokens: raw.cache_read_input_tokens,
+    };
   }
 }
