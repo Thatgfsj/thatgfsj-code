@@ -12,7 +12,6 @@ import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import type { App } from '../app/index.js';
 import type { MessageData } from './components/ChatMessage.js';
-import type { ProviderName } from '../config/types.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -35,15 +34,13 @@ function saveModelToHistory(model: string) {
   }
 }
 
-type ViewMode = 'chat' | 'model_select' | 'init_wizard' | 'init_key' | 'init_url' | 'init_custom_model';
+type ViewMode = 'chat' | 'model_select' | 'init_wizard';
 
 export function TuiApp({ app }: Props) {
   const { messages, isThinking, streaming, streamingToolCalls, queuedMessage, sendMessage, cancel } = useChat(app);
   const { handleCommand } = useCommands(app);
   const [systemMessages, setSystemMessages] = useState<MessageData[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
-  const [initProvider, setInitProvider] = useState<ProviderName>('siliconflow');
-  const [initUrl, setInitUrl] = useState('');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
 
@@ -60,41 +57,6 @@ export function TuiApp({ app }: Props) {
   }, []);
 
   const onSubmit = useCallback(async (input: string) => {
-    // Init wizard - API Key input
-    if (viewMode === 'init_key') {
-      const key = input.trim();
-      if (!key) { setViewMode('chat'); return; }
-      // Save and complete
-      const { App: AppClass } = await import('../app/index.js');
-      const cfg = app.config.get();
-      app.config.save({ provider: initProvider, apiKey: key, model: cfg.model || 'default' });
-      saveModelToHistory(cfg.model || 'default');
-      setViewMode('chat');
-      addMsg(`配置已更新: ${initProvider}`);
-      return;
-    }
-
-    // Init wizard - Custom URL input
-    if (viewMode === 'init_url') {
-      const url = input.trim();
-      if (!url) { setViewMode('chat'); return; }
-      setInitUrl(url);
-      setViewMode('init_key');
-      return;
-    }
-
-    // Init wizard - Custom model name
-    if (viewMode === 'init_custom_model') {
-      const model = input.trim();
-      if (model) {
-        app.config.save({ model });
-        saveModelToHistory(model);
-        addMsg(`模型已切换: ${model}`);
-      }
-      setViewMode('chat');
-      return;
-    }
-
     // Model selector - ignore text input
     if (viewMode === 'model_select') return;
 
@@ -125,7 +87,7 @@ export function TuiApp({ app }: Props) {
     }
 
     sendMessage(input);
-  }, [handleCommand, sendMessage, app, viewMode, initProvider, initUrl, addMsg]);
+  }, [handleCommand, sendMessage, app, viewMode, addMsg]);
 
   const allMessages = [...systemMessages, ...messages];
   const activeSkills = app.skills.listActive().map(s => s.id);
@@ -164,6 +126,12 @@ export function TuiApp({ app }: Props) {
           onAddNew={() => setViewMode('init_wizard')}
         />
       ) : viewMode === 'init_wizard' ? (
+        // v3.0.1: InitWizard is now fully self-contained — it owns its own
+        // input handling via useInput + ink-text-input. No external UserInput
+        // is rendered here, and app.tsx no longer has the text-entry
+        // viewModes (init_key / init_url / init_custom_model) because they
+        // were the broken input-handling path that left users stuck on a
+        // frozen "输入 API Key" screen with no way to type.
         <InitWizard
           onComplete={(provider, model, apiKey, baseUrl) => {
             app.config.save({ provider, model, apiKey, baseUrl });
@@ -175,22 +143,6 @@ export function TuiApp({ app }: Props) {
         />
       ) : (
         <Box flexDirection="column">
-          {viewMode === 'init_key' && (
-            <Box paddingLeft={1} marginBottom={0}>
-              <Text color="#06B6D4" bold>输入 API Key: </Text>
-              <Text dimColor>({initProvider})</Text>
-            </Box>
-          )}
-          {viewMode === 'init_url' && (
-            <Box paddingLeft={1} marginBottom={0}>
-              <Text color="#06B6D4" bold>输入中转站 URL: </Text>
-            </Box>
-          )}
-          {viewMode === 'init_custom_model' && (
-            <Box paddingLeft={1} marginBottom={0}>
-              <Text color="#06B6D4" bold>输入模型名称: </Text>
-            </Box>
-          )}
           <UserInput onSubmit={onSubmit} onCancel={cancel} disabled={false} />
         </Box>
       )}

@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
-import React, { useState, useEffect } from 'react';
-import { Box, Text } from 'ink';
+import React, { useState } from 'react';
+import { Box, Text, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import TextInput from 'ink-text-input';
+import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { listProviders, getModelsForProvider, isCustomProvider } from '../../config/providers.js';
@@ -13,14 +14,7 @@ interface Props {
   onCancel: () => void;
 }
 
-type InitStep =
-  | 'provider'
-  | 'api_key'
-  | 'model'
-  | 'custom_model'
-  | 'custom_url'
-  | 'cache_strategy'
-  | 'cache_ttl';
+type InitStep = 'provider' | 'custom_url' | 'api_key' | 'model' | 'custom_model' | 'cache_strategy' | 'cache_ttl';
 
 interface CacheChoice {
   enabled: boolean;
@@ -28,15 +22,24 @@ interface CacheChoice {
 }
 
 /**
- * v3.0.0: InitWizard gained two new steps after model selection:
- *   - cache_strategy: enable / disable prompt caching
- *   - cache_ttl:      5m vs 1h (only if enabled)
+ * v3.0.1: InitWizard is now fully self-contained — it manages its own
+ * step state AND its own keyboard input for text-entry steps (api_key,
+ * custom_url, custom_model). The previous version had a fatal bug:
  *
- * The defaults mirror ConfigManager.DEFAULT_CONFIG (enabled, 5m). Users on
- * OpenAI / DeepSeek / Gemini can ignore these — those providers do
- * automatic caching and the flag is purely advisory there. The flag
- * matters for Anthropic users who want to opt out of cache_control
- * markers or pick a longer TTL.
+ *   The text-entry steps (`api_key`, `custom_url`, `custom_model`) only
+ *   rendered a `<Text>` prompt with no actual input box. The host
+ *   component (app.tsx) had its own UserInput BUT only rendered it when
+ *   viewMode was NOT 'init_wizard' (see app.tsx ternary). So when the
+ *   wizard's internal step advanced to 'api_key', the user could SEE the
+ *   "输入 API Key: 服务商: deepseek" prompt but had NO way to type into
+ *   it. Ink silently swallowed keystrokes (no useInput handler was
+ *   active), and the user was stuck on a frozen screen — exactly the
+ *   bug that prompted the user-reported "选择 deepseek 然后退出":
+ *   pressing Ctrl+C felt like the only escape.
+ *
+ * Fix: this file now uses `useInput` and `ink-text-input` for the text
+ * steps. The SetViewMode-based input delegation in app.tsx is no longer
+ * required for the InitWizard flow.
  */
 export function InitWizard({ onComplete, onCancel }: Props) {
   const [step, setStep] = useState<InitStep>('provider');
@@ -61,7 +64,6 @@ export function InitWizard({ onComplete, onCancel }: Props) {
       temperature: 0.7,
       maxTokens: 4096,
       contextLength: 50,
-      // v3.0.0: cache policy from wizard
       cache: {
         enabled: cacheChoice.enabled,
         ttl: cacheChoice.ttl,
@@ -70,18 +72,17 @@ export function InitWizard({ onComplete, onCancel }: Props) {
     };
     if (url) config.baseUrl = url;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
-
-    // Save to models history
-    const historyPath = join(dir, 'models.json');
-    let history: string[] = [];
-    if (existsSync(historyPath)) {
-      try { history = JSON.parse(readFileSync(historyPath, 'utf-8')); } catch {}
-    }
-    if (!history.includes(model)) {
-      history.push(model);
-      writeFileSync(historyPath, JSON.stringify(history, null, 2));
-    }
   };
+
+  // v3.0.1: ESC cancels the wizard from any text-entry step. This is the
+  // hook that the previous version was missing — when the user pressed
+  // ESC on the frozen "输入 API Key" screen, nothing happened because no
+  // useInput was active. Now it bails out cleanly.
+  useInput((_input, key) => {
+    if (key.escape && (step === 'api_key' || step === 'custom_url' || step === 'custom_model')) {
+      onCancel();
+    }
+  });
 
   // Step 1: Provider selection
   if (step === 'provider') {
@@ -92,8 +93,9 @@ export function InitWizard({ onComplete, onCancel }: Props) {
         <SelectInput
           items={items}
           onSelect={(item) => {
-            setSelectedProvider(item.value as ProviderName);
-            if (isCustomProvider(item.value as ProviderName)) {
+            const provider = item.value as ProviderName;
+            setSelectedProvider(provider);
+            if (isCustomProvider(provider)) {
               setStep('custom_url');
             } else {
               setStep('api_key');
@@ -104,24 +106,57 @@ export function InitWizard({ onComplete, onCancel }: Props) {
     );
   }
 
-  // Custom URL input
+  // Custom URL input — v3.0.1 NOW has a real TextInput
   if (step === 'custom_url') {
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Text color="#06B6D4" bold>输入中转站 URL:</Text>
         <Text dimColor>例如: https://api.example.com/v1</Text>
-        <Text color="#F59E0B">（请直接输入 URL 并回车）</Text>
+        <Text color="#F59E0B">（请直接输入 URL 并回车，ESC 取消）</Text>
+        <Box marginTop={1}>
+          <Text color="#06B6D4">❯ </Text>
+          <TextInput
+            value={customUrl}
+            onChange={setCustomUrl}
+            onSubmit={(value) => {
+              if (value.trim()) {
+                setCustomUrl(value.trim());
+                setStep('api_key');
+              }
+            }}
+          />
+        </Box>
       </Box>
     );
   }
 
-  // Step 2: API Key
+  // Step 2: API Key — v3.0.1 NOW has a real TextInput
   if (step === 'api_key') {
+    const providerLabel = providers.find(p => p.key === selectedProvider)?.name || selectedProvider;
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Text color="#06B6D4" bold>输入 API Key:</Text>
-        <Text dimColor>服务商: {providers.find(p => p.key === selectedProvider)?.name}</Text>
-        <Text color="#F59E0B">（请直接输入 Key 并回车）</Text>
+        <Text dimColor>服务商: {providerLabel}</Text>
+        <Text color="#F59E0B">（请直接输入 Key 并回车，ESC 取消）</Text>
+        <Box marginTop={1}>
+          <Text color="#06B6D4">❯ </Text>
+          <TextInput
+            value={apiKey}
+            onChange={setApiKey}
+            onSubmit={(value) => {
+              if (value.trim()) {
+                setApiKey(value.trim());
+                if (isCustomProvider(selectedProvider)) {
+                  // Custom OpenAI/Anthropic: after key, go to model
+                  setStep('model');
+                } else {
+                  // Standard providers: skip to model selection
+                  setStep('model');
+                }
+              }
+            }}
+          />
+        </Box>
       </Box>
     );
   }
@@ -142,7 +177,6 @@ export function InitWizard({ onComplete, onCancel }: Props) {
               setStep('custom_model');
             } else {
               setSelectedModel(item.value);
-              // v3.0.0: prompt the user for cache strategy after model.
               setStep('cache_strategy');
             }
           }}
@@ -151,12 +185,25 @@ export function InitWizard({ onComplete, onCancel }: Props) {
     );
   }
 
-  // Custom model name
+  // Custom model name input — v3.0.1 NOW has a real TextInput
   if (step === 'custom_model') {
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Text color="#06B6D4" bold>输入模型名称:</Text>
-        <Text color="#F59E0B">（请直接输入模型名并回车）</Text>
+        <Text color="#F59E0B">（请直接输入模型名并回车，ESC 取消）</Text>
+        <Box marginTop={1}>
+          <Text color="#06B6D4">❯ </Text>
+          <TextInput
+            value={selectedModel}
+            onChange={setSelectedModel}
+            onSubmit={(value) => {
+              if (value.trim()) {
+                setSelectedModel(value.trim());
+                setStep('cache_strategy');
+              }
+            }}
+          />
+        </Box>
       </Box>
     );
   }
