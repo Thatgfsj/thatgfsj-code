@@ -13,6 +13,13 @@ interface Props {
    */
   cacheHitRate?: number | null;
   cacheSavingsCNY?: number;
+  /**
+   * v3.0.3: cache TTL marker. '5m' (default for short sessions) or '1h'
+   * (auto-decided for long sessions, or pinned by the user). 'auto' is
+   * the user-pinned setting and shows up as ⏱ auto. null = not yet
+   * decided (waiting for first round).
+   */
+  cacheTtl?: '5m' | '1h' | 'auto' | null;
 }
 
 /**
@@ -27,7 +34,7 @@ function hitRateColor(rate: number): string {
   return '#6B7280';
 }
 
-export const Header = React.memo(function Header({ provider, model, cacheHitRate, cacheSavingsCNY }: Props) {
+export const Header = React.memo(function Header({ provider, model, cacheHitRate, cacheSavingsCNY, cacheTtl }: Props) {
   const showCache = typeof cacheHitRate === 'number' && cacheHitRate > 0;
   return (
     <Box flexDirection="column" marginBottom={0}>
@@ -35,7 +42,7 @@ export const Header = React.memo(function Header({ provider, model, cacheHitRate
         <Box>
           <Text color="#06B6D4" bold> ⚡ </Text>
           <Text color="#22D3EE" bold>THATGFSJ CODE</Text>
-          <Text dimColor> v3.0.0</Text>
+          <Text dimColor> v3.0.3</Text>
         </Box>
         <Box>
           {showCache && (
@@ -44,6 +51,9 @@ export const Header = React.memo(function Header({ provider, model, cacheHitRate
               <Text dimColor> · 节省 ¥{(cacheSavingsCNY ?? 0).toFixed(2)} </Text>
               <Text dimColor> · </Text>
             </>
+          )}
+          {cacheTtl && (
+            <Text color="#A78BFA" bold> ⏱ {cacheTtl} </Text>
           )}
           <Text color="#06B6D4" bold> {provider} </Text>
           <Text dimColor>/</Text>

@@ -20,6 +20,7 @@ import { PROVIDERS } from '../config/providers.js';
 import { OpenAIProvider } from './openai.js';
 import { AnthropicProvider } from './anthropic.js';
 import { GeminiProvider } from './gemini.js';
+import { decideTTL } from '../cache/smartModel.js';
 
 export class LLMService {
   private provider: LLMProvider;
@@ -29,6 +30,19 @@ export class LLMService {
   constructor(provider: LLMProvider, apiKey: string) {
     this.provider = provider;
     this.apiKey = apiKey;
+  }
+
+  /**
+   * v3.0.3: TTL resolved from config + smart routing. Stays null until
+   * the first round, then never changes for the session. Anthropic
+   * provider's setResolvedTTL is called at the same time, so the wire
+   * prefix is consistent across rounds.
+   */
+  private resolvedTtl: '5m' | '1h' | null = null;
+
+  /** Public accessor used by App.streamResponse to surface TTL in the UI. */
+  getResolvedTTL(): '5m' | '1h' | null {
+    return this.resolvedTtl;
   }
 
   static fromConfig(config: AIConfig & { cache?: Config['cache'] }): LLMService {
@@ -43,7 +57,9 @@ export class LLMService {
       maxTokens: config.maxTokens ?? 4096,
       // v3.0.0: forward cache policy. Anthropic reads this to decide
       // whether to attach cache_control markers; other providers ignore it.
-      cache: config.cache ?? { enabled: true, ttl: '5m', strategy: 'auto' as const },
+      // v3.0.3: ttl accepts '5m' | '1h' | 'auto'. 'auto' is resolved
+      // per-session by decideTTL() inside chatStream.
+      cache: config.cache ?? { enabled: true, ttl: 'auto' as const, strategy: 'auto' as const },
     };
 
     const format = providerConfig.format;
@@ -97,6 +113,27 @@ export class LLMService {
     options?: ChatOptions & { maxIterations?: number }
   ): AsyncGenerator<StreamChunk, ChatResponse> {
     if (!this.hasApiKey()) throw new Error(this.getNoKeyMessage());
+
+    // v3.0.3: Resolve TTL once per session. If config says 'auto', call
+    // decideTTL to pick 5m (short sessions) or 1h (long ones). For
+    // non-Anthropic providers we don't need to do anything — cache
+    // markers are wired into the system regardless.
+    const configTtl = (this.provider as any).config?.cache?.ttl;
+    if (configTtl === 'auto' && this.resolvedTtl === null) {
+      const decision = decideTTL(messages, null);
+      this.resolvedTtl = decision.ttl;
+      if (typeof (this.provider as any).setResolvedTTL === 'function') {
+        (this.provider as any).setResolvedTTL(decision.ttl);
+      }
+    } else if (configTtl === '5m' || configTtl === '1h') {
+      // User pinned a specific TTL — apply it once and keep it.
+      if (this.resolvedTtl === null) {
+        this.resolvedTtl = configTtl;
+        if (typeof (this.provider as any).setResolvedTTL === 'function') {
+          (this.provider as any).setResolvedTTL(configTtl);
+        }
+      }
+    }
 
     const maxIterations = options?.maxIterations ?? 10;
     let currentMessages = [...messages];

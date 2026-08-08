@@ -14,7 +14,7 @@ interface Props {
   onCancel: () => void;
 }
 
-type InitStep = 'provider' | 'custom_url' | 'api_key' | 'model' | 'custom_model' | 'cache_strategy' | 'cache_ttl';
+type InitStep = 'provider' | 'custom_url' | 'api_key' | 'model' | 'custom_model' | 'cache_strategy';
 
 interface CacheChoice {
   enabled: boolean;
@@ -208,46 +208,33 @@ export function InitWizard({ onComplete, onCancel }: Props) {
     );
   }
 
-  // v3.0.0: prompt-cache strategy step
+  // v3.0.3: prompt-cache strategy step — auto / 5m / 1h / off.
+  // The wizard used to require two questions (on/off + 5m/1h). Now it
+  // gives the user a single, clear choice up front, with "自动" as the
+  // default. The auto path lets the runtime pick the TTL based on the
+  // conversation length (see cache/smartModel.ts decideTTL).
   if (step === 'cache_strategy') {
     const items = [
-      { label: '✓ 开启（推荐，节省 token 成本）', value: 'on' },
+      { label: '🤖 自动（推荐：根据会话长度智能选 5m / 1h）', value: 'auto' },
+      { label: '⏱ 强制 5 分钟（短会话，写入便宜）', value: '5m' },
+      { label: '🕐 强制 1 小时（长会话，命中率优先）', value: '1h' },
       { label: '✗ 关闭（每次请求都重新计算）', value: 'off' },
     ];
     return (
       <Box flexDirection="column" paddingLeft={1}>
-        <Text color="#06B6D4" bold>是否开启 Prompt Caching?</Text>
-        <Text dimColor>对 Anthropic / DeepSeek / Gemini 有效，OpenAI 兼容接口默认自动缓存。</Text>
+        <Text color="#06B6D4" bold>Prompt Caching 策略:</Text>
+        <Text dimColor>对 Anthropic / DeepSeek / Gemini 有效。</Text>
+        <Text dimColor>自动模式：短会话用 5m（便宜），长会话（&gt;15 轮）自动切 1h。</Text>
         <SelectInput
           items={items}
           onSelect={(item) => {
-            if (item.value === 'on') {
-              setCacheChoice(c => ({ ...c, enabled: true }));
-              setStep('cache_ttl');
+            if (item.value === 'off') {
+              setCacheChoice({ enabled: false, ttl: '5m' });
+            } else if (item.value === 'auto') {
+              setCacheChoice({ enabled: true, ttl: '5m' });  // start at 5m, smartModel will upgrade
             } else {
-              setCacheChoice(c => ({ ...c, enabled: false }));
-              saveConfig(selectedProvider, selectedModel, apiKey, customUrl || undefined);
-              onComplete(selectedProvider, selectedModel, apiKey, customUrl || undefined);
+              setCacheChoice({ enabled: true, ttl: item.value as '5m' | '1h' });
             }
-          }}
-        />
-      </Box>
-    );
-  }
-
-  // v3.0.0: TTL choice
-  if (step === 'cache_ttl') {
-    const items = [
-      { label: '5 分钟（写入成本低，适合短会话）', value: '5m' },
-      { label: '1 小时（写入成本高，适合长会话）', value: '1h' },
-    ];
-    return (
-      <Box flexDirection="column" paddingLeft={1}>
-        <Text color="#06B6D4" bold>Cache TTL:</Text>
-        <SelectInput
-          items={items}
-          onSelect={(item) => {
-            setCacheChoice(c => ({ ...c, ttl: item.value as '5m' | '1h' }));
             saveConfig(selectedProvider, selectedModel, apiKey, customUrl || undefined);
             onComplete(selectedProvider, selectedModel, apiKey, customUrl || undefined);
           }}

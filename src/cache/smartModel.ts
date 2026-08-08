@@ -1,24 +1,37 @@
 /**
- * Smart-model routing (P3 of the Reasonix plan).
+ * Smart-model routing + auto TTL selection (P3 of the Reasonix plan,
+ * v3.0.3 onwards).
  *
- * Idea: classify the user's input as "simple" or "complex" and route
- * simple queries to a cheaper / faster model while keeping the main model
- * for complex work. The classification is intentionally trivial — prompt
- * length + presence of recent tool calls — because the cost of a
- * misclassification (a slightly worse answer on a simple query) is much
- * lower than the cost of running a frontier model on every greeting.
+ * Idea: classify the conversation as "short" / "medium" / "long" and
+ * route accordingly. Two levers:
  *
- * Trade-off: each routing decision adds one model swap (different
- * `model` field on the wire). If the cache prefix is keyed on the model
- * string, the cache miss rate can spike on every simple query. To keep
- * the prefix stable, callers should pass a *family* (e.g. "anthropic" or
- * "deepseek") rather than a specific model name when forwarding the
- * prompt to the downstream provider — that's outside the scope of this
- * hook; this module only answers the question "should I downgrade?".
+ *   1. Model downgrade
+ *      Short follow-ups ("yes", "thanks") → mini model
+ *      Tool-heavy turns → main model
  *
- * v3.0.0: shipped as a stub. Real decision logic is conservative
- * (downgrade only when prompt is short AND no recent tool activity).
- * Future iterations can add heuristic or classifier-based routing.
+ *   2. Cache TTL
+ *      Short conversations            → 5m  (cheap write, expires fast)
+ *      Long conversations (>15 turns) → 1h  (cache hits pay back the
+ *                                            expensive write each round)
+ *
+ * Why TTL is decided per-ROUND but CHANGES per-CONVERSATION:
+ *   The Anthropic cache_control marker is part of the request body.
+ *   Changing the TTL between rounds would push the wire bytes to a
+ *   different Anthropic cache bucket, blowing the cache on every round
+ *   and *costing* more in cache_creation_input_tokens than what we save.
+ *
+ *   So we compute the TTL once per conversation (lazily, on the first
+ *   round) and never change it. Subsequent rounds get the same TTL,
+ *   which keeps the cache prefix stable and lets Anthropic match it.
+ *
+ *   The "smart" part is that we look at the FULL conversation so far,
+ *   not just the last input. A 16-turn conversation that started with a
+ *   short prompt but grew into a long refactor still gets 1h.
+ *
+ * Trade-off: the first round is evaluated with 0 history, so it
+ * defaults to 5m. If the conversation then grows long, future rounds
+ * still use 5m for the system-token cache (because we already wrote
+ * it with 5m). The tool definition cache gets the same TTL.
  */
 
 import type { ChatMessage } from '../types.js';
@@ -28,6 +41,13 @@ export interface SmartModelDecision {
   downgrade: boolean;
   /** Why we made this call — useful for `/cache` debug output. */
   reason: string;
+}
+
+export interface SmartTTLDecision {
+  ttl: '5m' | '1h';
+  reason: string;
+  /** Computed per-conversation. Once we pick a TTL, we keep it. */
+  isFirstDecision: boolean;
 }
 
 /**
@@ -49,4 +69,77 @@ export function shouldDowngrade(messages: ChatMessage[], lastUserInput: string):
     return { downgrade: false, reason: 'recent-tool-call' };
   }
   return { downgrade: true, reason: 'short-no-tools' };
+}
+
+/**
+ * Total character count of all message content. Used as a cheap
+ * proxy for "is this conversation long enough to justify 1h TTL?"
+ * (Anthropic charges cache_creation at 1.25x normal input, so we
+ * need to be sure the conversation will hit cache ~10+ times to
+ * break even on 1h vs 5m.)
+ */
+export function totalConversationChars(messages: ChatMessage[]): number {
+  let total = 0;
+  for (const m of messages) {
+    if (typeof m.content === 'string') {
+      total += m.content.length;
+    } else if (Array.isArray(m.content)) {
+      for (const blk of m.content) {
+        if (blk.type === 'text') total += (blk as any).text.length;
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * Decide the cache TTL for the current round.
+ *
+ * Inputs:
+ *   - messages: full conversation so far (system + user + assistant + tool)
+ *   - previousTTL: TTL chosen in a prior round (null on round 0)
+ *
+ * Decision matrix:
+ *   - round 0 + any input length → 5m (default; user can override via init)
+ *   - round 1-14 + total chars < 50k → 5m (short sessions, 5m is enough)
+ *   - round 15+ OR total chars > 50k → 1h (long sessions, 1h amortizes the write)
+ *
+ * Stability rule: once a TTL is chosen, it is reused for every
+ * subsequent round in the same session. Changing TTL between rounds
+ * would invalidate the Anthropic cache prefix and cost more than it
+ * saves.
+ *
+ * The `isFirstDecision` flag tells the caller whether to apply the
+ * decision (first round) or reuse the previous one (later rounds).
+ */
+export function decideTTL(
+  messages: ChatMessage[],
+  previousTTL: '5m' | '1h' | null,
+): SmartTTLDecision {
+  if (previousTTL) {
+    return { ttl: previousTTL, reason: 'reused-from-previous-round', isFirstDecision: false };
+  }
+
+  const turnCount = messages.filter(m => m.role === 'user' || m.role === 'assistant').length;
+  const totalChars = totalConversationChars(messages);
+
+  // Round 0: empty / first input. Default to 5m.
+  if (turnCount === 0) {
+    return { ttl: '5m', reason: 'first-round-default', isFirstDecision: true };
+  }
+
+  // Multi-turn but small conversation → 5m
+  if (turnCount < 15 && totalChars < 50_000) {
+    return { ttl: '5m', reason: `short-session-${turnCount}-turns`, isFirstDecision: true };
+  }
+
+  // Long conversations → 1h
+  if (turnCount >= 15) {
+    return { ttl: '1h', reason: `long-session-${turnCount}-turns`, isFirstDecision: true };
+  }
+  if (totalChars >= 50_000) {
+    return { ttl: '1h', reason: `long-context-${totalChars}-chars`, isFirstDecision: true };
+  }
+
+  return { ttl: '5m', reason: 'fallback', isFirstDecision: true };
 }

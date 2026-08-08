@@ -43,10 +43,14 @@ export interface Config {
    * Note: enabling/disabling only affects Anthropic; other providers do
    * not expose a programmatic cache toggle, so the flag is purely
    * advisory there.
+   *
+   * v3.0.3: `ttl` accepts '5m' | '1h' | 'auto'. 'auto' lets the runtime
+   * pick the TTL based on conversation length (decideTTL in smartModel.ts).
+   * The wizard's default is 'auto' so users don't have to choose.
    */
   cache?: {
     enabled: boolean;
-    ttl?: '5m' | '1h';
+    ttl?: '5m' | '1h' | 'auto';
     strategy?: 'auto' | 'manual' | 'off';
   };
 }

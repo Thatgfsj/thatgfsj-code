@@ -48,8 +48,14 @@ export function TuiApp({ app }: Props) {
   // change (i.e. a round just completed and recorded new usage). Polling on
   // an interval would be wasteful; React re-render is the trigger.
   const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
+  // v3.0.3: resolved TTL (sticky per session). null until first round.
+  const [resolvedTtl, setResolvedTtl] = useState<'5m' | '1h' | null>(app.resolvedTtl);
+  // The user-pinned config TTL ('auto' | '5m' | '1h') — used to render the
+  // Header chip BEFORE the first round, when resolvedTtl is still null.
+  const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
   useEffect(() => {
     setCacheSnapshot(app.cacheStats.snapshot());
+    setResolvedTtl(app.resolvedTtl);
   }, [messages.length]);
 
   const addMsg = useCallback((content: string) => {
@@ -99,6 +105,7 @@ export function TuiApp({ app }: Props) {
         model={app.config.get().model}
         cacheHitRate={cacheSnapshot.hitRate > 0 ? cacheSnapshot.hitRate : null}
         cacheSavingsCNY={cacheSnapshot.estimatedSavingsCNY}
+        cacheTtl={resolvedTtl ?? configTtl ?? null}
       />
       <ChatList
         messages={allMessages}

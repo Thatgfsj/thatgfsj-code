@@ -52,10 +52,15 @@ export interface ProviderConfig {
    * Optional cache control policy. When omitted, providers fall back to their
    * default behavior (Anthropic: explicit cache_control markers; OpenAI / Gemini
    * / DeepSeek: automatic prefix cache, no markers needed).
+   *
+   * v3.0.3: `ttl` accepts '5m' | '1h' | 'auto'. 'auto' lets the runtime
+   * decide per-session via decideTTL() in cache/smartModel.ts. The actual
+   * value used at request time is what gets stored on the provider's
+   * resolvedTtl field (set by LLMService.chatStream).
    */
   cache?: {
     enabled: boolean;
-    ttl?: '5m' | '1h';
+    ttl?: '5m' | '1h' | 'auto';
     /**
      * 'auto'   — provider default (Anthropic: explicit, OpenAI/DeepSeek: auto)
      * 'manual' — always emit cache_control markers regardless of provider

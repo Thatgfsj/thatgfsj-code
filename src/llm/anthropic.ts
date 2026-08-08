@@ -46,9 +46,29 @@ const DEFAULT_CACHE_TTL: '5m' | '1h' = '5m';
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic';
   protected config: ProviderConfig;
+  /**
+   * v3.0.3: TTL resolved from the user's config + smart routing. This is
+   * the *actual* TTL attached to every cache_control marker we send this
+   * session. Stays stable across rounds to keep the Anthropic cache
+   * prefix intact.
+   *
+   * Computed once by LLMService.chatStream when ttl='auto', then
+   * persisted via setResolvedTTL. Subsequent rounds call chatStream
+   * without re-deciding (ChatOptions.resolvedTtl is sticky per session).
+   */
+  protected resolvedTtl: '5m' | '1h' = DEFAULT_CACHE_TTL;
 
   constructor(config: ProviderConfig) {
     this.config = config;
+  }
+
+  /**
+   * Called by LLMService after decideTTL(). Persists the TTL on the
+   * provider instance so buildRequest() writes it consistently across
+   * every round in this session.
+   */
+  setResolvedTTL(ttl: '5m' | '1h'): void {
+    this.resolvedTtl = ttl;
   }
 
   buildTools(tools: Tool[]): any[] {
@@ -247,7 +267,12 @@ export class AnthropicProvider implements LLMProvider {
     //    final block (and only the final block, per Anthropic convention)
     //    carries the cache_control marker.
     const systemMessages = messages.filter(m => m.role === 'system');
-    const cacheTtl = (this.config.cache?.ttl) || DEFAULT_CACHE_TTL;
+    // v3.0.3: TTL is sticky per session. The provider's resolvedTtl is
+    // set once by LLMService after decideTTL() and never changed within
+    // a session (changing it would invalidate the Anthropic cache
+    // prefix and cost more in cache_creation_input_tokens than it
+    // saves).
+    const cacheTtl = this.resolvedTtl;
     const cacheEnabled = this.config.cache?.enabled !== false; // default on for Anthropic
 
     const systemBlocks = systemMessages.length === 0 ? undefined : systemMessages.map((m, i, arr) => {

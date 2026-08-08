@@ -12,4 +12,10 @@
 export { fingerprint, fingerprintTools, fingerprintSystemPrefix } from './fingerprint.js';
 export { CacheStatsStore, estimateSavingsCNY, type CacheStats, type CacheSnapshot } from './stats.js';
 export { VolatileScratch } from './volatile.js';
-export { shouldDowngrade, type SmartModelDecision } from './smartModel.js';
+export {
+  shouldDowngrade,
+  decideTTL,
+  totalConversationChars,
+  type SmartModelDecision,
+  type SmartTTLDecision,
+} from './smartModel.js';

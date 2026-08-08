@@ -38,6 +38,12 @@ export class App {
    * in the REPL.
    */
   showThinking: boolean = false;
+  /**
+   * v3.0.3: TTL resolved per session. null = not yet decided (auto mode
+   * waiting for first round). After the first chatStream completes, this
+   * is '5m' or '1h' and stays sticky.
+   */
+  resolvedTtl: '5m' | '1h' | null = null;
 
   private constructor(
     config: ConfigManager,
@@ -117,6 +123,8 @@ export class App {
     const msgs = messages || this.session.getMessages();
     const inner = this.llm.chatStream(msgs);
     const debugUsage = !!process.env.GFCODE_DEBUG_USAGE;
+    // v3.0.3: read TTL the LLMService resolved this round (sticky per session).
+    this.resolvedTtl = this.llm.getResolvedTTL();
     let next = await inner.next();
     while (!next.done) {
       // Forward chunks unchanged, but capture usage into the persistent

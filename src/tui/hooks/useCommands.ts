@@ -20,6 +20,8 @@ const CMD_ALIASES: Record<string, string> = {
   '/服务商': '/provider',
   '/思考': '/thinking',
   '/缓存': '/cache',
+  '/ttl': '/ttl',
+  '/TTL': '/ttl',
 };
 
 export const COMMAND_LIST = [
@@ -28,6 +30,7 @@ export const COMMAND_LIST = [
   { name: '/新建', desc: '新建会话' },
   { name: '/压缩', desc: '压缩上下文' },
   { name: '/缓存', desc: '缓存命中率' },
+  { name: '/ttl', desc: '查看/设置 Cache TTL' },
   { name: '/技能', desc: '管理技能' },
   { name: '/mcp', desc: 'MCP 设置' },
   { name: '/帮助', desc: '查看帮助' },
@@ -139,6 +142,42 @@ export function useCommands(app: App) {
       }
       lines.push('');
       lines.push('/cache reset  ·  重置统计');
+      return { handled: true, output: lines.join('\n') };
+    }
+
+    // v3.0.3: /ttl — view or pin the cache TTL.
+    //
+    //   /ttl              show current effective TTL + decision reason
+    //   /ttl 5m|1h        pin TTL for this session (sticky, no cache reset)
+    //   /ttl auto         resume auto-decision (clears the pin)
+    if (name === '/ttl') {
+      const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
+      const resolved = app.resolvedTtl;
+      if (arg === 'auto') {
+        app.config.save({ cache: { ...(app.config.get() as any).cache, ttl: 'auto' } });
+        app.resolvedTtl = null;
+        return { handled: true, output: '✓ Cache TTL 已重置为自动（下一轮重新评估）' };
+      }
+      if (arg === '5m' || arg === '1h') {
+        app.config.save({ cache: { ...(app.config.get() as any).cache, ttl: arg } });
+        app.resolvedTtl = arg;
+        return { handled: true, output: `✓ Cache TTL 已固定为 ${arg}（首次请求会重建缓存）` };
+      }
+      // No arg: show current state
+      const lines = [
+        '⏱  Cache TTL',
+        '─────────────────────────',
+        `  配置:      ${configTtl ?? 'auto'}`,
+        `  当前会话:  ${resolved ?? '尚未评估'}`,
+        '',
+        '说明: '+
+          (configTtl === 'auto'
+            ? '自动模式 – 短会话(≤14 轮)用 5m节省写入成本，' +
+              '长会话(≥15 轮 或 ≥50k 字符)自动升级到 1h 复用缓存。'
+            : `${configTtl} 模式 – TTL 每次请求都固定。`),
+        '',
+        '/ttl 5m|1h|auto  调整 TTL',
+      ];
       return { handled: true, output: lines.join('\n') };
     }
 

@@ -16,12 +16,14 @@ const DEFAULT_CONFIG: Config = {
   maxTokens: 4096,
   contextLength: 50,
   provider: 'siliconflow',
-  // v3.0.0: prompt cache policy. Default = enabled, 5m TTL, auto strategy
-  // (Anthropic gets explicit cache_control markers; everything else falls
-  // through to the provider's built-in caching).
+  // v3.0.0: prompt cache policy. Default = enabled, 'auto' TTL.
+  // v3.0.3: 'auto' TTL lets the runtime's decideTTL() pick 5m for short
+  // sessions and 1h for long ones (>= 15 turns or >= 50k chars). The
+  // chosen TTL is sticky across rounds within a session so the cache
+  // prefix stays stable.
   cache: {
     enabled: true,
-    ttl: '5m',
+    ttl: 'auto',
     strategy: 'auto',
   },
 };
