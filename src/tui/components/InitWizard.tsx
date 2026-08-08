@@ -208,30 +208,26 @@ export function InitWizard({ onComplete, onCancel }: Props) {
     );
   }
 
-  // v3.0.3: prompt-cache strategy step — auto / 5m / 1h / off.
-  // The wizard used to require two questions (on/off + 5m/1h). Now it
-  // gives the user a single, clear choice up front, with "自动" as the
-  // default. The auto path lets the runtime pick the TTL based on the
-  // conversation length (see cache/smartModel.ts decideTTL).
+  // v3.0.4: prompt-cache strategy step.
+  // Default is 1h (long-task TTL): we cannot predict how long a task
+  // will run, so we pick the TTL that cannot expire mid-task. 5m is
+  // for users who are sure the session is short.
   if (step === 'cache_strategy') {
     const items = [
-      { label: '🤖 自动（推荐：根据会话长度智能选 5m / 1h）', value: 'auto' },
-      { label: '⏱ 强制 5 分钟（短会话，写入便宜）', value: '5m' },
-      { label: '🕐 强制 1 小时（长会话，命中率优先）', value: '1h' },
+      { label: '🕐 1 小时（推荐：默认长任务，缓存不中途失效）', value: '1h' },
+      { label: '⏱ 5 分钟（只适合你确认是短会话）', value: '5m' },
       { label: '✗ 关闭（每次请求都重新计算）', value: 'off' },
     ];
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Text color="#06B6D4" bold>Prompt Caching 策略:</Text>
         <Text dimColor>对 Anthropic / DeepSeek / Gemini 有效。</Text>
-        <Text dimColor>自动模式：短会话用 5m（便宜），长会话（&gt;15 轮）自动切 1h。</Text>
+        <Text dimColor>推荐 1 小时：任务开始前无法预知长度，5 分钟 TTL 会在长任务中途过期。</Text>
         <SelectInput
           items={items}
           onSelect={(item) => {
             if (item.value === 'off') {
-              setCacheChoice({ enabled: false, ttl: '5m' });
-            } else if (item.value === 'auto') {
-              setCacheChoice({ enabled: true, ttl: '5m' });  // start at 5m, smartModel will upgrade
+              setCacheChoice({ enabled: false, ttl: '1h' });
             } else {
               setCacheChoice({ enabled: true, ttl: item.value as '5m' | '1h' });
             }

@@ -16,14 +16,12 @@ const DEFAULT_CONFIG: Config = {
   maxTokens: 4096,
   contextLength: 50,
   provider: 'siliconflow',
-  // v3.0.0: prompt cache policy. Default = enabled, 'auto' TTL.
-  // v3.0.3: 'auto' TTL lets the runtime's decideTTL() pick 5m for short
-  // sessions and 1h for long ones (>= 15 turns or >= 50k chars). The
-  // chosen TTL is sticky across rounds within a session so the cache
-  // prefix stays stable.
+  // v3.0.0: prompt cache policy. v3.0.4: default TTL is 1h (long-task).
+  // We cannot predict task length at round 0, so we default to the TTL
+  // that cannot expire mid-task. 5m is opt-in via /ttl 5m or init wizard.
   cache: {
     enabled: true,
-    ttl: 'auto',
+    ttl: '1h',
     strategy: 'auto',
   },
 };

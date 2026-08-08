@@ -10,13 +10,14 @@ function assistantMsg(s: string): ChatMessage {
 }
 
 describe('decideTTL', () => {
-  it('round 0 → 5m (default)', () => {
+  it('defaults to 1h (long-task) on round 0 — task length unknown', () => {
     const d = decideTTL([], null);
-    expect(d.ttl).toBe('5m');
+    expect(d.ttl).toBe('1h');
     expect(d.isFirstDecision).toBe(true);
+    expect(d.reason).toBe('default-long-task');
   });
 
-  it('short session (≤14 turns, <50k chars) → 5m', () => {
+  it('defaults to 1h even for a small conversation — cannot predict future length', () => {
     const messages = [
       userMsg('hello'),
       assistantMsg('hi'),
@@ -24,12 +25,10 @@ describe('decideTTL', () => {
       assistantMsg('good'),
     ];
     const d = decideTTL(messages, null);
-    expect(d.ttl).toBe('5m');
-    expect(d.reason).toMatch(/short-session/);
+    expect(d.ttl).toBe('1h');
   });
 
-  it('long session (≥15 turns) → 1h', () => {
-    // Build 16 user + 16 assistant = 32 messages (16 turns)
+  it('defaults to 1h for a large conversation too', () => {
     const messages: ChatMessage[] = [];
     for (let i = 0; i < 16; i++) {
       messages.push(userMsg(`question ${i}`));
@@ -37,35 +36,24 @@ describe('decideTTL', () => {
     }
     const d = decideTTL(messages, null);
     expect(d.ttl).toBe('1h');
-    expect(d.reason).toMatch(/long-session/);
-  });
-
-  it('large context (>50k chars) → 1h even with few turns', () => {
-    const bigContent = 'x'.repeat(60_000);
-    const messages: ChatMessage[] = [
-      userMsg('hi'),
-      { role: 'assistant', content: bigContent },
-    ];
-    const d = decideTTL(messages, null);
-    expect(d.ttl).toBe('1h');
-    expect(d.reason).toMatch(/long-context/);
   });
 
   it('reuses previous TTL (stability rule)', () => {
     const messages = [userMsg('hello'), assistantMsg('hi')];
     const d1 = decideTTL(messages, null);
-    expect(d1.ttl).toBe('5m');
+    expect(d1.ttl).toBe('1h');
     expect(d1.isFirstDecision).toBe(true);
 
-    // Now grow to 30 turns without changing TTL
-    for (let i = 0; i < 30; i++) {
-      messages.push(userMsg(`q${i}`));
-      messages.push(assistantMsg(`a${i}`));
-    }
+    // Once pinned to 5m by the user, later rounds keep 5m.
     const d2 = decideTTL(messages, '5m');
     expect(d2.ttl).toBe('5m');
     expect(d2.isFirstDecision).toBe(false);
     expect(d2.reason).toBe('reused-from-previous-round');
+
+    // And once pinned to 1h, later rounds keep 1h.
+    const d3 = decideTTL(messages, '1h');
+    expect(d3.ttl).toBe('1h');
+    expect(d3.isFirstDecision).toBe(false);
   });
 });
 

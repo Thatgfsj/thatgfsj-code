@@ -146,37 +146,35 @@ export function useCommands(app: App) {
     }
 
     // v3.0.3: /ttl — view or pin the cache TTL.
+    // v3.0.4: default is 1h (long-task). We cannot predict task length
+    // at round 0, so the default TTL is the one that cannot expire
+    // mid-task. Pinning 5m is only for users who are sure the session
+    // is short.
     //
     //   /ttl              show current effective TTL + decision reason
     //   /ttl 5m|1h        pin TTL for this session (sticky, no cache reset)
-    //   /ttl auto         resume auto-decision (clears the pin)
+    //   /ttl 1h           back to the long-task default
     if (name === '/ttl') {
       const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
       const resolved = app.resolvedTtl;
-      if (arg === 'auto') {
-        app.config.save({ cache: { ...(app.config.get() as any).cache, ttl: 'auto' } });
-        app.resolvedTtl = null;
-        return { handled: true, output: '✓ Cache TTL 已重置为自动（下一轮重新评估）' };
-      }
       if (arg === '5m' || arg === '1h') {
         app.config.save({ cache: { ...(app.config.get() as any).cache, ttl: arg } });
         app.resolvedTtl = arg;
         return { handled: true, output: `✓ Cache TTL 已固定为 ${arg}（首次请求会重建缓存）` };
       }
       // No arg: show current state
+      const effective = resolved ?? (configTtl === 'auto' ? '1h' : (configTtl ?? '1h'));
       const lines = [
         '⏱  Cache TTL',
         '─────────────────────────',
-        `  配置:      ${configTtl ?? 'auto'}`,
+        `  配置:      ${configTtl ?? '1h'}`,
         `  当前会话:  ${resolved ?? '尚未评估'}`,
         '',
-        '说明: '+
-          (configTtl === 'auto'
-            ? '自动模式 – 短会话(≤14 轮)用 5m节省写入成本，' +
-              '长会话(≥15 轮 或 ≥50k 字符)自动升级到 1h 复用缓存。'
-            : `${configTtl} 模式 – TTL 每次请求都固定。`),
+        '说明: 默认 1 小时（长任务）。任务开始前无法预知长度，',
+        '      5 分钟 TTL 会在长任务中途过期；1 小时缓存命中即可回本。',
+        '      只有你确定会话很短时才建议 /ttl 5m。',
         '',
-        '/ttl 5m|1h|auto  调整 TTL',
+        '/ttl 5m|1h  调整 TTL',
       ];
       return { handled: true, output: lines.join('\n') };
     }

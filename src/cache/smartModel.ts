@@ -10,9 +10,10 @@
  *      Tool-heavy turns → main model
  *
  *   2. Cache TTL
- *      Short conversations            → 5m  (cheap write, expires fast)
- *      Long conversations (>15 turns) → 1h  (cache hits pay back the
- *                                            expensive write each round)
+ *      v3.0.4: default to 1h (long-task TTL). We cannot predict task
+ *      length at round 0, so we choose the TTL that cannot expire
+ *      mid-task. 5m is opt-in only (user pins it via /ttl 5m or the
+ *      init wizard).
  *
  * Why TTL is decided per-ROUND but CHANGES per-CONVERSATION:
  *   The Anthropic cache_control marker is part of the request body.
@@ -24,14 +25,11 @@
  *   round) and never change it. Subsequent rounds get the same TTL,
  *   which keeps the cache prefix stable and lets Anthropic match it.
  *
- *   The "smart" part is that we look at the FULL conversation so far,
- *   not just the last input. A 16-turn conversation that started with a
- *   short prompt but grew into a long refactor still gets 1h.
- *
- * Trade-off: the first round is evaluated with 0 history, so it
- * defaults to 5m. If the conversation then grows long, future rounds
- * still use 5m for the system-token cache (because we already wrote
- * it with 5m). The tool definition cache gets the same TTL.
+ * Trade-off: 1h write costs 2x input price (vs 1.25x for 5m), but
+ * reads are the same 0.1x. A long task hitting cache 2-3 times pays
+ * back the extra write cost; a short task pays it once and moves on.
+ * That is strictly better than guessing 5m and having the cache expire
+ * mid-task.
  */
 
 import type { ChatMessage } from '../types.js';
@@ -95,19 +93,28 @@ export function totalConversationChars(messages: ChatMessage[]): number {
 /**
  * Decide the cache TTL for the current round.
  *
- * Inputs:
- *   - messages: full conversation so far (system + user + assistant + tool)
- *   - previousTTL: TTL chosen in a prior round (null on round 0)
+ * v3.0.4: The previous implementation tried to *predict* the task length
+ * from the conversation so far (short sessions → 5m, long → 1h). That
+ * was wrong: at the moment the decision is made (first round), the task
+ * hasn't started yet — there is no way to know whether it will be a
+ * 30-second question or a 3-hour refactor. Predicting 5m for a task
+ * that turns out to be long means the cache expires mid-task (5-minute
+ * TTL counts from the last HIT, and agent work often has >5m gaps while
+ * tools run / user reads output), so every round after the gap re-writes
+ * the whole prefix at full price.
  *
- * Decision matrix:
- *   - round 0 + any input length → 5m (default; user can override via init)
- *   - round 1-14 + total chars < 50k → 5m (short sessions, 5m is enough)
- *   - round 15+ OR total chars > 50k → 1h (long sessions, 1h amortizes the write)
+ * Correct rule: DEFAULT TO THE LONG TTL (1h) and don't guess.
+ *   - 1h costs 2x input price to WRITE (vs 1.25x for 5m), but reads are
+ *     the same 0.1x for both.
+ *   - A long task that hits cache even 2-3 times pays back the extra
+ *     write cost. A short task only pays the extra write once.
+ *   - Users who are SURE the session is short can pin 5m via
+ *     /ttl 5m or the init wizard — the default stays 1h.
  *
- * Stability rule: once a TTL is chosen, it is reused for every
- * subsequent round in the same session. Changing TTL between rounds
- * would invalidate the Anthropic cache prefix and cost more than it
- * saves.
+ * Stability rule (unchanged): once a TTL is chosen, it is reused for
+ * every subsequent round in the same session. Changing TTL between
+ * rounds would invalidate the Anthropic cache prefix and cost more
+ * than it saves.
  *
  * The `isFirstDecision` flag tells the caller whether to apply the
  * decision (first round) or reuse the previous one (later rounds).
@@ -119,27 +126,8 @@ export function decideTTL(
   if (previousTTL) {
     return { ttl: previousTTL, reason: 'reused-from-previous-round', isFirstDecision: false };
   }
-
-  const turnCount = messages.filter(m => m.role === 'user' || m.role === 'assistant').length;
-  const totalChars = totalConversationChars(messages);
-
-  // Round 0: empty / first input. Default to 5m.
-  if (turnCount === 0) {
-    return { ttl: '5m', reason: 'first-round-default', isFirstDecision: true };
-  }
-
-  // Multi-turn but small conversation → 5m
-  if (turnCount < 15 && totalChars < 50_000) {
-    return { ttl: '5m', reason: `short-session-${turnCount}-turns`, isFirstDecision: true };
-  }
-
-  // Long conversations → 1h
-  if (turnCount >= 15) {
-    return { ttl: '1h', reason: `long-session-${turnCount}-turns`, isFirstDecision: true };
-  }
-  if (totalChars >= 50_000) {
-    return { ttl: '1h', reason: `long-context-${totalChars}-chars`, isFirstDecision: true };
-  }
-
-  return { ttl: '5m', reason: 'fallback', isFirstDecision: true };
+  // Default: long-task TTL. We cannot know the task length upfront, so
+  // we pick the TTL that cannot expire mid-task. 5m is only used when
+  // the user explicitly pins it.
+  return { ttl: '1h', reason: 'default-long-task', isFirstDecision: true };
 }

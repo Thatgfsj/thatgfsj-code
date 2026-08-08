@@ -114,10 +114,11 @@ export class LLMService {
   ): AsyncGenerator<StreamChunk, ChatResponse> {
     if (!this.hasApiKey()) throw new Error(this.getNoKeyMessage());
 
-    // v3.0.3: Resolve TTL once per session. If config says 'auto', call
-    // decideTTL to pick 5m (short sessions) or 1h (long ones). For
-    // non-Anthropic providers we don't need to do anything — cache
-    // markers are wired into the system regardless.
+    // v3.0.3: Resolve TTL once per session.
+    // v3.0.4: default is 1h (long-task). 'auto' (legacy config value)
+    // resolves via decideTTL which now always returns 1h — we cannot
+    // predict task length at round 0, so we default to the TTL that
+    // cannot expire mid-task. '5m'/'1h' are explicit user pins.
     const configTtl = (this.provider as any).config?.cache?.ttl;
     if (configTtl === 'auto' && this.resolvedTtl === null) {
       const decision = decideTTL(messages, null);
