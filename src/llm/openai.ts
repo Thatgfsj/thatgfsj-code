@@ -46,7 +46,15 @@ export class OpenAIProvider implements LLMProvider {
 
   async chat(messages: ChatMessage[], options?: ChatOptions, tools?: Tool[]): Promise<ChatResponse> {
     const body = this.buildRequest(messages, false, options, tools);
-    const response = await this.doRequest(body);
+    const response = await this.doRequest(body, options?.signal);
+
+    // v3.0.5: non-streaming path never checked response.ok — a 401/429 body
+    // was silently parsed into an empty ChatResponse.
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`API error ${response.status}: ${text}`);
+    }
+
     const data = await response.json();
     const choice = data.choices?.[0];
 
@@ -60,15 +68,21 @@ export class OpenAIProvider implements LLMProvider {
 
   async *chatStream(messages: ChatMessage[], options?: ChatOptions, tools?: Tool[]): AsyncGenerator<StreamChunk, ChatResponse> {
     const body = this.buildRequest(messages, true, options, tools);
-    const response = await this.doRequest(body);
 
-    if (!response.ok || !response.body) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`API error ${response.status}: ${text}`);
-    }
+    // v3.0.5: idle watchdog. The 60s connect timeout in doRequest only covers
+    // until the response headers arrive; a stalled stream afterwards would
+    // hang forever. Abort if no bytes arrive for 120s.
+    const controller = new AbortController();
+    const upstream = options?.signal;
+    const onUpstreamAbort = () => controller.abort();
+    upstream?.addEventListener('abort', onUpstreamAbort, { once: true });
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), 120000);
+    };
+    resetIdle();
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
     let fullContent = '';
     let buffer = '';
     // Accumulate streaming tool call chunks
@@ -78,55 +92,78 @@ export class OpenAIProvider implements LLMProvider {
     let capturedUsage: ChatResponse['usage'] | undefined;
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const response = await this.doRequest(body, controller.signal);
+      resetIdle();
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+      if (!response.ok || !response.body) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`API error ${response.status}: ${text}`);
+      }
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          if (trimmed === 'data: [DONE]') continue;
-          if (!trimmed.startsWith('data: ')) continue;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
 
-          try {
-            const data = JSON.parse(trimmed.slice(6));
-            const delta = data.choices?.[0]?.delta;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          resetIdle();
+          if (done) break;
 
-            // Text content
-            if (delta?.content) {
-              fullContent += delta.content;
-              yield { type: 'text', content: delta.content };
-            }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
 
-            // Streaming tool calls - accumulate chunks
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index ?? 0;
-                if (!toolCallBuffers.has(idx)) {
-                  toolCallBuffers.set(idx, { id: '', name: '', arguments: '' });
-                }
-                const buf = toolCallBuffers.get(idx)!;
-                if (tc.id) buf.id = tc.id;
-                if (tc.function?.name) buf.name += tc.function.name;
-                if (tc.function?.arguments) buf.arguments += tc.function.arguments;
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            if (trimmed === 'data: [DONE]') continue;
+            if (!trimmed.startsWith('data: ')) continue;
+
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+              const delta = data.choices?.[0]?.delta;
+
+              // Text content
+              if (delta?.content) {
+                fullContent += delta.content;
+                yield { type: 'text', content: delta.content };
               }
-            }
 
-            // DeepSeek/OpenAI stream-end usage (only present on the last chunk)
-            if (data.usage) {
-              capturedUsage = this.normalizeUsage(data.usage);
+              // Streaming tool calls - accumulate chunks
+              if (delta?.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
+                  if (!toolCallBuffers.has(idx)) {
+                    toolCallBuffers.set(idx, { id: '', name: '', arguments: '' });
+                  }
+                  const buf = toolCallBuffers.get(idx)!;
+                  if (tc.id) buf.id = tc.id;
+                  if (tc.function?.name) buf.name += tc.function.name;
+                  if (tc.function?.arguments) buf.arguments += tc.function.arguments;
+                }
+              }
+
+              // DeepSeek/OpenAI stream-end usage (only present on the last chunk)
+              if (data.usage) {
+                capturedUsage = this.normalizeUsage(data.usage);
+              }
+            } catch {
+              // Skip invalid JSON lines
             }
-          } catch {
-            // Skip invalid JSON lines
           }
         }
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+        upstream?.removeEventListener('abort', onUpstreamAbort);
+        reader.releaseLock();
       }
-    } finally {
-      reader.releaseLock();
+    } catch (error: any) {
+      if (idleTimer) clearTimeout(idleTimer);
+      upstream?.removeEventListener('abort', onUpstreamAbort);
+      if (controller.signal.aborted && !upstream?.aborted) {
+        throw new Error('Stream stalled: no data received for 120s');
+      }
+      throw error;
     }
 
     // Convert accumulated tool call buffers to ToolCall[]
@@ -181,7 +218,6 @@ export class OpenAIProvider implements LLMProvider {
         ...(m.name && { name: m.name }),
         ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
         ...(m.tool_calls && { tool_calls: m.tool_calls }),
-        ...(m.cache_control && { cache_control: m.cache_control }),
       })),
       temperature: options?.temperature ?? this.config.temperature,
       max_tokens: options?.maxTokens ?? this.config.maxTokens,
@@ -200,11 +236,16 @@ export class OpenAIProvider implements LLMProvider {
   /**
    * Execute the HTTP request. Serializes via stableStringify so the byte
    * sequence is deterministic across requests.
+   *
+   * v3.0.5: accepts an external AbortSignal (combined with the 60s connect
+   * timeout via AbortSignal.any) so caller-side cancellation and the
+   * streaming idle watchdog can kill the request.
    */
-  protected async doRequest(body: any): Promise<Response> {
+  protected async doRequest(body: any, external?: AbortSignal): Promise<Response> {
     const url = `${this.config.baseUrl}/chat/completions`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    const timeout = setTimeout(() => controller.abort(), 60000); // 60s connect timeout
+    const signal = external ? AbortSignal.any([controller.signal, external]) : controller.signal;
 
     try {
       const response = await fetch(url, {
@@ -214,7 +255,7 @@ export class OpenAIProvider implements LLMProvider {
           'Authorization': `Bearer ${this.config.apiKey}`,
         },
         body: stableStringify(body),
-        signal: controller.signal,
+        signal,
       });
       return response;
     } finally {

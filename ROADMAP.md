@@ -1,91 +1,70 @@
 # Thatgfsj Code - Development Roadmap
 
+> 版本口径：以 `package.json`（npm 包版本）为单一事实来源。
+> 3.0.5 起 `gfcode --version` / TUI / 文档统一读它。
+
 ---
 
-## ✅ v0.9.0 - 稳定版 (当前版本)
+## ✅ v3.0.5 - 对齐主流 CLI (当前版本, 2026-09)
 
 ### 核心架构
 - [x] Ink (React) TUI 框架
-- [x] LLM Provider 抽象层 (OpenAI/Anthropic/Gemini)
-- [x] 15 个 Provider + 自定义中转站
-- [x] 模块化目录结构 (cmd/app/config/llm/session/tools/tui/skills/hooks/prompts)
+- [x] LLM Provider 抽象层 (OpenAI/Anthropic/Gemini 三协议)
+- [x] 15 个 Provider + 自定义中转站 + Ollama 本地模型
+- [x] Reasonix 式 Prompt Caching（稳定序列化 / 断点 / 智能 TTL / 命中率统计）
+- [x] 版本号单一来源（package.json 运行时读取）
 
-### 工具系统
-- [x] file (读/写/列表/删除)
-- [x] shell (执行命令)
-- [x] git (操作)
-- [x] search (搜索)
-- [x] nwt (项目记忆，30天自动归档)
+### Agent 能力（对标 2026 主流 coding CLI 的桌面标准）
+- [x] MCP stdio 客户端接入（mcp.json 配置、动态工具注册、/mcp 状态、退出清理）
+- [x] 会话持久化 + /resume（自动保存、悬空 tool_calls 校验修复）
+- [x] Headless JSON 模式（--json 事件流、--yolo、退出码）
+- [x] 权限确认管线（y/a/n、diff 预览、60s 超时、TUI 独占输入互斥）
+- [x] 上下文自动压缩（原子工具调用块、不切配对）
+- [x] AGENTS.md / CLAUDE.md / SKILLS.md 项目指令读取
+- [x] 模型热切换（/model、-m 即时生效）
+- [x] 工具结果回传渲染（TUI 面板显示真实输出）
 
-### Skills 系统
-- [x] 16 个内置 Skills (规划/调试/TDD/架构/浏览器等)
-- [x] /skills 命令管理
-- [x] 自动激活
-
-### UI/UX
-- [x] Ink TUI 流式输出
-- [x] Markdown 渲染 (marked-terminal)
-- [x] 工具调用显示 (opencode 风格)
-- [x] 状态栏
-- [x] 命令系统 (/model, /new, /compact, /skills, /mcp, /help)
-- [x] /model 交互式选择框
-
-### 智能功能
-- [x] 自动读取 CLAUDE.md/SKILLS.md (通用路径)
-- [x] NWT 项目历史自动注入系统提示
-- [x] 上下文自动压缩 (超限触发)
-- [x] API 错误检测 (401/403/429)
-- [x] 启动时检测 API Key
-
-### 安装
-- [x] npm install -g thatgfsj-code
-- [x] Windows PowerShell 一键安装
-- [x] Linux/macOS Bash 一键安装
-- [x] 自动下载 Node.js (如果没有)
-
-### 测试通过
-- [x] 简单任务: 读文件 + 回答
-- [x] 中等任务: 修改文件 + 验证
-- [x] 困难任务: 多步骤 + NWT 记录
-- [x] Git + Search + NWT 联合测试
-- [x] 多文件创建和修改
+### 质量与安全
+- [x] git/search 注入修复（execFile 参数数组 / 纯 JS grep）
+- [x] AbortSignal 全链路贯通（取消即中止 HTTP）
+- [x] 流式空闲看门狗（120s）
+- [x] 71 个 vitest 单测（cache / mcp / session / tools）
+- [x] npm 发布就绪（files/prepublishOnly/engines/repository）
 
 ---
 
 ## 📋 未来计划
 
-### v1.0.0
-- [ ] SQLite 会话持久化
-- [ ] Token 使用量显示
-- [ ] 命令 Tab 补全
-- [ ] 多会话管理
-- [ ] LSP 集成
-- [ ] 图片支持
+### 近期（对齐 P1 差异化）
+- [ ] Plan mode（先规划后执行，主流产品均有）
+- [ ] Checkpoints / 回滚（基于 git snapshot 的简化实现）
+- [ ] Subagent 并行任务（task 工具 + 工作区隔离）
+- [ ] MCP SSE / HTTP transport（当前仅 stdio）
+- [ ] 外部 SKILL.md 目录发现（兼容 Claude skills 格式，替代内置 ts 数组）
+- [ ] 逐消息 token 用量 / 成本显示
+- [ ] 图片 / 多模态输入（ContentBlock 已预留 image 类型）
+
+### 远期（前沿跟踪）
+- [ ] Hooks 事件系统接线（当前模块存在、事件发射点未接入）
+- [ ] LSP 集成（走标准协议，不自研语义索引）
+- [ ] 订阅 OAuth 直连（ChatGPT / Claude Pro，需官方 client 凭据）
+- [ ] OS 级 sandbox（平台相关，成本高，谨慎评估）
+- [ ] 远程 / 云端 agent（头部产品免费送，个人项目不硬刚）
+
+### 明确不做
+- 自建插件分发市场（兼容 Claude marketplace 格式即可）
+- 自研语义索引 / repo map（agent + grep + LSP 组合已覆盖）
+- 自研模型网关
 
 ---
 
 ## 历史版本
 
-### ✅ v0.8.0 - 命令系统
-- /model, /new, /compact, /skills, /mcp 命令
+### ✅ v3.0.0 - Reasonix Prompt Caching（2026-08）
+- 结构化 StreamChunk 流协议 / Anthropic cache 断点 / 缓存统计
 
-### ✅ v0.7.0 - Skills + NWT
-- 16 个内置 Skills, NWT 项目记忆
+### ✅ v2.x - 稳定性系列（2026-07）
+- anti-pollution 过滤、thinking 压缩、TUI 修复
 
-### ✅ v0.6.0 - Ink TUI
-- React 组件化 UI, Markdown 渲染
-
-### ✅ v0.5.0 - Provider 重写
-- 15 个 Provider, 自定义中转站
-
-### ✅ v0.4.0 - UI 优化
-- 流式输出, 工具调用显示
-
-### ✅ v0.3.0 - 架构重构
-- 模块化目录, Provider 抽象
-
-### ✅ v0.2.0 - 工具 + LLM
-- Git/搜索工具, 多 Provider
-
-### ✅ v0.1.0 - REPL 基础
-- 彩色 UI, 命令提示符
+### ✅ v0.1 - v0.9 - 产品早期（产品版本口径）
+- REPL → Ink TUI → Provider 重写 → Skills + NWT → 命令系统

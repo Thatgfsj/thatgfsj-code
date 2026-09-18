@@ -1,286 +1,107 @@
-# Development Guide — Thatgfsj Code
+# Development Guide
 
-This document is for contributors / maintainers. End users should read
-[`README.md`](./README.md) instead.
+> 本文档对应 v3.0.5 的实际代码结构。旧版（v0.x–v2.x，`src/core/ai-engine` /
+> `src/repl` 架构）的开发文档已废弃。
 
----
+## 环境要求
 
-## 1. Overview
+- Node.js >= 20.19（ink 7 / react 19 / vitest 4 的要求）
+- npm >= 10
 
-**Thatgfsj Code** is a Claude Code–style interactive AI coding assistant that
-runs entirely in your terminal. It is written in TypeScript, published as an
-ESM npm package, distributed under MIT, and targets **Node.js ≥ 18**.
-
-The tool exposes:
-
-- A non-interactive single-shot CLI (`gfcode "..."`).
-- An interactive REPL (`gfcode` with no args).
-- Subcommands: `init`, `explain`, `debug`, `chat`, `template`.
-
-The release pipeline is: **bug fix → docs → smoke test → git commit + tag →
-push → GitHub release → `npm publish`**. Everything in `src/` compiles to
-`dist/` via `tsc`; the `package.json` `files` whitelist decides what ships
-in the npm tarball.
-
----
-
-## 2. Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                         src/index.ts                          │
-│   CLI entry · commander program · subcommand dispatch         │
-│   (init / explain / debug / chat / template / default REPL)  │
-└─────────────────────────┬────────────────────┬───────────────┘
-                          │                    │
-              ┌───────────▼──────────┐ ┌───────▼─────────────┐
-              │   AI Engine + Tools  │ │      REPL Loop       │
-              │ src/core/ai-engine   │ │ src/repl/{loop,...}  │
-              │ src/tools/{file,…}   │ │ @inquirer/input      │
-              └───────────┬──────────┘ └───────┬─────────────┘
-                          │                    │
-              ┌───────────▼────────────────────▼───────────────┐
-              │        Core / Utils / Agent / MCP              │
-              │ src/core/{config,session,types,subagent,…}     │
-              │ src/utils/{diff-preview,memory,project-…}     │
-              │ src/agent/{core,intent,streaming}             │
-              │ src/mcp/client.ts                              │
-              └────────────────────────────────────────────────┘
-```
-
-### Module responsibilities
-
-| Layer     | Files                                        | Job                                                                |
-|-----------|----------------------------------------------|--------------------------------------------------------------------|
-| Entry     | `src/index.ts`                               | commander program, subcommand handlers, REPL bootstrap             |
-| REPL      | `src/repl/{input,output,loop,welcome}.ts`    | interactive prompt, ANSI output, SIGINT, welcome/init wizard       |
-| Core      | `src/core/{ai-engine,config,session,…}.ts`   | AI provider abstraction, config loading, session state            |
-| Tools     | `src/tools/{file,shell,git,search}.ts`       | file I/O, shell exec, git ops, code search                         |
-| Agent     | `src/agent/{core,intent,streaming}.ts`       | intent classification, agent loop, streamed terminal output        |
-| Utils     | `src/utils/{diff-preview,memory,…}.ts`       | side-effect-free helpers                                           |
-| MCP       | `src/mcp/client.ts`                          | Model Context Protocol stdio client                                |
-
-### Data flow on a single prompt
-
-```
-User ──▶ commander ──▶ executeTask(prompt)
-                       │
-                       ├─▶ ConfigManager.load()         (process.env + ~/.thatgfsj/config.json)
-                       │
-                       ├─▶ AIEngine.chatStream(messages) ──▶ provider base URL /v1/chat/completions
-                       │                                  or Anthropic /messages
-                       │                                  or Gemini :generateContent
-                       │
-                       └─▶ process.stdout.write(chunks) ──▶ terminal (scrollable history)
-```
-
----
-
-## 3. Build & install
-
-### Prerequisites
-
-- Node.js ≥ 18 (project uses native `fetch`, `AbortController`, top-level `await`,
-  `node --test`).
-- npm ≥ 9 (so `npm publish` understands the `files` whitelist).
-- Git (for the install scripts and during release).
-
-### Local development
+## 常用命令
 
 ```bash
-git clone https://github.com/Thatgfsj/thatgfsj-code.git
-cd thatgfsj-code
-npm install
-npm run build           # produces ./dist
-npm test                # node --test tests/
-npm start               # node dist/index.js (interactive REPL)
-npm run dev             # tsc && node dist/index.js
-
-# Optional: link globally so `gfcode` is in your PATH
-npm link
+npm install          # 安装依赖
+npm run build        # tsc 编译到 dist/
+npm test             # vitest 单测（tests/**/*.test.ts）
+npm run smoke        # build + 4 个端到端 smoke 脚本（依赖 dist）
+npm run dev          # build 并启动 CLI
+npm link             # 全局注册 thatgfsj / gfcode 命令
+npm publish          # 触发 prepublishOnly（build + test）后发布
 ```
 
-`npm install` after cloning will trigger `prepublishOnly` if you have it
-configured (we do). Always run `npm run build` after editing source so the
-`dist/` matches `src/`.
+## 目录结构
 
-### Platform notes
-
-- **Windows**: `src/index.ts` invokes `chcp 65001` synchronously before any
-  output to force UTF-8 in the legacy Windows console. Done via
-  `createRequire(import.meta.url)` so it works under `"type": "module"`.
-- **Numeric keypad arrows**: the REPL uses `@inquirer/input` instead of Node's
-  built-in `readline.question()` because the latter doesn't reliably translate
-  numeric-keypad ANSI escape sequences on Windows terminals (Bug #1 history).
-- **Streaming output**: `process.stdout.write` directly, never `rl.question`
-  inside the loop — the latter would reset the terminal and lose scrollback.
-
----
-
-## 4. Adding a provider
-
-1. Add the env-var map to `src/core/config.ts` (`envKeys`).
-2. Add a `*_MODELS` array to `src/repl/welcome.ts` and wire it through
-   `getModelsForProvider()` and `interactiveSetup()` (numbered choice).
-3. Update `WelcomeScreen.hasApiKey()` in `src/repl/welcome.ts` to include the
-   new env-var name.
-4. If the provider uses a non-OpenAI request format, extend the dispatcher
-   in `src/core/ai-engine.ts::streamRequest`.
-5. Update `docs/API_KEY_GUIDE.md` and `README.md`'s provider list.
-
-No other files should care about the specific provider.
-
----
-
-## 5. Adding a built-in CLI command
-
-`src/index.ts` is the single `commander` program. Register a new command
-**before** `program.parse(process.argv)`:
-
-```ts
-program
-  .command('foo')
-  .description('...')
-  .argument('<bar>', '...')
-  .action(async (bar) => { /* ... */ });
+```
+src/
+├── cmd/index.tsx   # CLI 入口：交互 / 单次 prompt / --json headless / init
+├── app/index.ts    # App 单例：组装依赖、权限决策（requestConfirmation）、
+│                   #   reloadModel / applyTtl / MCP 接线 / streamResponse
+├── version.ts      # 版本单一来源（运行时读 package.json）
+├── config/         # ConfigManager + 15 个 Provider 目录（providers.ts）
+├── llm/            # LLMService（agent loop）+ openai/anthropic/gemini 三协议
+├── cache/          # Prompt caching：stableStringify、断点、smartModel TTL、统计
+├── session/        # SessionManager（持久化/restore/自动压缩）+ compactor（原子组）
+├── tools/          # Tool 接口 + file/shell/git/search/nwt 实现
+├── skills/         # 16 个内置 Skills（ts 提示词）
+├── tui/            # Ink 组件（app.tsx 组合 useChat/useCommands）
+├── mcp/client.ts   # MCP stdio 客户端 + MCPServerManager
+├── hooks/          # HookManager（事件点尚未接入主流程）
+├── prompts/        # 系统提示分段构建（immutable prefix + volatile tail）
+└── utils/          # diff、thinking 压缩、stableStringify、project context
 ```
 
-For REPL-internal slash-style commands (visible only inside the interactive
-loop), add a new `case` to `src/repl/loop.ts::handleCommand`.
+## 一条消息的完整数据流
 
-### Built-in REPL commands (current)
-
-| Command          | Behavior                                                                         |
-| ---------------- | -------------------------------------------------------------------------------- |
-| `help`           | Show built-in command list                                                       |
-| `exit` / `quit`  | Leave the REPL                                                                   |
-| `clear`          | Clear the screen                                                                 |
-| `context`        | Show the current project context                                                 |
-| `history`        | Show the command history for this session                                         |
-| `tools`          | List registered tools                                                            |
-| `models`         | Read-only listing of the current provider's models                               |
-| `providers`      | Read-only listing of all providers                                               |
-| `/model`         | **Interactive picker — actually switches the active model** for the current provider. Persists to `~/.thatgfsj/config.json` and calls `AIEngine.updateConfig()`. |
-| `/provider`      | **Interactive picker — switches provider + chains into `/model`** for the new one. Warns if the corresponding env-var / saved API key is missing. |
-| `Ctrl+C`         | Aborts the in-flight stream once, exits after two empty-prompt cancels.          |
-
-Both `/model` and `/provider` accept either a numeric index or the exact
-provider/model id; pressing Enter with no input keeps the current value. After
-a switch, `REPLLoop` injects a one-line `[system: ... switched to ...]`
-message into the session so the LLM can see the change in the next turn.
-
----
-
-## 6. Adding a tool
-
-Tools implement the `Tool` interface declared in `src/core/types.ts`:
-
-```ts
-export interface Tool {
-  name: string;
-  description: string;
-  parameters: ToolParameter[];
-  execute(params: any, ctx: ToolContext): Promise<ToolResult>;
-}
+```
+UserInput (tui/components/UserInput.tsx)
+  → app.tsx onSubmit → useCommands（斜杠命令）或 useChat.processStream
+    → App.streamResponse（注入 AbortSignal、采集 usage）
+      → LLMService.chatStream（agent loop，最多 10 轮）
+        → provider.chatStream（openai/anthropic/gemini SSE 解析）
+        → 遇 tool_calls：确认（App.requestConfirmation）→ 执行 → [TOOL_REPAIR] 追加 → 下一轮
+    → useChat setState → ChatList / Markdown / ToolCall 渲染
+  → 每轮结束 app.session.persist() 落盘
 ```
 
-Steps:
-1. Create `src/tools/<name>.ts` exporting a class implementing `Tool`.
-2. Register it in `src/tools/index.ts::getBuiltInTools()` so both the REPL
-   `REPLLoop.init` and `executeTask` pick it up automatically.
+## 权限管线
 
-> **Known limitation (0.2.2):** `src/core/ai-engine.ts::extractToolCalls`
-> currently returns `undefined`. Tools are registered but never actually
-> invoked from a streamed response. Wiring this up requires parsing each
-> provider's native `tool_calls` delta and is tracked under "Unreleased" in
-> `CHANGELOG.md`. Until then, `ToolRegistry` is a forward-compatible seam.
+- 决策集中在 `App.requestConfirmation`：`permissionMode === 'accept'`（--yolo / /yolo）
+  直接放行；有 `confirmHandler`（TUI 确认框 / 单次模式 readline）就问；都没有
+  （headless）拒绝并提示。
+- 各工具自行在正确的动作上调用：
+  - `shell`：每次执行前 `ctx.confirmAction`
+  - `git`：仅写操作（commit/push/pull/checkout/add）确认
+  - `file`：写走 `ctx.confirmEdit`（带 diff 预览），删除走 `ctx.confirmAction`
+- TUI 侧确认框（ConfirmPrompt）渲染期间独占键盘输入，与 UserInput 互斥。
 
----
+## 常见修改场景
 
-## 7. MCP integration
+**加一个 Provider**：`src/config/providers.ts` 加条目（选 format: openai/anthropic/gemini）
+→ init 向导的 Provider 列表读同一 catalog，自动带上。
 
-`src/mcp/client.ts` defines a small stdio MCP client. It spawns a child
-process and exchanges JSON-RPC via newline-delimited messages. The current
-shape is intentionally minimal — see the file for the protocol mapping.
+**加一个工具**：实现 `Tool` 接口（`src/tools/types.ts`）→ `src/tools/index.ts`
+注册 → 系统提示的 Tools 段自动包含。危险动作记得接 `ctx.confirmAction/confirmEdit`。
 
----
+**加一个斜杠命令**：`useCommands.ts` 加分支；需要异步（如热切换）就返回
+`action`，由 `app.tsx onSubmit` 处理。
 
-## 8. Cross-platform & UX details
+**改 LLM 请求体**：注意三家协议不同——请求构造在各 provider 的 `buildRequest`；
+流式解析在 `chatStream`。改完跑 `npm run smoke`（有协议级回归测试）。
 
-- **Encoding**: Windows-only `chcp 65001` in `src/index.ts:9-15`. Skipped
-  silently if it fails.
-- **Color**: `chalk` v5 is ESM-only; the project is `"type": "module"` so
-  this is fine.
-- **Spinner**: `ora` v7 with `dots` spinner; cyan.
-- **History**: local to a single REPL session (not persisted across runs).
+## 缓存前缀纪律（重要）
 
----
+Anthropic 断点 + DeepSeek 自动前缀缓存都依赖**请求前缀字节稳定**：
 
-## 9. Tests
+- 历史消息只追加，不改写；工具失败用追加 `[TOOL_REPAIR]` 消息表达
+- 压缩只在超过阈值时发生一次（compactor 原子组），不要在每轮插入内容
+- TTL 会话内粘滞（`/ttl` 显式修改除外）；`reloadModel` 会重置 TTL
 
-```bash
-npm test                # runs node --test tests/  (full TAP output)
-npm run test:silent     # dot reporter, for noisy CI logs
-```
+## 发布检查单
 
-Tests live in `tests/` and use Node's built-in `node:test` runner — no
-vitest / jest dev-dep. They cover:
+1. `npm test` 全绿
+2. `npm run smoke` 全过
+3. 更新 `CHANGELOG.md`
+4. bump `package.json` version + `npm install --package-lock-only` 同步 lock
+5. `npm pack --dry-run` 确认 tarball 含 `dist/` 且不含 `src/`
+6. `git push origin main`
+7. （仅分支整理时，顺序不能反）先 `gh repo edit Thatgfsj/thatgfsj-code --default-branch main`
+   把默认分支切到 main，**再**删除 origin/master、origin/clean-main；
+   删前用 `git log main..master --oneline` 确认无未合并内容
+8. `npm publish`（prepublishOnly 自动 build + test）
+9. `npm view thatgfsj-code version` 复核
 
-- Smoke tests of the compiled `dist/index.js` binary (`--version`, `--help`,
-  subcommand empty-arg guards, `bash -n install.sh`).
-- Boundary tests of pure modules (`SessionManager`, `DiffPreview`,
-  `REPLOutput`) — empty input, unicode, CRLF, very long input.
-- No network. No mocked API keys. No shell-out side-effects other than the
-  install script's `bash -n` parse-check.
+## 测试
 
-CI integration: if you set this up later, run `npm test && npm run build`
-in the job; the `prepublishOnly` script already chains them.
-
----
-
-## 10. Release process
-
-1. Edit `package.json` `version` (semver).
-2. Add a new section at the top of `CHANGELOG.md`.
-3. `npm test && npm run build` locally — make sure both are green.
-4. `git add -A && git commit -m "release: vX.Y.Z"`
-5. `git tag vX.Y.Z`
-6. `git push origin main --follow-tags`
-7. `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file CHANGELOG.md`
-   (the section for the new version is the top entry; trim if needed).
-8. `npm publish --access public` (a `prepublishOnly` step in `package.json`
-   re-runs tests + build, so you can't accidentally publish a stale build).
-
-### Semver policy
-
-- **patch** (`Z`): bug fixes, docs, refactors, no public API change.
-- **minor** (`Y`): new public command, new provider, new tool.
-- **major** (`X`): breaking change to the CLI surface or the JS API surface
-  (currently no JS API is stable).
-
----
-
-## 11. Troubleshooting
-
-### `ReferenceError: require is not defined`
-
-You're editing TypeScript and accidentally called `require(...)` outside of a
-`createRequire(import.meta.url)` shim. The project is ESM. Use `import x from 'y'`
-at the top of the file.
-
-### `npm publish` ships no `dist/`
-
-You forgot to run `npm run build` (or the `prepublishOnly` script was
-removed). The `files` whitelist in `package.json` requires the `dist/`
-directory to exist locally when publishing.
-
-### `gfcode --version` shows the wrong number
-
-Edit it in `package.json` only — `src/index.ts` and `src/repl/output.ts` both
-read `VERSION` from `package.json` via `import pkg from '../package.json' …`.
-
-### REPL keypresses / Ctrl+C misbehave on Windows
-
-Make sure you're on Windows Terminal or any TTY that emits ANSI escape
-sequences natively. The legacy `cmd.exe` console has incomplete ANSI
-support — upgrade to Windows Terminal or use PowerShell.
+- `tests/cache|session|tools|mcp/**/*.test.ts`：vitest 单测（纯逻辑 + tmpdir，无网络）
+- `tests/smoke-*.mjs`：依赖 `dist/` 的端到端冒烟（先 `npm run build`）

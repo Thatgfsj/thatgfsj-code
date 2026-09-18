@@ -1,22 +1,57 @@
 /**
  * App - Core application singleton
- * Simplified: directly uses LLMService (which has built-in agent loop)
  *
- * v3.0.0+: streamResponse yields structured StreamChunk
- *   - runPrompt streams { type: 'text' } chunks to stdout and captures the
- *     final usage for cache stats recording.
+ * v3.0.5 wiring release:
+ *   - MCP: servers from ~/.thatgfsj/mcp.json are connected at startup
+ *     (per-server failures are non-fatal) and their tools join the
+ *     registry before the system prompt is built. Child processes are
+ *     disconnected on exit.
+ *   - Permission pipeline: tool confirmations now actually reach the UI —
+ *     App owns the mode ('ask' default, 'accept' via --yolo) and a
+ *     pluggable confirmHandler (TUI prompt / headless auto-deny). With no
+ *     handler and 'ask' mode, write/execute tool calls are DENIED instead
+ *     of silently executed.
+ *   - reloadModel(): /model hot-swaps provider+model without restarting;
+ *     tools and the system prompt are rebuilt, TTL resolution resets.
+ *   - applyTtl(): /ttl takes effect immediately (config + provider marker).
+ *   - streamResponse() accepts an AbortSignal that reaches the provider
+ *     fetch calls, so cancelling a round stops token generation.
  */
 
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 import { ConfigManager } from '../config/index.js';
 import { LLMService } from '../llm/index.js';
 import { SessionManager } from '../session/index.js';
 import { ToolRegistry } from '../tools/index.js';
+import type { ToolContext } from '../tools/types.js';
 import { HookManager } from '../hooks/index.js';
 import { SystemPromptBuilder } from '../prompts/index.js';
 import { SkillRegistry } from '../skills/index.js';
 import { CacheStatsStore } from '../cache/stats.js';
 import { compressThinking } from '../utils/thinking.js';
+import { MCPServerManager, type McpConfigFile } from '../mcp/client.js';
 import type { ChatMessage, ChatResponse, StreamChunk, Usage } from '../types.js';
+
+/** Read ~/.thatgfsj/mcp.json. Missing or corrupted file = no servers. */
+export function loadMcpConfig(): McpConfigFile {
+  const p = join(homedir(), '.thatgfsj', 'mcp.json');
+  if (!existsSync(p)) return {};
+  try {
+    const data = JSON.parse(readFileSync(p, 'utf-8'));
+    if (data && typeof data === 'object') return data as McpConfigFile;
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/** Confirmation request handed to the active UI. */
+export interface ConfirmRequest {
+  /** Human-readable description of the action, including a diff preview when relevant. */
+  message: string;
+}
 
 export class App {
   config: ConfigManager;
@@ -32,10 +67,13 @@ export class App {
    * and the /cache command.
    */
   cacheStats: CacheStatsStore;
+  /** v3.0.5: connected MCP servers (empty manager when none configured). */
+  mcp: MCPServerManager;
+  /** v3.0.5: startup results per configured MCP server, for /mcp output. */
+  mcpStartupResults: Array<{ name: string; ok: boolean; error?: string; tools: number }> = [];
   /**
-   * v2.2.5 (product 0.4.2): toggle  block compression. Default
-   * true. Toggled by `--show-thinking` on the CLI or `/thinking on|off`
-   * in the REPL.
+   * v2.2.5: toggle thinking block compression. Default true. Toggled by
+   * `--show-thinking` on the CLI or `/thinking on|off` in the REPL.
    */
   showThinking: boolean = false;
   /**
@@ -44,6 +82,17 @@ export class App {
    * is '5m' or '1h' and stays sticky.
    */
   resolvedTtl: '5m' | '1h' | null = null;
+  /**
+   * v3.0.5: permission mode. 'ask' requires confirmation for write/execute
+   * tool actions; 'accept' (--yolo) allows everything.
+   */
+  permissionMode: 'ask' | 'accept' = 'ask';
+  /**
+   * v3.0.5: pluggable confirmation UI. The TUI installs an Ink prompt;
+   * headless mode leaves it unset → write/execute actions are denied with
+   * a note (add --yolo to allow them).
+   */
+  confirmHandler?: (req: ConfirmRequest) => Promise<boolean>;
 
   private constructor(
     config: ConfigManager,
@@ -54,6 +103,7 @@ export class App {
     prompts: SystemPromptBuilder,
     skills: SkillRegistry,
     cacheStats: CacheStatsStore,
+    mcp: MCPServerManager,
   ) {
     this.config = config;
     this.llm = llm;
@@ -63,6 +113,7 @@ export class App {
     this.prompts = prompts;
     this.skills = skills;
     this.cacheStats = cacheStats;
+    this.mcp = mcp;
   }
 
   static async create(): Promise<App> {
@@ -72,20 +123,44 @@ export class App {
     const llm = LLMService.fromConfig(aiConfig);
     const cacheStats = new CacheStatsStore();
     const session = new SessionManager(config.get().contextLength || 50);
-    // v3.0.0: do not mutate messages when context grows — instead, surface
-    // a "consider /new" toast via onSuggestNewSession. The TUI wires this
-    // up in app.tsx; in CLI single-prompt mode it's a no-op (one-shot).
-    session.onSuggestNewSession = (info) => {
-      console.warn(
-        `\n  ⚠️  上下文较长（${info.currentLength}/${info.max}）。` +
-        `建议调 /new 开新会话（NWT 已自动归档历史）\n`,
+    // Default toast goes to stderr so it can not corrupt the Ink frame;
+    // the TUI replaces this with a proper in-app message.
+    session.onAutoCompact = (info) => {
+      process.stderr.write(
+        `\n  ⚠️  上下文较长（${info.before} 条），已自动压缩到 ${info.after} 条。可随时 /new 开新会话（NWT 已自动归档历史）\n`,
       );
     };
     const tools = new ToolRegistry();
     const hooks = new HookManager();
     const skills = new SkillRegistry();
+    let mcpResults: App['mcpStartupResults'] = [];
 
-    // Register tools with LLM service
+    // v3.0.5: connect MCP servers BEFORE the prompt is built so their tools
+    // are visible to the model from turn one. A failing server is logged,
+    // never fatal.
+    const mcp = new MCPServerManager();
+    const mcpConfig = loadMcpConfig();
+    const mcpServerDefs = mcpConfig.mcpServers || mcpConfig.servers || {};
+    if (Object.keys(mcpServerDefs).length > 0) {
+      appLog('正在连接 MCP 服务器…');
+      mcpResults = await mcp.connectFromConfig(mcpConfig);
+      for (const r of mcpResults) {
+        if (r.ok) {
+          appLog(`✓ MCP ${r.name}（${r.tools} 个工具）`);
+        } else {
+          appLog(`✗ MCP ${r.name}: ${r.error}`);
+        }
+      }
+      for (const tool of mcp.getAllTools()) {
+        tools.register(tool);
+      }
+    }
+    // Kill MCP child processes on exit (also covers Ctrl+C via 'exit').
+    process.on('exit', () => {
+      try { mcp.disconnectAll(); } catch { /* best-effort */ }
+    });
+
+    // Register tools with LLM service (after MCP tools joined the registry)
     llm.registerTools(tools.list());
 
     // Auto-init NWT timeline
@@ -94,16 +169,150 @@ export class App {
       await nwtTool.execute({ action: 'init' });
     }
 
-    // Build system prompt with active skills
+    // Build system prompt with the FULL tool list (including MCP tools)
     const prompts = new SystemPromptBuilder({
       cwd: process.cwd(),
       tools: tools.list(),
       permissionMode: 'ask',
       skillsPrompt: skills.getActivePrompts(),
     });
+    const app = new App(config, llm, session, tools, hooks, prompts, skills, cacheStats, mcp);
+    app.mcpStartupResults = mcpResults;
+
+    // v3.0.5: route tool confirmations through App (mode + handler aware)
+    app.applyToolContext();
+
     session.addMessage('system', prompts.build());
 
-    return new App(config, llm, session, tools, hooks, prompts, skills, cacheStats);
+    return app;
+  }
+
+  /**
+   * v3.0.5: keep registry and LLMService tool contexts in sync. All asks
+   * funnel through requestConfirmation so the permission mode and the
+   * active UI handler apply uniformly.
+   */
+  private applyToolContext(): void {
+    const ctx: ToolContext = {
+      workingDirectory: process.cwd(),
+      confirmAction: (msg: string) => this.requestConfirmation({ message: msg }),
+      confirmEdit: (info) => this.requestConfirmation({ message: info.message }),
+    };
+    this.tools.setContext(ctx);
+    this.llm.setToolContext(ctx);
+  }
+
+  /**
+   * v3.0.5: central permission decision.
+   * - 'accept' mode (--yolo): always allowed.
+   * - handler installed (TUI): ask it, 60s timeout denies.
+   * - no handler (headless): deny with a hint on stderr.
+   */
+  async requestConfirmation(req: ConfirmRequest): Promise<boolean> {
+    if (this.permissionMode === 'accept') return true;
+    if (!this.confirmHandler) {
+      process.stderr.write(
+        `\n  ⛔ 已拒绝：${firstLine(req.message)}\n     （headless 模式默认拒绝写入/执行操作；如需放行请加 --yolo）\n`,
+      );
+      return false;
+    }
+    try {
+      const answer = await Promise.race([
+        this.confirmHandler(req),
+        new Promise<boolean>((resolve) => {
+          const t = setTimeout(() => resolve(false), 60000);
+          t.unref?.();
+        }),
+      ]);
+      return !!answer;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * v3.0.5: single entry for toggling auto-accept. Also refreshes the
+   * system prompt's permission-mode section so the model knows tool calls
+   * no longer need user approval.
+   */
+  setYolo(on: boolean): void {
+    this.permissionMode = on ? 'accept' : 'ask';
+    this.rebuildSystemPrompt();
+  }
+
+  /**
+   * v3.0.5: hot-swap the model (and provider, if /provider changed it on
+   * disk). Rebuilds LLMService, re-registers every current tool, resets TTL
+   * resolution and refreshes the system prompt. /model previously only
+   * wrote the config file and required a restart.
+   */
+  async reloadModel(): Promise<void> {
+    const aiConfig = this.config.getAIConfig();
+    const llm = LLMService.fromConfig(aiConfig);
+    llm.registerTools(this.tools.list());
+    this.llm = llm;
+    this.resolvedTtl = null;
+    this.applyToolContext();
+    this.rebuildSystemPrompt();
+  }
+
+  /**
+   * v3.0.5: apply a TTL pin immediately (config write-through + provider
+   * marker). /ttl previously only updated a display value; the wire format
+   * kept the old TTL until restart.
+   */
+  async applyTtl(ttl: '5m' | '1h'): Promise<void> {
+    const current = this.config.get().cache ?? { enabled: true, strategy: 'auto' as const };
+    await this.config.save({ cache: { ...current, ttl } });
+    this.llm.setTtl(ttl);
+    this.resolvedTtl = ttl;
+  }
+
+  /** v3.0.5: rebuild the system prompt (tools / permission mode changed). */
+  rebuildSystemPrompt(): void {
+    this.prompts.setTools(this.tools.list());
+    this.prompts.setPermissionMode(this.permissionMode === 'accept' ? 'accept' : 'ask');
+    const built = this.prompts.build();
+    this.session.replaceSystemMessage(built);
+  }
+
+  /**
+   * v3.0.5: TUI hook-up — show MCP startup results as an in-chat message.
+   * Returns a short multi-line report (empty when no servers configured).
+   */
+  mcpStatusText(): string {
+    const configured = Object.keys(loadMcpConfig().mcpServers || loadMcpConfig().servers || {}).length;
+    if (configured === 0) {
+      return [
+        'MCP 未配置。配置文件: ~/.thatgfsj/mcp.json',
+        '',
+        '  {',
+        '    "mcpServers": {',
+        '      "名称": { "command": "npx", "args": ["-y", "包名"] }',
+        '    }',
+        '  }',
+        '',
+        '（兼容 "servers" 键名；修改后重启生效）',
+      ].join('\n');
+    }
+    const lines = ['MCP 服务器:'];
+    for (const r of this.mcpStartupResults) {
+      lines.push(r.ok
+        ? `  ✓ ${r.name} — ${r.tools} 个工具`
+        : `  ✗ ${r.name} — ${r.error}`);
+    }
+    const status = this.mcp.getStatus();
+    if (status.length > 0) {
+      lines.push('');
+      lines.push('当前状态:');
+      for (const s of status) {
+        const toolList = s.tools.length > 0
+          ? s.tools.slice(0, 8).join(', ') + (s.tools.length > 8 ? ` 等 ${s.tools.length} 个` : '')
+          : '(无工具)';
+        lines.push(`  ${s.connected ? '●' : '○'} ${s.name}: ${toolList}`);
+      }
+    }
+    return lines.join('\n');
   }
 
   /**
@@ -113,15 +322,12 @@ export class App {
    * Yields structured StreamChunks. Returns the final ChatResponse (with usage
    * if the provider reported it) so the caller can record cache stats.
    *
-   * Implementation note: we drain the inner stream manually so the final
-   * ChatResponse returned by LLMService.chatStream is propagated as this
-   * generator's return value. Using yield* doesn't carry the return value
-   * through TS's AsyncGenerator<T, R> type inference in this version of
-   * TypeScript, so we wrap with an inner for-await and explicit return.
+   * v3.0.5: accepts { signal } — propagated into provider fetch calls so
+   * cancellation actually aborts the HTTP request.
    */
-  async *streamResponse(messages?: ChatMessage[]): AsyncGenerator<StreamChunk, ChatResponse> {
+  async *streamResponse(messages?: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncGenerator<StreamChunk, ChatResponse> {
     const msgs = messages || this.session.getMessages();
-    const inner = this.llm.chatStream(msgs);
+    const inner = this.llm.chatStream(msgs, { signal: opts?.signal });
     const debugUsage = !!process.env.GFCODE_DEBUG_USAGE;
     // v3.0.3: read TTL the LLMService resolved this round (sticky per session).
     this.resolvedTtl = this.llm.getResolvedTTL();
@@ -132,9 +338,6 @@ export class App {
       if (next.value && next.value.type === 'usage') {
         try { this.cacheStats.record(next.value.usage); } catch { /* best-effort */ }
         if (debugUsage) {
-          // v3.0.0 DEBUG: dump raw usage fields to stderr so the user can
-          // confirm whether the upstream provider/relay forwards cache stats.
-          // Enable with: GFCODE_DEBUG_USAGE=1 gfcode ...
           process.stderr.write(
             '[debug_usage] ' + JSON.stringify(next.value.usage) + '\n'
           );
@@ -143,24 +346,17 @@ export class App {
       yield next.value;
       next = await inner.next();
     }
-    // The generator's return value (ChatResponse with usage) is propagated
-    // to callers via `for await ... await streamResponse.next()` semantics.
     return next.value;
   }
 
   /**
    * Run a single prompt (non-interactive mode)
    *
-   * v2.2.4 (port from v2.1.0): persistence of the assistant message
-   * uses addMessageSafe, which drops the message if it contains
-   * pollution markers like "[已中断]".
+   * v2.2.4: persistence of the assistant message uses addMessageSafe, which
+   * drops the message if it contains pollution markers like "[已中断]".
    *
-   * v2.2.5 (product 0.4.2): persistence also strips  blocks
-   * (and similar reasoning delimiters) when showThinking is false,
-   * so the conversation log stays compact.
-   *
-   * v3.0.0: yields structured StreamChunks; final usage is captured
-   * into onUsage callback for cache stats persistence.
+   * v3.0.0: yields structured StreamChunks; final usage is captured.
+   * v3.0.5: persists the session to disk when the round completes.
    */
   async runPrompt(prompt: string, onUsage?: (usage: Usage) => void): Promise<string> {
     this.session.addMessage('user', prompt);
@@ -184,14 +380,25 @@ export class App {
     }
 
     console.log();
-    // v2.2.5: compress  blocks before persisting.
     const toPersist = compressThinking(fullResponse, this.showThinking);
     this.session.addMessageSafe('assistant', toPersist);
+    this.session.persist();
 
-    // v3.0.0: forward usage to caller (CLI single-shot mode records stats too)
     if (finalUsage && onUsage) {
       try { onUsage(finalUsage); } catch { /* best-effort */ }
     }
     return fullResponse;
   }
+}
+
+// ---- helpers ------------------------------------------------------------
+
+function appLog(msg: string): void {
+  // Startup messages go to stderr so they never corrupt Ink / --json stdout.
+  process.stderr.write(`  ${msg}\n`);
+}
+
+function firstLine(s: string): string {
+  const line = s.split('\n').find(l => l.trim()) || s;
+  return line.length > 120 ? line.slice(0, 120) + '…' : line;
 }

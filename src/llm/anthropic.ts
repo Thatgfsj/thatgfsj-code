@@ -87,7 +87,7 @@ export class AnthropicProvider implements LLMProvider {
 
   async chat(messages: ChatMessage[], options?: ChatOptions, tools?: Tool[]): Promise<ChatResponse> {
     const body = this.buildRequest(messages, false, options, tools);
-    const response = await this.doRequest(body);
+    const response = await this.doRequest(body, options?.signal);
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -121,15 +121,19 @@ export class AnthropicProvider implements LLMProvider {
 
   async *chatStream(messages: ChatMessage[], options?: ChatOptions, tools?: Tool[]): AsyncGenerator<StreamChunk, ChatResponse> {
     const body = this.buildRequest(messages, true, options, tools);
-    const response = await this.doRequest(body);
 
-    if (!response.ok || !response.body) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`Anthropic API error ${response.status}: ${text}`);
-    }
+    // v3.0.5: idle watchdog + caller cancellation (same as OpenAI provider).
+    const controller = new AbortController();
+    const upstream = options?.signal;
+    const onUpstreamAbort = () => controller.abort();
+    upstream?.addEventListener('abort', onUpstreamAbort, { once: true });
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), 120000);
+    };
+    resetIdle();
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
     let fullContent = '';
     let buffer = '';
     // Track tool use blocks
@@ -140,80 +144,100 @@ export class AnthropicProvider implements LLMProvider {
     let capturedUsage: Usage | undefined;
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const response = await this.doRequest(body, controller.signal);
+      resetIdle();
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+      if (!response.ok || !response.body) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Anthropic API error ${response.status}: ${text}`);
+      }
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
 
-          try {
-            const data = JSON.parse(trimmed.slice(6));
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          resetIdle();
+          if (done) break;
 
-            // content_block_start: track block types
-            if (data.type === 'content_block_start') {
-              currentBlockIndex = data.index ?? 0;
-              currentBlockType = data.content_block?.type || '';
-              if (currentBlockType === 'tool_use') {
-                toolUseBlocks.set(currentBlockIndex, {
-                  id: data.content_block.id || '',
-                  name: data.content_block.name || '',
-                  input: '',
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+
+              // content_block_start: track block types
+              if (data.type === 'content_block_start') {
+                currentBlockIndex = data.index ?? 0;
+                currentBlockType = data.content_block?.type || '';
+                if (currentBlockType === 'tool_use') {
+                  toolUseBlocks.set(currentBlockIndex, {
+                    id: data.content_block.id || '',
+                    name: data.content_block.name || '',
+                    input: '',
+                  });
+                } else if (currentBlockType === 'thinking') {
+                  // Anthropic extended thinking: emit as structured thinking chunks.
+                  // TUI / session layer decides whether to surface these.
+                  // (We don't push to fullContent — compressThinking strips
+                  // these blocks from persistence.)
+                }
+              }
+
+              // content_block_delta: incremental text or tool input
+              if (data.type === 'content_block_delta') {
+                if (data.delta?.type === 'text_delta') {
+                  const text = data.delta.text;
+                  fullContent += text;
+                  yield { type: 'text', content: text };
+                } else if (data.delta?.type === 'input_json_delta') {
+                  const buf = toolUseBlocks.get(currentBlockIndex);
+                  if (buf) {
+                    buf.input += data.delta.partial_json || '';
+                  }
+                } else if (data.delta?.type === 'thinking_delta') {
+                  if (data.delta.thinking) {
+                    yield { type: 'thinking', content: data.delta.thinking };
+                  }
+                }
+              }
+
+              // message_delta carries the final usage (cache hit/miss stats).
+              if (data.type === 'message_delta' && data.usage) {
+                capturedUsage = this.normalizeUsage({
+                  ...capturedUsage,
+                  ...data.usage,
                 });
-              } else if (currentBlockType === 'thinking') {
-                // Anthropic extended thinking: emit as structured thinking chunks.
-                // TUI / session layer decides whether to surface these.
-                // (We don't push to fullContent — compressThinking strips
-                // these blocks from persistence.)
               }
-            }
 
-            // content_block_delta: incremental text or tool input
-            if (data.type === 'content_block_delta') {
-              if (data.delta?.type === 'text_delta') {
-                const text = data.delta.text;
-                fullContent += text;
-                yield { type: 'text', content: text };
-              } else if (data.delta?.type === 'input_json_delta') {
-                const buf = toolUseBlocks.get(currentBlockIndex);
-                if (buf) {
-                  buf.input += data.delta.partial_json || '';
-                }
-              } else if (data.delta?.type === 'thinking_delta') {
-                if (data.delta.thinking) {
-                  yield { type: 'thinking', content: data.delta.thinking };
-                }
+              // message_start may carry the initial input_tokens + cache info
+              // when prompt caching is active.
+              if (data.type === 'message_start' && data.message?.usage) {
+                capturedUsage = this.normalizeUsage(data.message.usage);
               }
+            } catch {
+              // Skip invalid JSON
             }
-
-            // message_delta carries the final usage (cache hit/miss stats).
-            // Per Anthropic docs: usage is only attached on the message_delta
-            // event of the LAST chunk (after message_stop), unless the
-            // `anthropic-beta: prompt-caching-2024-07-31` header is sent.
-            if (data.type === 'message_delta' && data.usage) {
-              capturedUsage = this.normalizeUsage({
-                ...capturedUsage,
-                ...data.usage,
-              });
-            }
-
-            // message_start may carry the initial input_tokens + cache info
-            // when prompt caching is active.
-            if (data.type === 'message_start' && data.message?.usage) {
-              capturedUsage = this.normalizeUsage(data.message.usage);
-            }
-          } catch {
-            // Skip invalid JSON
           }
         }
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+        upstream?.removeEventListener('abort', onUpstreamAbort);
+        reader.releaseLock();
       }
-    } finally {
-      reader.releaseLock();
+    } catch (error: any) {
+      if (idleTimer) clearTimeout(idleTimer);
+      upstream?.removeEventListener('abort', onUpstreamAbort);
+      if (controller.signal.aborted && !upstream?.aborted) {
+        throw new Error('Stream stalled: no data received for 120s');
+      }
+      throw error;
     }
 
     // Convert tool use blocks to ToolCall[]
@@ -328,17 +352,23 @@ export class AnthropicProvider implements LLMProvider {
         }
         return { role: 'assistant', content: blocks };
       }
-      // Forward per-message cache_control if the caller attached one
-      // (e.g. an inline breakpoint for a particular user message).
-      const baseContent = typeof m.content === 'string' ? m.content : m.content;
-      const msg: any = {
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: baseContent,
-      };
+      // Forward per-message cache_control if the caller attached one.
+      // v3.0.5: cache_control is only legal on CONTENT BLOCKS, not on the
+      // message object — the previous code attached it at the top level,
+      // which the API rejects with 400. Convert string content to a block.
       if (m.cache_control) {
-        msg.cache_control = m.cache_control;
+        const text = typeof m.content === 'string'
+          ? m.content
+          : m.content.filter(b => b.type === 'text').map(b => (b as any).text).join('');
+        return {
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: [{ type: 'text', text, cache_control: m.cache_control }],
+        };
       }
-      return msg;
+      return {
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content,
+      };
     });
 
     const body: any = {
@@ -372,10 +402,11 @@ export class AnthropicProvider implements LLMProvider {
    * usage fields. Some relay stations do not forward this header — that is
    * fine, the rest of the provider still works (just without cache stats).
    */
-  protected async doRequest(body: any): Promise<Response> {
+  protected async doRequest(body: any, external?: AbortSignal): Promise<Response> {
     const url = `${this.config.baseUrl}/messages`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000); // 60s
+    const timeout = setTimeout(() => controller.abort(), 60000); // 60s connect
+    const signal = external ? AbortSignal.any([controller.signal, external]) : controller.signal;
 
     try {
       return await fetch(url, {
@@ -387,7 +418,7 @@ export class AnthropicProvider implements LLMProvider {
           'anthropic-beta': 'prompt-caching-2024-07-31',
         },
         body: stableStringify(body),
-        signal: controller.signal,
+        signal,
       });
     } finally {
       clearTimeout(timeout);

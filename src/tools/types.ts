@@ -39,6 +39,11 @@ export interface ToolContext {
   sessionId?: string;
   workingDirectory?: string;
   confirmAction?: (msg: string) => Promise<boolean>;
+  /**
+   * v3.0.5: richer confirmation for file edits — carries the path and a
+   * rendered diff so the UI can show exactly what will change.
+   */
+  confirmEdit?: (info: { message: string }) => Promise<boolean>;
   signal?: AbortSignal;
   toolCallId?: string;
 }

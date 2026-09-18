@@ -84,6 +84,11 @@ export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
   stream?: boolean;
+  /**
+   * v3.0.5: caller cancellation. Propagated into provider fetch calls so
+   * Ctrl+C / the UI cancel button actually aborts the HTTP request.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -91,14 +96,20 @@ export interface ChatOptions {
  * protocol that the previous version of useChat parsed by string-splitting.
  *
  * - 'text':        regular model output
- * - 'tool_calls':  one or more tool calls ready to dispatch
+ * - 'tool_calls':  one or more tool calls ready to dispatch. After the agent
+ *                  loop executes them it re-emits this chunk variant with
+ *                  `results` attached (index-aligned with toolCalls) so the
+ *                  TUI can render per-tool outcomes without reading session
+ *                  internals.
  * - 'thinking':    reasoning content (stripped from final persistence; kept in
  *                  VolatileScratch for the current round only)
  * - 'usage':       token usage + cache stats; emitted at end of stream if
  *                  the upstream provider returned them
  */
+export type ToolCallResult = { name: string; ok: boolean; output: string };
+
 export type StreamChunk =
   | { type: 'text'; content: string }
-  | { type: 'tool_calls'; toolCalls: ToolCall[] }
+  | { type: 'tool_calls'; toolCalls: ToolCall[]; results?: ToolCallResult[] }
   | { type: 'thinking'; content: string }
   | { type: 'usage'; usage: Usage };

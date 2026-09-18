@@ -1,10 +1,17 @@
 import { useCallback } from 'react';
 import type { App } from '../../app/index.js';
+import { SessionManager } from '../../session/index.js';
 
 interface CommandResult {
   handled: boolean;
   output?: string;
-  action?: 'clear' | 'reinit';
+  /**
+   * v3.0.5: 'reload_model' / 'apply_ttl' / 'resume' are handled async by
+   * app.tsx after the sync output is displayed (reloadModel / applyTtl /
+   * session load are async or need React state access).
+   */
+  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume';
+  payload?: any;
 }
 
 // 中文命令别名映射
@@ -22,17 +29,23 @@ const CMD_ALIASES: Record<string, string> = {
   '/缓存': '/cache',
   '/ttl': '/ttl',
   '/TTL': '/ttl',
+  '/恢复': '/resume',
+  '/继续': '/resume',
+  '/yolo': '/yolo',
+  '/YOLO': '/yolo',
 };
 
 export const COMMAND_LIST = [
   { name: '/模型', desc: '切换模型' },
   { name: '/服务商', desc: '更换服务商' },
   { name: '/新建', desc: '新建会话' },
+  { name: '/resume', desc: '恢复历史会话' },
   { name: '/压缩', desc: '压缩上下文' },
   { name: '/缓存', desc: '缓存命中率' },
   { name: '/ttl', desc: '查看/设置 Cache TTL' },
   { name: '/技能', desc: '管理技能' },
-  { name: '/mcp', desc: 'MCP 设置' },
+  { name: '/mcp', desc: 'MCP 服务器状态' },
+  { name: '/yolo', desc: '切换自动确认' },
   { name: '/帮助', desc: '查看帮助' },
 ];
 
@@ -68,7 +81,9 @@ export function useCommands(app: App) {
         };
       }
       app.config.save({ model: arg });
-      return { handled: true, output: `模型 → ${arg}` };
+      // v3.0.5: app.tsx performs `await app.reloadModel()` so the switch is
+      // immediate. It used to require a restart to take effect.
+      return { handled: true, output: `模型 → ${arg}（切换中…）`, action: 'reload_model' };
     }
 
     // ── /provider ───────────────────────────────────────
@@ -78,30 +93,70 @@ export function useCommands(app: App) {
 
     // ── /new, /clear ────────────────────────────────────
     if (name === '/new') {
-      app.session.clear();
-      return { handled: true, output: '新会话已创建。', action: 'clear' };
+      // v3.0.5: reset() keeps the system prompt — clear() used to wipe it,
+      // leaving the model unprompted until restart.
+      app.session.reset();
+      return { handled: true, output: '新会话已创建（系统提示已保留）。', action: 'clear' };
     }
 
     // ── /compact ────────────────────────────────────────
     if (name === '/compact') {
-      const before = app.session.getMessageCount();
-      app.session.truncate();
-      const after = app.session.getMessageCount();
-      return { handled: true, output: `上下文已压缩: ${before} → ${after} 条消息` };
+      // v3.0.5: real compaction with atomic tool-call groups. The old path
+      // re-summarized on every call and could cut a tool_calls/result pair.
+      const r = app.session.compactNow();
+      if (!r) {
+        return { handled: true, output: '上下文无需压缩（未超过阈值或没有可压缩内容）。' };
+      }
+      return { handled: true, output: `上下文已压缩: ${r.before} → ${r.after} 条消息（工具调用块保持完整）` };
+    }
+
+    // ── /resume [序号] ──────────────────────────────────
+    if (name === '/resume') {
+      if (!arg) {
+        const list = SessionManager.list(10);
+        if (list.length === 0) {
+          return { handled: true, output: '暂无历史会话。会话在每轮对话后自动保存到 ~/.thatgfsj/sessions/。' };
+        }
+        const lines = [
+          '最近的会话:',
+          '',
+          ...list.map((s, i) => {
+            const time = s.updatedAt.toISOString().replace('T', ' ').slice(0, 16);
+            return `  ${i + 1}.  ${time}  ${s.messageCount} 条  ${s.preview}`;
+          }),
+          '',
+          '用法: /resume <序号>   例: /resume 1',
+        ];
+        return { handled: true, output: lines.join('\n') };
+      }
+      const idx = parseInt(arg, 10);
+      if (!Number.isFinite(idx) || idx < 1 || idx > 10) {
+        return { handled: true, output: '用法: /resume <序号>（1-10，先运行 /resume 查看列表）' };
+      }
+      // Async load handled by app.tsx (needs React hydration).
+      return { handled: true, output: '', action: 'resume', payload: idx - 1 };
+    }
+
+    // ── /yolo ───────────────────────────────────────────
+    if (name === '/yolo') {
+      const turningOn = app.permissionMode !== 'accept';
+      // v3.0.5: setYolo also refreshes the system prompt's permission section.
+      app.setYolo(turningOn);
+      return {
+        handled: true,
+        output: turningOn
+          ? '✓ YOLO 已开启：写/执行类工具调用不再询问（慎用）'
+          : '✓ YOLO 已关闭：写/执行类工具调用恢复确认',
+      };
     }
 
     // ── /cache — prompt cache hit-rate + cost savings ───
-    // v3.0.0: surfaces CacheStatsStore snapshots. Sub-commands:
-    //   /cache          show full breakdown
-    //   /cache reset    zero the persistent stats
     if (name === '/cache') {
       if (arg === 'reset' || arg === '重置') {
         app.cacheStats.reset();
         return { handled: true, output: '✓ 缓存统计已重置' };
       }
       if (arg === 'off' || arg === '关') {
-        // Toggle disable: writes through to provider config (currently a
-        // no-op until M4.5 wires Config.cache). Print a hint.
         return {
           handled: true,
           output: [
@@ -146,23 +201,15 @@ export function useCommands(app: App) {
     }
 
     // v3.0.3: /ttl — view or pin the cache TTL.
-    // v3.0.4: default is 1h (long-task). We cannot predict task length
-    // at round 0, so the default TTL is the one that cannot expire
-    // mid-task. Pinning 5m is only for users who are sure the session
-    // is short.
-    //
-    //   /ttl              show current effective TTL + decision reason
-    //   /ttl 5m|1h        pin TTL for this session (sticky, no cache reset)
-    //   /ttl 1h           back to the long-task default
     if (name === '/ttl') {
       const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
       const resolved = app.resolvedTtl;
       if (arg === '5m' || arg === '1h') {
-        app.config.save({ cache: { ...(app.config.get() as any).cache, ttl: arg } });
-        app.resolvedTtl = arg;
-        return { handled: true, output: `✓ Cache TTL 已固定为 ${arg}（首次请求会重建缓存）` };
+        // v3.0.5: app.tsx performs `await app.applyTtl(arg)` — the TTL now
+        // really changes the wire format. It used to only update a display
+        // value.
+        return { handled: true, output: `✓ Cache TTL 已固定为 ${arg}（首次请求会重建缓存）`, action: 'apply_ttl', payload: arg };
       }
-      // No arg: show current state
       const effective = resolved ?? (configTtl === 'auto' ? '1h' : (configTtl ?? '1h'));
       const lines = [
         '⏱  Cache TTL',
@@ -206,18 +253,9 @@ export function useCommands(app: App) {
 
     // ── /mcp ────────────────────────────────────────────
     if (name === '/mcp') {
-      return {
-        handled: true,
-        output: [
-          'MCP 配置: ~/.thatgfsj/mcp.json',
-          '',
-          '  {',
-          '    "servers": {',
-          '      "名称": { "command": "npx", "args": ["-y", "server"] }',
-          '    }',
-          '  }',
-        ].join('\n'),
-      };
+      // v3.0.5: real status. This used to print a config example while the
+      // MCP client was dead code.
+      return { handled: true, output: app.mcpStatusText() };
     }
 
     // ── /thinking on|off ─────────────────────────────────
@@ -246,16 +284,22 @@ export function useCommands(app: App) {
         handled: true,
         output: [
           '命令列表:',
-          '  /模型 <名称>    切换模型',
+          '  /模型 <名称>    切换模型（立即生效）',
           '  /服务商          更换服务商',
-          '  /新建            新建会话',
-          '  /压缩            压缩上下文',
+          '  /新建            新建会话（保留系统提示）',
+          '  /resume [序号]   恢复历史会话',
+          '  /压缩            压缩上下文（保留工具调用完整性）',
           '  /缓存            查看缓存命中率',
+          '  /ttl 5m|1h       设置缓存 TTL（立即生效）',
           '  /思考 [on|off]   切换思考块显示',
           '  /技能 [id]       管理技能',
-          '  /mcp             MCP 设置',
+          '  /mcp             MCP 服务器状态',
+          '  /yolo            切换写/执行操作自动确认',
           '  /帮助            查看帮助',
           '  exit             退出',
+          '',
+          '权限: 写/执行类工具调用默认需要确认（y 允许 / a 本会话全允许 / n 拒绝）。',
+          '      启动时加 --yolo 或用 /yolo 可跳过确认。',
           '',
           '快捷键:',
           '  ↑/↓              历史记录',

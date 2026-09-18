@@ -1,45 +1,51 @@
 /**
  * Search Tool - Code search and file operations
+ *
+ * v3.0.5: the grep action no longer shells out to Unix `grep` — which both
+ * injected the pattern into a shell string AND made the tool permanently
+ * broken on Windows (the author's own platform). It is now a pure-JS scan
+ * with the same output shape (`file:line: text`), case-insensitive /
+ * whole-word / files-only options, binary + size limits, and no shell.
  */
 
 import type { Tool, ToolResult } from './types.js';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { readdirSync, statSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
 
-const execAsync = promisify(exec);
+const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.nwt', '.thatgfsj']);
+const MAX_FILE_BYTES = 1024 * 1024; // 1MB per file
+const MAX_MATCHES = 50;
 
 export class SearchTool implements Tool {
   name = 'search';
   description = 'Search and find: grep, find files, list directory tree';
-  
+
   parameters = [
     { name: 'action', type: 'string', description: 'Action: grep, find, tree, files', required: true },
     { name: 'pattern', type: 'string', description: 'Search pattern or file pattern', required: false },
     { name: 'path', type: 'string', description: 'Directory to search in', required: false },
-    { name: 'options', type: 'string', description: 'Additional options', required: false }
+    { name: 'options', type: 'string', description: 'Options string: i (case-insensitive), w (whole word), l (files only), n (line numbers)', required: false }
   ];
 
   async execute(params: Record<string, any>): Promise<ToolResult> {
     const { action, pattern, path, options } = params;
     const workDir = path || process.cwd();
-    
+
     try {
       switch (action) {
         case 'grep':
         case 'search':
           return await this.grep(pattern || '', workDir, options || '');
-        
+
         case 'find':
           return await this.find(pattern || '*', workDir);
-        
+
         case 'tree':
           return await this.tree(workDir, parseInt(options) || 3);
-        
+
         case 'files':
           return await this.listFiles(workDir, pattern || '*');
-        
+
         default:
           return { success: false, error: `Unknown action: ${action}` };
       }
@@ -49,53 +55,116 @@ export class SearchTool implements Tool {
   }
 
   /**
-   * Grep - search for pattern in files
+   * Pure-JS grep. `pattern` is treated as a regex when valid, and as a
+   * literal string otherwise (so patterns like `foo(` still work).
    */
   private async grep(pattern: string, path: string, options: string): Promise<ToolResult> {
     if (!pattern) {
       return { success: false, error: 'Pattern required' };
     }
-    
-    // Build grep command
-    let cmd = `grep -rn "${pattern}" "${path}"`;
-    
-    if (options?.includes('i')) cmd += ' -i';  // Case insensitive
-    if (options?.includes('w')) cmd += ' -w';  // Whole word
-    if (options?.includes('l')) cmd += ' -l';  // Files only
-    if (options?.includes('n')) cmd += ' -n';  // Line numbers
-    
-    cmd += ' --color=never';
-    
+
+    const caseInsensitive = options?.includes('i');
+    const wholeWord = options?.includes('w');
+    const filesOnly = options?.includes('l');
+    const withLineNumbers = !options || options.includes('n') || options.length === 0;
+
+    let regex: RegExp;
     try {
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 30000 });
-      
-      if (!stdout && stderr) {
-        return { success: false, error: stderr };
-      }
-      
-      const lines = (stdout || '').split('\n').filter(l => l.trim());
-      
-      if (lines.length === 0) {
-        return { success: true, output: 'No matches found' };
-      }
-      
-      // Limit output
-      const limited = lines.slice(0, 50);
-      const output = limited.join('\n');
-      
-      return { 
-        success: true, 
-        output: lines.length > 50 
-          ? output + `\n... and ${lines.length - 50} more matches`
-          : output 
-      };
-      
-    } catch (error: any) {
-      if (error.killed) {
-        return { success: false, error: 'Search timed out (>30s)' };
-      }
-      return { success: false, error: error.message };
+      let source = pattern;
+      if (wholeWord) source = `\\b${source}\\b`;
+      regex = new RegExp(source, caseInsensitive ? 'i' : '');
+    } catch {
+      // Invalid regex — fall back to a literal (escaped) match.
+      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const source = wholeWord ? `\\b${escaped}\\b` : escaped;
+      regex = new RegExp(source, caseInsensitive ? 'i' : '');
     }
+
+    const matches: string[] = [];
+    const matchedFiles = new Set<string>();
+    let truncated = false;
+
+    const scan = (dir: string, depth: number): void => {
+      if (depth > 8 || (matches.length >= MAX_MATCHES && !filesOnly)) return;
+
+      let items: string[];
+      try {
+        items = readdirSync(dir);
+      } catch {
+        return;
+      }
+
+      for (const item of items) {
+        if (IGNORED_DIRS.has(item) || item.startsWith('.')) continue;
+        const full = join(dir, item);
+
+        let stat;
+        try {
+          stat = statSync(full);
+        } catch {
+          continue;
+        }
+
+        if (stat.isDirectory()) {
+          scan(full, depth + 1);
+          continue;
+        }
+        if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+
+        let content: string;
+        try {
+          const buf = readFileSync(full);
+          // Skip binary-looking files (NUL byte in the first 8KB).
+          const sample = buf.subarray(0, 8192);
+          if (sample.includes(0)) continue;
+          content = buf.toString('utf-8');
+        } catch {
+          continue;
+        }
+
+        const lines = content.split('\n');
+        let fileMatched = false;
+        for (let i = 0; i < lines.length; i++) {
+          if (!regex.test(lines[i])) continue;
+          fileMatched = true;
+          matchedFiles.add(full);
+          if (!filesOnly) {
+            const rel = relative(process.cwd(), full) || full;
+            const text = lines[i].trim().slice(0, 200);
+            matches.push(withLineNumbers ? `${rel}:${i + 1}: ${text}` : `${rel}: ${text}`);
+            if (matches.length >= MAX_MATCHES) {
+              truncated = true;
+              return;
+            }
+          }
+        }
+        if (filesOnly && fileMatched && matchedFiles.size >= MAX_MATCHES) {
+          truncated = true;
+          return;
+        }
+      }
+    };
+
+    scan(path, 0);
+
+    if (filesOnly) {
+      if (matchedFiles.size === 0) return { success: true, output: 'No matches found' };
+      const list = [...matchedFiles].slice(0, MAX_MATCHES)
+        .map(f => relative(process.cwd(), f) || f);
+      return {
+        success: true,
+        output: list.join('\n') + (matchedFiles.size >= MAX_MATCHES ? `\n... and more files` : ''),
+      };
+    }
+
+    if (matches.length === 0) {
+      return { success: true, output: 'No matches found' };
+    }
+
+    const suffix = truncated
+      ? `\n... and more matches (refine the pattern or path)`
+      : '';
+    return { success: true, output: matches.join('\n') + suffix };
   }
 
   /**

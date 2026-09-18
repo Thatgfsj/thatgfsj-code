@@ -68,4 +68,20 @@ export class DiffPreview {
       `\x1b[36m--- End ---\x1b[0m`,
     ].join('\n');
   }
+
+  /**
+   * v3.0.5: truncated formatting for huge diffs — keeps the confirmation
+   * prompt usable when a tool wants to rewrite a 2000-line file.
+   */
+  static truncate(result: DiffResult, maxLines = 120): string {
+    const lines = result.diff.split('\n');
+    const kept = lines.slice(0, maxLines);
+    const rest = lines.length - kept.length;
+    const body = kept.join('\n') + (rest > 0 ? `\n  … 还有 ${rest} 行未显示` : '');
+    return [
+      `\x1b[36m--- Changes: -${result.removed} / +${result.added} ---\x1b[0m`,
+      body,
+      `\x1b[36m--- End ---\x1b[0m`,
+    ].join('\n');
+  }
 }

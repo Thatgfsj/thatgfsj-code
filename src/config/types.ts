@@ -62,6 +62,11 @@ export interface AIConfig {
   maxTokens?: number;
   baseUrl?: string;
   provider?: ProviderName;
+  /**
+   * v3.0.5: cache policy is forwarded to providers (was dropped by
+   * getAIConfig before, so cache.ttl config never reached the wire).
+   */
+  cache?: Config['cache'];
 }
 
 export interface ModelInfo {

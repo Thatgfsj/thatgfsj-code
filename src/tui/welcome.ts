@@ -3,12 +3,15 @@
  */
 
 import chalk from 'chalk';
-import readline from 'readline';
+// v3.0.5: `readline` (bare) resolves to a deprecated placeholder package on
+// npm that shadows Node's builtin — use the explicit node: builtin.
+import readline from 'node:readline';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { PROVIDERS, getModelsForProvider, listProviders, isCustomProvider } from '../config/providers.js';
 import type { ProviderName } from '../config/types.js';
+import { getVersion } from '../version.js';
 
 const line = chalk.gray('─'.repeat(52));
 
@@ -18,7 +21,7 @@ export class WelcomeScreen {
     if (hasApiKey) return;
 
     console.log();
-    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(' v0.5.0'));
+    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(` v${getVersion()}`));
     console.log(chalk.gray('  AI Coding Assistant'));
     console.log(line);
     console.log();

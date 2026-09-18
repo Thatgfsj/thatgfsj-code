@@ -4,6 +4,51 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.5] - 2026-09-19  - 对齐主流 CLI：MCP / 会话持久化 / Headless / 权限管线
+
+> 从本版本起，`gfcode --version`、TUI Header、欢迎屏统一从 `package.json`
+> 读取（此前四处硬编码、三个口径并存），"产品版本"双轨制退役，
+> 以 CHANGELOG 的版本对照表为准。
+
+### Added
+
+- **MCP 修活并接入**：stdio 客户端接入 App 启动流程（`~/.thatgfsj/mcp.json`，
+  兼容 `mcpServers` 键名）；工具以 `mcp__server__tool` 命名注册（旧 `server:tool`
+  命名会被三家 API 以 400 拒绝）；`/mcp` 显示真实连接状态；子进程随 CLI 退出清理。
+- **会话持久化 + /resume**：每轮结束自动保存到 `~/.thatgfsj/sessions/`（保留最近
+  20 个）；`/resume` 列表选择恢复；恢复时校验并修复悬空 tool_calls，杜绝 400。
+- **Headless 模式**：`gfcode "任务" --json` 输出行分隔 JSON 事件
+  （start/text/tool_calls/usage/result），人读输出全部改道 stderr；退出码可判断成败。
+- **权限确认管线**：写/执行类工具调用（shell、git 写操作、文件写入/删除）默认
+  请求确认；TUI 弹出确认框独占键盘输入（y / a 本会话全允许 / n，60 秒超时自动拒绝）；
+  文件写入展示逐行 diff（超长截断）；`--yolo` / `/yolo` 跳过。
+- **上下文自动压缩**：超过阈值按"完整工具调用块"原子压缩（此前按条数切割会切断
+  tool_calls/result 配对导致后续请求 400）；`/new` 保留系统提示；`/compact` 走同一原子路径。
+- **/yolo、/resume、/ttl 即时生效、/model 热切换**（此前 /model 只写配置文件需重启）。
+- **工程化**：`files: ["dist"]` + `prepublishOnly`（修复发布的包缺 dist 不可用）；
+  `engines: >=20.19`；repository/bugs/homepage 字段；71 个 vitest 单测。
+
+### Fixed
+
+- **gemini**：API key 从 URL query 移至 `x-goog-api-key` header；工具结果改用
+  functionResponse 语义回传（此前压成纯文本，多轮工具链断裂）；多条 system 消息
+  全部拼接进 systemInstruction（此前只取第一条）；流式补齐 usageMetadata。
+- **anthropic**：消息级 `cache_control` 是非法字段（400 风险），改挂到 content block。
+- **openai**：非流式请求补 `response.ok` 检查；流式加 120s 空闲看门狗（此前流卡死永久挂起）。
+- **三家 provider 全部支持 AbortSignal**：取消对话现在真正中止 HTTP 请求，不再白烧 token。
+- **git 工具命令注入**：`git commit -m "${message}"` 等拼接全部改为 execFile 参数数组。
+- **search 工具 Windows 可用**：不再 shell 出 Unix `grep`（CMD 下必失败），改纯 JS 扫描，
+  同时消除 pattern 注入面。
+- **shell 工具确认逻辑**：旧白名单锚定可绕过，改为每次执行前确认（危险命令黑名单仍硬拦截）。
+- **NWT ID 复用覆盖**：`nextId = 文件数+1` 在 archive 后会复用 ID 覆盖旧事件，
+  改为取最大 ID 递增。
+- **工具结果显示**：TUI 工具面板此前永远显示 "(see tool result above)"，
+  现在 tool_calls chunk 携带逐工具结果。
+- **Windows 编码**：chcp 65001 用 `require()` 写在 ESM 里被 try/catch 静默吞掉、
+  从未执行过——改为顶层 import，且仅在交互 TTY 执行（headless/CI 不再白起子进程）。
+- **依赖瘦身**：移除未使用的 `playwright`（每个用户白下几十 MB）、`ora`、`inquirer`、
+  `readline`（npm 废弃占位尸包，改用 `node:readline`）。
+
 ## [3.0.0 / 产品 0.5.0] - 2026-08-08  - Reasonix 风格 Prompt Caching 架构
 
 > **重大版本变更**：流式协议 `AsyncGenerator<string>` → `AsyncGenerator<StreamChunk>`。

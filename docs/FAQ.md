@@ -15,7 +15,7 @@
 ### Q: npm install 失败怎么办？
 
 **A**: 
-- 确保 Node.js 版本 >= 18
+- 确保 Node.js 版本 >= 20.19
 - 尝试清除缓存: `npm cache clean --force`
 - 如果是 Windows 问题，尝试使用 PowerShell 或管理员权限
 
@@ -65,46 +65,62 @@ gfcode
 
 # 在交互模式中
 > 帮我写一个函数
-> 解释这段代码
+> /resume 恢复历史会话
 > /help 查看命令
-> /exit 退出
+> exit 退出
 ```
 
-### Q: 如何解释代码？
+### Q: 如何解释 / 调试 / 生成代码？
 
-**A**:
+**A**: 直接用单次 prompt 描述任务即可（没有单独的 explain/debug/template 子命令）：
+
 ```bash
-# 直接解释代码
-gfcode explain "const add = (a, b) => a + b;"
+# 解释代码
+gfcode "解释这段代码: const add = (a, b) => a + b;"
 
-# 从文件解释
-gfcode explain -f src/utils.ts
+# 调试
+gfcode "app.js 报 TypeError: undefined，帮我定位修复"
+
+# 生成模板
+gfcode "创建一个 React 按钮组件 MyButton"
 ```
 
-### Q: 如何调试代码？
+### Q: 如何脚本化 / 在 CI 中使用？
 
-**A**:
+**A**: 用 `--json` 获取行分隔 JSON 事件流（人读输出走 stderr）：
+
 ```bash
-# 直接调试代码
-gfcode debug "你的代码"
-
-# 带错误信息调试
-gfcode debug -f app.js -e "TypeError: undefined"
+gfcode "总结这个仓库的结构" --json | jq -r 'select(.type=="result") | .content'
 ```
 
-### Q: 如何生成代码模板？
+headless 环境默认拒绝写/执行类工具调用，需要放行加 `--yolo`（慎用）。
 
-**A**:
-```bash
-# React 组件
-gfcode template react -n MyButton
+### Q: 工具调用为什么要求确认？
 
-# Express API
-gfcode template express -n my-api
+**A**: 写/执行类操作（shell、git 写操作、文件写入/删除）默认需要确认：`y` 允许一次，
+`a` 本会话全部允许，`n` 拒绝。文件写入会展示 diff。想跳过用 `--yolo` 或 `/yolo`。
 
-# Python 脚本
-gfcode template python -n scraper
+### Q: 会话可以恢复吗？
+
+**A**: 可以。每轮对话自动保存到 `~/.thatgfsj/sessions/`（保留最近 20 个），
+TUI 里 `/resume` 查看列表并恢复。
+
+### Q: 如何接入 MCP 服务器？
+
+**A**: 编辑 `~/.thatgfsj/mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\projects"]
+    }
+  }
+}
 ```
+
+重启后生效，`/mcp` 查看状态。
 
 ---
 

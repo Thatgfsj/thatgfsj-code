@@ -12,8 +12,8 @@
  */
 
 import chalk from 'chalk';
-import type { ChatMessage, ChatResponse, ChatOptions, ToolCall, StreamChunk } from '../types.js';
-import type { Tool } from '../tools/types.js';
+import type { ChatMessage, ChatResponse, ChatOptions, ToolCall, StreamChunk, ToolCallResult } from '../types.js';
+import type { Tool, ToolContext } from '../tools/types.js';
 import type { LLMProvider } from './provider.js';
 import type { AIConfig, Config, ProviderName } from '../config/types.js';
 import { PROVIDERS } from '../config/providers.js';
@@ -26,10 +26,21 @@ export class LLMService {
   private provider: LLMProvider;
   private tools: Map<string, Tool> = new Map();
   private apiKey: string;
+  /**
+   * v3.0.5: execution context handed to every tool (confirmAction, abort
+   * signal, working directory). Previously tools were called with no
+   * context at all, which made the whole permission pipeline dead code.
+   */
+  private toolCtx: ToolContext = {};
 
   constructor(provider: LLMProvider, apiKey: string) {
     this.provider = provider;
     this.apiKey = apiKey;
+  }
+
+  /** v3.0.5: wire the execution context (confirm/signal/cwd) into tool calls. */
+  setToolContext(ctx: ToolContext): void {
+    this.toolCtx = ctx;
   }
 
   /**
@@ -85,6 +96,28 @@ export class LLMService {
     }
   }
 
+  /** v3.0.5: drop all registered tools (used by reloadModel to re-register cleanly). */
+  clearTools(): void {
+    this.tools.clear();
+  }
+
+  /**
+   * v3.0.5: pin the Anthropic cache TTL immediately (from /ttl). Changing
+   * TTL mid-session invalidates the upstream cache prefix once — the user
+   * explicitly asked for it, so that cost is accepted.
+   */
+  setTtl(ttl: '5m' | '1h'): void {
+    this.resolvedTtl = ttl;
+    if (typeof (this.provider as any).setResolvedTTL === 'function') {
+      (this.provider as any).setResolvedTTL(ttl);
+    }
+  }
+
+  /** v3.0.5: reset TTL resolution (used when the model/service is rebuilt). */
+  resetTtl(): void {
+    this.resolvedTtl = null;
+  }
+
   getProviderName(): string { return this.provider.name; }
   hasApiKey(): boolean { return !!this.apiKey; }
 
@@ -110,7 +143,7 @@ export class LLMService {
    */
   async *chatStream(
     messages: ChatMessage[],
-    options?: ChatOptions & { maxIterations?: number }
+    options?: ChatOptions & { maxIterations?: number; signal?: AbortSignal }
   ): AsyncGenerator<StreamChunk, ChatResponse> {
     if (!this.hasApiKey()) throw new Error(this.getNoKeyMessage());
 
@@ -193,6 +226,10 @@ export class LLMService {
         // tool_call message. This preserves the upstream cache prefix —
         // re-writing an earlier message would shift the prefix by N bytes
         // and bust the cache for every subsequent round.
+        // v3.0.5: execute tools with the shared ToolContext (confirm/signal/cwd)
+        // and collect index-aligned results so consumers (TUI, headless --json)
+        // can render per-tool outcomes.
+        const callResults: ToolCallResult[] = [];
         for (const toolCall of detectedToolCalls) {
           const tool = this.tools.get(toolCall.function.name);
 
@@ -211,12 +248,13 @@ export class LLMService {
               tool_call_id: toolCall.id,
               name: toolCall.function.name,
             });
+            callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
             continue;
           }
 
           try {
             const params = JSON.parse(toolCall.function.arguments || '{}');
-            const result = await tool.execute(params);
+            const result = await tool.execute(params, this.toolCtx);
             const output = result.success ? (result.output || JSON.stringify(result.data)) : (result.error || 'Tool failed');
 
             currentMessages.push({
@@ -225,6 +263,8 @@ export class LLMService {
               tool_call_id: toolCall.id,
               name: toolCall.function.name,
             });
+
+            callResults.push({ name: toolCall.function.name, ok: result.success, output });
 
             if (!result.success) {
               // Soft failure: tool returned success=false. Same repair pattern.
@@ -241,6 +281,7 @@ export class LLMService {
               tool_call_id: toolCall.id,
               name: toolCall.function.name,
             });
+            callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
             // Hard failure: tool.execute threw. Repair message so the model
             // can see the failure next round and adjust (e.g. fix a path
             // typo, retry without the optional arg).
@@ -251,10 +292,9 @@ export class LLMService {
           }
         }
 
-        // Emit one tool_calls chunk for this iteration. TUI renders this as a
-        // "tool invoked" entry. Per-tool outputs are summarized on the next
-        // assistant turn.
-        yield { type: 'tool_calls', toolCalls: detectedToolCalls };
+        // Emit one tool_calls chunk for this iteration, with per-tool results
+        // attached (index-aligned). TUI / headless render outcomes from here.
+        yield { type: 'tool_calls', toolCalls: detectedToolCalls, results: callResults };
         continue;
       }
 

@@ -46,9 +46,14 @@ export function useChat(app: App) {
   const processingRef = useRef(false);
   const queuedRef = useRef<string | null>(null);
   const abortRef = useRef(false);
+  // v3.0.5: real AbortController — cancel now aborts the provider fetch
+  // instead of only stopping the render loop while tokens keep generating.
+  const abortCtrlRef = useRef<AbortController | null>(null);
 
   const processStream = async (input: string) => {
     abortRef.current = false;
+    const ctrl = new AbortController();
+    abortCtrlRef.current = ctrl;
     setState(prev => ({
       ...prev,
       messages: [...prev.messages, { role: 'user', content: input }],
@@ -60,7 +65,7 @@ export function useChat(app: App) {
 
     app.session.addMessage('user', input);
 
-    const stream = app.streamResponse();
+    const stream = app.streamResponse(undefined, { signal: ctrl.signal });
     let fullContent = '';
     let currentToolCalls: ToolCallData[] = [];
     // Latest usage from this round; surfaced via state.lastUsage.
@@ -108,18 +113,19 @@ export function useChat(app: App) {
           case 'tool_calls':
             if (chunk.toolCalls && chunk.toolCalls.length > 0) {
               // Replace rather than append — LLMService emits one combined
-              // tool_calls chunk per iteration. This is the dispatch plan.
-              currentToolCalls = chunk.toolCalls.map(tc => ({
-                name: tc.function.name,
-                args: tc.function.arguments,
-                // Results are appended by the *next* text chunk via the
-                // `[tool: name → result]` suffix we add on persistence. The
-                // streaming ToolCall panel below renders a "running" state
-                // until the next iteration's tool_calls chunk comes back
-                // with `result` (we look up by name).
-                result: undefined,
-                isError: false,
-              }));
+              // tool_calls chunk per iteration.
+              // v3.0.5: the chunk now carries index-aligned results, so the
+              // ToolCall panel shows the actual output instead of the
+              // "(see tool result above)" placeholder it used to print.
+              currentToolCalls = chunk.toolCalls.map((tc, i) => {
+                const r = chunk.results?.[i];
+                return {
+                  name: tc.function.name,
+                  args: tc.function.arguments,
+                  result: r ? (r.output.length > 400 ? r.output.slice(0, 400) + '...' : r.output) : undefined,
+                  isError: r ? !r.ok : false,
+                };
+              });
               setState(prev => ({
                 ...prev,
                 isThinking: false,
@@ -187,7 +193,7 @@ export function useChat(app: App) {
       // available in our local streaming state.
       const toolSummary = currentToolCalls.length > 0
         ? '\n\n' + currentToolCalls.map((tc) => {
-            const r = tc.result !== undefined ? tc.result : '(see tool result above)';
+            const r = tc.result !== undefined ? tc.result : '(no output captured)';
             const short = r.length > 200 ? r.slice(0, 197) + '...' : r;
             return `[tool: ${tc.name} → ${short}]`;
           }).join('\n')
@@ -211,7 +217,12 @@ export function useChat(app: App) {
         lastUsage,
       }));
 
-      app.session.truncate();
+      // v3.0.5: persist the session after each completed round (was:
+      // `app.session.truncate()` every round — a silent rewrite that
+      // destroyed the cache prefix once history crossed 50 entries; the
+      // SessionManager now compacts itself at the threshold and /resume
+      // needs the on-disk history to be current).
+      app.session.persist();
     } catch (error: any) {
       if (abortRef.current) {
         setState(prev => ({
@@ -279,9 +290,19 @@ export function useChat(app: App) {
 
   const cancel = useCallback(() => {
     abortRef.current = true;
+    // v3.0.5: abort the actual HTTP request, not just the render loop.
+    abortCtrlRef.current?.abort();
     queuedRef.current = null;
     setState(prev => ({ ...prev, queuedMessage: null, isThinking: false }));
   }, []);
 
-  return { ...state, sendMessage, cancel };
+  /**
+   * v3.0.5: /resume hydration — put a restored conversation into the chat
+   * list so the user sees the loaded history instead of an empty screen.
+   */
+  const hydrateMessages = useCallback((msgs: MessageData[]) => {
+    setState(prev => ({ ...prev, messages: msgs }));
+  }, []);
+
+  return { ...state, sendMessage, cancel, hydrateMessages };
 }

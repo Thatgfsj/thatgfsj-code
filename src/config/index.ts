@@ -107,6 +107,10 @@ export class ConfigManager {
 
   /**
    * Get AIConfig for LLM providers
+   *
+   * v3.0.5: the cache policy is now forwarded. Previously getAIConfig
+   * dropped it, so LLMService.fromConfig always fell back to defaults and
+   * the user's cache.enabled / cache.ttl config never reached the wire.
    */
   getAIConfig(): AIConfig {
     return {
@@ -116,6 +120,7 @@ export class ConfigManager {
       maxTokens: this.config.maxTokens,
       baseUrl: this.config.baseUrl,
       provider: this.config.provider,
+      cache: this.config.cache,
     };
   }
 

@@ -9,7 +9,7 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-// Dangerous command patterns - blocked immediately
+// Dangerous command patterns - blocked immediately, regardless of mode
 const DANGEROUS_PATTERNS = [
   /^rm\s+-rf\s+\//i,
   /^del\s+\/f\s+\/s\s+\/q/i,
@@ -25,22 +25,6 @@ const DANGEROUS_PATTERNS = [
   /^wget\s+.*\|.*sh/i,
   /^eval\s+/i,
   /base64\s+-d\s+.*\|/i,
-];
-
-// Commands that need user confirmation
-const CONFIRM_REQUIRED = [
-  'rm -rf',
-  'rmdir',
-  'del /s /q',
-  'format',
-  'mkfs',
-  'dd',
-  'shutdown',
-  'reboot',
-  'pkill',
-  'killall',
-  'git push --force',
-  'git push -f',
 ];
 
 export class ShellTool implements Tool {
@@ -77,14 +61,6 @@ export class ShellTool implements Tool {
     return DANGEROUS_PATTERNS.some(pattern => pattern.test(command.trim()));
   }
 
-  /**
-   * Check if command needs user confirmation
-   */
-  private needsConfirmation(command: string): boolean {
-    const lower = command.toLowerCase();
-    return CONFIRM_REQUIRED.some(cmd => lower.includes(cmd.toLowerCase()));
-  }
-
   async execute(params: Record<string, any>, ctx?: ToolContext): Promise<ToolResult> {
     const { command, cwd, timeout = 30 } = params;
 
@@ -103,14 +79,18 @@ export class ShellTool implements Tool {
       return { success: false, error: 'Command too long (max 10000 characters)' };
     }
 
-    // Ask for confirmation on risky commands
-    if (ctx?.confirmAction && this.needsConfirmation(trimmed)) {
-      const confirmed = await ctx.confirmAction(
-        `⚠️  Confirm command:\n  ${command}\n\n[y] Yes  [n] No`
-      );
+    // v3.0.5: ask for EVERY shell execution. The old allow-list only covered
+    // a handful of patterns (anchored, so trivially bypassed) and the
+    // confirmation callback was never wired up anyway. App.requestConfirmation
+    // owns the decision: 'accept' mode (--yolo) auto-allows, 'ask' shows the
+    // prompt, headless denies. No channel -> fail closed.
+    if (ctx?.confirmAction) {
+      const confirmed = await ctx.confirmAction(`执行命令:\n  ${trimmed}`);
       if (!confirmed) {
         return { success: false, error: 'Command cancelled by user' };
       }
+    } else {
+      return { success: false, error: 'Shell execution requires confirmation, but no confirmation channel is available (headless? add --yolo)' };
     }
 
     try {

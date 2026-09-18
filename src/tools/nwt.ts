@@ -162,11 +162,18 @@ DO NOT log:
     }
 
     // Get next ID
+    // v3.0.5: was `existing.length + 1`, which reuses IDs after an
+    // archive/compact shrinks the events dir — silently OVERWRITING older
+    // events. Derive the ID from the highest existing number instead.
     const eventsDir = join(nwtDir, EVENTS_DIR);
     const existing = existsSync(eventsDir)
       ? readdirSync(eventsDir).filter(f => f.endsWith('.json'))
       : [];
-    const nextId = (existing.length + 1).toString().padStart(6, '0');
+    const maxId = existing.reduce((max, f) => {
+      const n = parseInt(f.replace('.json', ''), 10);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, 0);
+    const nextId = (maxId + 1).toString().padStart(6, '0');
 
     // Get parent (last event)
     const parent = existing.length > 0
