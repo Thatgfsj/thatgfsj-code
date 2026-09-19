@@ -263,6 +263,27 @@ export function useChat(app: App) {
         emit(chalk.hex(theme.textFaint)(`  · ${formatTokens(turnCompletionTokens)}t\n`));
       }
 
+      // v3.0.16: per-round session stats line (replaces the StatusBar in
+      // chat mode — a live StatusBar re-stamps into the scrollback on
+      // every frame; a printed line is permanent and scroll-safe).
+      // Defensive: missing app facilities degrade to zeros, never throw.
+      let stats: any = { promptTokens: 0, completionTokens: 0 };
+      let win = 128000;
+      let snap: any = { totalInputTokens: 0, estimatedSavingsCNY: 0 };
+      try {
+        stats = (app as any).sessionStats ?? stats;
+        win = (typeof (app as any).getContextWindow === 'function' ? (app as any).getContextWindow() : win) || win;
+        if (typeof (app as any).cacheStats?.snapshot === 'function') snap = (app as any).cacheStats.snapshot();
+      } catch { /* keep defaults */ }
+      const pct = stats.promptTokens > 0 && win > 0
+        ? Math.min(999, Math.round((stats.promptTokens / win) * 100))
+        : 0;
+      emit(chalk.gray(
+        `  ctx ${formatTokens(stats.promptTokens)}/${formatTokens(win)} (${pct}%)` +
+        ` · ↑${formatTokens(snap.totalInputTokens ?? 0)} ↓${formatTokens(stats.completionTokens ?? 0)}` +
+        ` · 节省 ¥${Number(snap.estimatedSavingsCNY ?? 0).toFixed(2)}\n`,
+      ));
+
       // v3.0.16: the assistant text itself is ALREADY in the scrollback
       // (appended live above the frame) — nothing is added to `messages`
       // here. Only notices/errors land in the React display list.

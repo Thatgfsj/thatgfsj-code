@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Box, Text, useStdout } from 'ink';
+import chalk from 'chalk';
 import { Header } from './components/Header.js';
 import { ChatList } from './components/ChatList.js';
 import { Thinking } from './components/Thinking.js';
@@ -224,6 +225,25 @@ export function TuiApp({ app }: Props) {
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
   const cfg = app.config.get();
+
+  // v3.0.16: the Header/StatusBar must NOT live in the re-rendered frame
+  // while streaming — the append-only writer stamps them into the
+  // scrollback on every chunk (user report: header fragments interleaved
+  // mid-sentence). The header is printed ONCE when the first message
+  // leaves the splash screen; per-round stats are written as a single
+  // summary line after each round (see useChat).
+  const headerWrittenRef = useRef(false);
+  useEffect(() => {
+    if (!splashMode && !headerWrittenRef.current) {
+      headerWrittenRef.current = true;
+      stdout.write(
+        chalk.hex(theme.accent)('◆ ') +
+        chalk.bold('THATGFSJ') +
+        chalk.gray(` v${getVersion()}\n`) +
+        chalk.gray('─'.repeat(Math.max(20, terminalWidth - 2)) + '\n'),
+      );
+    }
+  }, [splashMode, stdout, terminalWidth]);
   // v3.0.11: chat mode input spans the full terminal width (opencode
   // session view); splash keeps the centered fixed-width block.
   const inputArea = confirmReq ? (
@@ -292,12 +312,6 @@ export function TuiApp({ app }: Props) {
         </>
       ) : (
         <>
-          <Header
-            cacheHitRate={cacheSnapshot.hitRate > 0 ? cacheSnapshot.hitRate : null}
-            cacheSavingsCNY={cacheSnapshot.estimatedSavingsCNY}
-            cacheTtl={resolvedTtl ?? configTtl ?? null}
-            width={terminalWidth}
-          />
           <ChatList
             messages={allMessages}
             width={terminalWidth - 4}
@@ -312,25 +326,26 @@ export function TuiApp({ app }: Props) {
             </Box>
           )}
           {inputArea}
+          {/* v3.0.16: StatusBar/version live only in the splash branch —
+              during chat they would be re-stamped into the scrollback by
+              the append-only writer on every frame. Chat prints a one-line
+              stats summary after each round instead (useChat). */}
         </>
       )}
-      <StatusBar
-        messageCount={allMessages.length}
-        skills={activeSkills}
-        provider={cfg.provider}
-        model={cfg.model}
-        stats={{
-          contextTokens: app.sessionStats.promptTokens,
-          contextWindow: app.getContextWindow(),
-          inTokens: cacheSnapshot.totalInputTokens,
-          outTokens: app.sessionStats.completionTokens,
-          savingsCNY: cacheSnapshot.estimatedSavingsCNY,
-        }}
-      />
-      <Box justifyContent="space-between" width="100%">
-        <Text color={theme.textFaint}>~</Text>
-        <Text color={theme.textFaint}>v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
-      </Box>
+      {splashMode && (
+        <StatusBar
+          messageCount={allMessages.length}
+          skills={activeSkills}
+          provider={cfg.provider}
+          model={cfg.model}
+        />
+      )}
+      {splashMode && (
+        <Box justifyContent="space-between" width="100%">
+          <Text color={theme.textFaint}>~</Text>
+          <Text color={theme.textFaint}>v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
+        </Box>
+      )}
     </Box>
   );
 }

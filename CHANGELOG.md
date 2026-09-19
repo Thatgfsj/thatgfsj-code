@@ -4,6 +4,13 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.16] - 2026-09-19  - 修复流式输出与实时帧互相盖章
+
+### Fixed
+
+- **流式文本与 Header/StatusBar 互相穿插**（3.0.15 回归）：追加式写入与实时帧混排时，帧内的 Header/StatusBar 每次重绘都被盖进滚动缓冲，用户看到标题碎片穿插在回复文字之间。聊天模式下 Header 只在进入时打印一次，状态栏改为每轮结束打印一行统计摘要（ctx 占比/输入/输出/节省），实时帧只保留 spinner+输入框（恒定行数）。
+- 首屏 splash 保留状态栏与版本行（无流式写入，安全）。
+
 ## [3.0.15] - 2026-09-19  - 滚动修复（追加式渲染）+ 工具执行预发射 + /browser
 
 ### Fixed
