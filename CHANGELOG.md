@@ -4,6 +4,13 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.12] - 2026-09-19  - 首屏品牌修正
+
+### Changed
+
+- 首屏大 logo 由 GFCODE 改为 THATGFSJ（ANSI Shadow 字形，THAT 暗 / GFSJ 亮双色调，67 列宽）。
+- 终端窗口标题定为 Thatgfsj（区分于应用内 THATGFSJ 品牌头）。
+
 ## [3.0.11] - 2026-09-19  - 品牌统一 + 聊天输入框全宽
 
 ### Changed
