@@ -50,7 +50,7 @@ export const Header = React.memo(function Header({ cacheHitRate, cacheSavingsCNY
       <Box justifyContent="space-between" width="100%">
         <Box>
           <Text color={theme.accent} bold>◆ </Text>
-          <Text color={theme.text} bold>gfcode</Text>
+          <Text color={theme.text} bold>THATGFSJ</Text>
           <Text color={theme.textDim}> v{getVersion()}</Text>
         </Box>
         <Box>

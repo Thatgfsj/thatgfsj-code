@@ -14,6 +14,12 @@ interface Props {
   model?: string;
   thinking?: 'off' | 'low' | 'medium' | 'high';
   width?: number;
+  /**
+   * v3.0.11: chat mode spans the full terminal width with split hints
+   * (opencode session view). Splash mode stays a fixed-width centered
+   * block with right-aligned hints.
+   */
+  fullWidth?: boolean;
 }
 
 /**
@@ -22,7 +28,7 @@ interface Props {
  * thinking) under the entry line, and keybinding hints below the box.
  * Command completion still pops up above.
  */
-export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provider, model, thinking = 'off', width }: Props) {
+export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provider, model, thinking = 'off', width, fullWidth }: Props) {
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
@@ -149,7 +155,7 @@ export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provid
         paddingLeft={1}
         paddingRight={1}
         flexDirection="column"
-        width={width ? Math.min(width, 64) : '100%'}
+        width={fullWidth ? '100%' : (width ?? 64)}
       >
         <Box>
           <Text>{value ? value : <Text color={theme.textFaint}>随便问点什么…（"修一下 TODO" / /help 看命令）</Text>}</Text>
@@ -168,10 +174,14 @@ export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provid
           )}
         </Box>
       </Box>
-      <Box justifyContent="flex-end" width={width ? Math.min(width, 64) : '100%'} paddingRight={0}>
-        <Text color={theme.textFaint}>
-          enter 发送 · /help 命令 · /models 模型 · ctrl+c 退出
-        </Text>
+      {/* v3.0.11: chat mode spans full width with split hints (opencode);
+          splash mode keeps hints right-aligned under the centered box */}
+      <Box
+        justifyContent={fullWidth ? 'space-between' : 'flex-end'}
+        width={fullWidth ? '100%' : (width ?? 64)}
+      >
+        <Text color={theme.textFaint}>enter 发送 · esc 取消</Text>
+        <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
       </Box>
     </Box>
   );

@@ -4,6 +4,15 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.11] - 2026-09-19  - 品牌统一 + 聊天输入框全宽
+
+### Changed
+
+- 应用内头部品牌改为 THATGFSJ（与终端窗口标题一致，此前一处 gfcode 一处 THATGFSJ 口径混乱）。
+- 聊天模式输入框占满终端全宽（此前限宽 100 列，右侧大片空白），快捷键提示行学
+  opencode 左右分列（左：enter 发送/esc 取消，右：/help、/models、ctrl+c）。
+- 首屏 splash 输入框保持居中定宽，提示行右对齐到输入框宽度。
+
 ## [3.0.10] - 2026-09-19  - 黑盒测试修复：非 TTY 环境友好拒绝
 
 ### Fixed

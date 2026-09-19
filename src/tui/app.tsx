@@ -195,13 +195,13 @@ export function TuiApp({ app }: Props) {
   const allMessages = [...systemMessages, ...messages];
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
-  const inputWidth = splashMode ? Math.min(terminalWidth - 4, 64) : Math.min(terminalWidth - 2, 100);
   const cfg = app.config.get();
-
+  // v3.0.11: chat mode input spans the full terminal width (opencode
+  // session view); splash keeps the centered fixed-width block.
   const inputArea = confirmReq ? (
     <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
   ) : viewMode === 'model_settings' ? (
-    <ModelSettings app={app} onClose={() => setViewMode('chat')} width={inputWidth} />
+    <ModelSettings app={app} onClose={() => setViewMode('chat')} width={splashMode ? Math.min(terminalWidth - 4, 64) : terminalWidth - 2} />
   ) : viewMode === 'model_select' ? (
     <ModelSelector
       currentModel={cfg.model}
@@ -234,7 +234,8 @@ export function TuiApp({ app }: Props) {
       provider={cfg.provider}
       model={cfg.model}
       thinking={thinking}
-      width={inputWidth}
+      fullWidth={!splashMode}
+      width={splashMode ? Math.min(terminalWidth - 4, 64) : undefined}
     />
   );
 

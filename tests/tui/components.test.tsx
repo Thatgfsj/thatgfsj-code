@@ -17,10 +17,10 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 describe('TUI components (v3.0.6 opencode-style render)', () => {
-  it('Header shows brand + version from single source', () => {
+  it('Header shows THATGFSJ brand + version from single source', () => {
     const { lastFrame } = render(<Header width={80} />);
     const frame = lastFrame() || '';
-    expect(frame).toContain('gfcode');
+    expect(frame).toContain('THATGFSJ');
     // version must come from package.json (single source), never hardcoded
     expect(frame).toContain(`v${getVersion()}`);
     expect(frame).toContain('─');
