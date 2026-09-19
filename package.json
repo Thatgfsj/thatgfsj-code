@@ -1,12 +1,13 @@
 {
   "name": "thatgfsj-code",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Thatgfsj Code - AI Coding Assistant with Reasonix-style prompt caching",
   "main": "dist/cmd/index.js",
   "type": "module",
   "bin": {
     "thatgfsj": "./dist/cmd/index.js",
-    "gfcode": "./dist/cmd/index.js"
+    "gfcode": "./dist/cmd/index.js",
+    "gfcgfc": "./dist/cmd/index.js"
   },
   "files": [
     "dist"
@@ -43,13 +44,13 @@
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^11.1.0",
-    "ink": "^7.1.0",
-    "ink-select-input": "^6.2.0",
-    "ink-text-input": "^6.0.0",
-    "marked": "^15.0.12",
-    "marked-terminal": "^7.3.0",
+    "ink": "7.1.0",
+    "ink-select-input": "6.2.0",
+    "ink-text-input": "6.0.0",
+    "marked": "15.0.12",
+    "marked-terminal": "7.3.0",
     "playwright-core": "^1.63.0",
-    "react": "^19.2.7",
+    "react": "19.2.7",
     "undici": "^7.29.1"
   },
   "devDependencies": {
