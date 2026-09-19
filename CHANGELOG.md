@@ -4,6 +4,15 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.10] - 2026-09-19  - 黑盒测试修复：非 TTY 环境友好拒绝
+
+### Fixed
+
+- **管道环境启动 TUI 崩溃**（黑盒测试发现）：`gfcode`（无参数）在非 TTY 的
+  stdin（脚本/CI 管道）下，Ink 的 useInput 需要 raw mode 而直接抛出堆栈。
+  现在检测后给出友好提示"需要交互式终端（TTY），脚本化调用请用 --json"
+  并以退出码 1 退出。
+
 ## [3.0.9] - 2026-09-19  - 全屏修复：消息视口化 + 用户报告问题
 
 > 由用户实测反馈驱动：3.0.8 全屏模式下回复"闪一下就消失"、窗口放大布局不变、

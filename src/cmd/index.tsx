@@ -118,6 +118,14 @@ program
       }
 
       if (!prompt || options.interactive) {
+        // v3.0.9 fix (black-box finding): interactive TUI requires a TTY —
+        // Ink's useInput needs raw mode and crashes with a stack trace on
+        // piped stdin. Refuse gracefully; scripting should use --json.
+        if (!process.stdin.isTTY && !process.env.GFCODE_FORCE_TUI) {
+          console.error(chalk.yellow('\n  gfcode 需要交互式终端（TTY）才能启动 TUI。'));
+          console.error(chalk.gray('  脚本化调用请使用: gfcode "任务" --json\n'));
+          process.exit(1);
+        }
         // Interactive mode - Ink TUI, full-screen via the alternate screen
         // buffer (opencode-style: owns the whole viewport, terminal is
         // restored on exit). Ink v7 has no fullscreen option, so we drive
