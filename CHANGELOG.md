@@ -4,6 +4,13 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.17] - 2026-09-19  - 模型设置对话框渲染修复
+
+### Fixed
+
+- **分隔线折行断成两截**（用户截图）：分隔线长度正好等于内容区宽度时会被终端的延迟换行列顶断（出现『── ──』碎片）。现缩短 2 列安全边距并强制截断，永不折行。
+- **对话框底部被裁切**：/models 全屏覆盖层显式使用列布局居中，对话框不再溢出屏幕。
+
 ## [3.0.16] - 2026-09-19  - 修复流式输出与实时帧互相盖章
 
 ### Fixed

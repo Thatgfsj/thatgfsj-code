@@ -291,7 +291,7 @@ export function TuiApp({ app }: Props) {
   // it (opencode centers horizontally + offsets vertically from the top).
   if (viewMode === 'model_settings') {
     return (
-      <Box height={terminalRows} width={terminalWidth} justifyContent="center" alignItems="center">
+      <Box flexDirection="column" height={terminalRows} width={terminalWidth} justifyContent="center" alignItems="center">
         <ModelSettings app={app} onClose={() => setViewMode('chat')} width={Math.min(terminalWidth - 2, 72)} />
       </Box>
     );

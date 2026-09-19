@@ -192,7 +192,7 @@ describe('ModelSettings dialog (v3.0.15 opencode-style centered modal)', () => {
     expect(lines.length).toBe(9);
   });
 
-  it('separator spans exactly the content width (dialogWidth-4), never two pieces', () => {
+  it('separator stays single-piece with a safety margin (dialogWidth-6)', () => {
     const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} />);
     const lines = frameLines(lastFrame() || '');
     // inner rules sit between the │ borders; the ╭─╮ / ╰─╯ box border lines
@@ -201,7 +201,7 @@ describe('ModelSettings dialog (v3.0.15 opencode-style centered modal)', () => {
     expect(rules.length).toBe(2);
     for (const r of rules) {
       const run = r.match(/─+/)![0];
-      expect(run.length).toBe(60); // 64 - border(2) - paddingX(2) = one piece
+      expect(run.length).toBe(58); // 64 - border(2) - padding(2) - safety(2) = one piece, never wraps
       expect(stringWidth(r)).toBeLessThanOrEqual(64);
     }
   });

@@ -181,10 +181,13 @@ export function ModelSettings({ app, onClose, width }: Props) {
 
   // Dialog geometry. Content width = dialogWidth - border(2) - paddingX(2).
   // Every rendered line is pre-truncated to this budget so the frame never
-  // wraps (the v3.0.14 separator/keys overflow bug).
+  // wraps (the v3.0.14 separator/keys overflow bug). Rules take 2 extra
+  // columns of margin — an exactly-full-width Text can still wrap at the
+  // terminal's deferred-EOL column (v3.0.16 user report: rule broke into
+  // "── ──").
   const dialogWidth = Math.max(24, Math.min(width || 72, 72));
   const contentW = dialogWidth - 4;
-  const rule = '─'.repeat(contentW);
+  const rule = '─'.repeat(Math.max(4, contentW - 2));
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} width={dialogWidth}>
@@ -193,7 +196,7 @@ export function ModelSettings({ app, onClose, width }: Props) {
         <Text color={theme.accent} bold>◆ 模型设置</Text>
         <Text color={theme.textFaint}>esc 关闭</Text>
       </Box>
-      <Text color={theme.border}>{rule}</Text>
+      <Text color={theme.border} wrap="truncate-end">{truncateToWidth(rule, contentW)}</Text>
 
       {models.map((m, i) => {
         const st = settings[m] || {};
@@ -224,7 +227,7 @@ export function ModelSettings({ app, onClose, width }: Props) {
         );
       })}
 
-      <Text color={theme.border}>{rule}</Text>
+      <Text color={theme.border} wrap="truncate-end">{truncateToWidth(rule, contentW)}</Text>
 
       {submode ? (
         <Box flexDirection="column" width={contentW}>
