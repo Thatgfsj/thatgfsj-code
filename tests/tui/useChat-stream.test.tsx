@@ -140,6 +140,49 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     }
   });
 
+  it('flushes streamed text at word boundaries — never splits a word across lines', async () => {
+    const captured = { persisted: [] as string[], sessionMsgs: [] as Array<{ role: string; content: unknown }> };
+    const snapshots = { messages: [] as MessageData[][], usage: [] as Array<Usage | null> };
+    // 'alpha' sits pending >FLUSH_MS (200ms) with no whitespace yet — the
+    // flush must HOLD it back instead of printing a mid-word line, then
+    // join it with the next burst. Every emitted chunk must end at a word
+    // boundary (whitespace) except the final flush at round end.
+    const chunks: StreamChunk[] = [
+      { type: 'text', content: 'say alpha' },
+      { type: 'text', content: 'betomega' },
+      { type: 'text', content: ' end' },
+      { type: 'usage', usage: USAGE },
+    ];
+    const app = {
+      ...fakeApp(chunks, captured),
+      async *streamResponse(): AsyncGenerator<StreamChunk, { content: string; role: 'assistant' }> {
+        yield chunks[0];
+        await new Promise(r => setTimeout(r, 320)); // mid-stream flush fires here
+        yield chunks[1];
+        yield chunks[2];
+        await new Promise(r => setTimeout(r, 30));
+        return { content: '', role: 'assistant' };
+      },
+    } as unknown as App;
+    const { frames } = render(<Harness app={app} snapshots={snapshots} />);
+    await vi.waitFor(() => {
+      expect(captured.persisted).toHaveLength(1);
+    });
+    await new Promise(r => setTimeout(r, 150));
+
+    const all = frames.join('');
+    expect(all).toContain('alphabetomega'); // held-back word rejoined, unsplit
+    expect(all).toContain('end');
+    // No emitted line may END mid-word: the only plain text lines are
+    // 'say ' (flushed before the pause) and 'alphabetomega end' (final).
+    const textLines = all.split('\n')
+      .map(l => l.replace(/\s+/g, ' ').trim())
+      .filter(l => l.includes('alpha') || l.includes('say'));
+    for (const line of textLines) {
+      expect(line === 'say' || line.startsWith('alphabetomega end') || line === 'say alphabetomega end').toBe(true);
+    }
+  });
+
   it('abort keeps streamed text on stdout, skips persistence, adds only a notice', async () => {
     const captured = { persisted: [] as string[], sessionMsgs: [] as Array<{ role: string; content: unknown }> };
     const snapshots = { messages: [] as MessageData[][], usage: [] as Array<Usage | null> };

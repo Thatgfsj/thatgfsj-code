@@ -92,11 +92,29 @@ export function useChat(app: App) {
     // ── streamed-text batching ──
     let pendingText = '';
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    const flushText = () => {
+    /**
+     * final=true flushes everything (round end). Otherwise the trailing
+     * partial word stays buffered: every Static item prints on its own
+     * line, so flushing at an arbitrary character would split words
+     * across lines ("Thatg / fsj" — user-visible mid-word breaks).
+     */
+    const flushText = (final = false) => {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (!pendingText) return;
-      const chunk = pendingText;
-      pendingText = '';
+      let chunk = pendingText;
+      if (!final && !/\s$/.test(chunk)) {
+        const cut = Math.max(chunk.lastIndexOf(' '), chunk.lastIndexOf('\n')) + 1;
+        if (cut > 0) {
+          pendingText = chunk.slice(cut);
+          chunk = chunk.slice(0, cut);
+        } else if (chunk.length < 500) {
+          return; // one long partial word — keep buffering
+        } else {
+          pendingText = '';
+        }
+      } else {
+        pendingText = '';
+      }
       commit({ content: chunk, plain: true });
     };
     const scheduleFlush = () => {
@@ -185,7 +203,7 @@ export function useChat(app: App) {
             break;
         }
       }
-      flushText();
+      flushText(true);
 
       // v2.2.4: never persist aborted/truncated assistant messages (the
       // [已中断] hallucination loop — see SessionManager.addMessageSafe).
@@ -201,25 +219,11 @@ export function useChat(app: App) {
         commitDim(`  · ${formatTokens(turnCompletionTokens)}t`);
       }
 
-      // v3.0.16: per-round session stats line (chat mode's replacement for
-      // the StatusBar — a live StatusBar re-stamps via frame redraws; a
-      // Static line is permanent). Defensive against stub apps in tests.
-      let stats: any = { promptTokens: 0, completionTokens: 0 };
-      let win = 128000;
-      let snap: any = { totalInputTokens: 0, estimatedSavingsCNY: 0 };
-      try {
-        stats = (app as any).sessionStats ?? stats;
-        win = (typeof (app as any).getContextWindow === 'function' ? (app as any).getContextWindow() : win) || win;
-        if (typeof (app as any).cacheStats?.snapshot === 'function') snap = (app as any).cacheStats.snapshot();
-      } catch { /* keep defaults */ }
-      const pct = stats.promptTokens > 0 && win > 0
-        ? Math.min(999, Math.round((stats.promptTokens / win) * 100))
-        : 0;
-      commitDim(
-        `  ctx ${formatTokens(stats.promptTokens)}/${formatTokens(win)} (${pct}%)` +
-        ` · ↑${formatTokens(snap.totalInputTokens ?? 0)} ↓${formatTokens(stats.completionTokens ?? 0)}` +
-        ` · 节省 ¥${Number(snap.estimatedSavingsCNY ?? 0).toFixed(2)}`,
-      );
+      // v3.2.1: the per-round stats chip (ctx … · ↑… ↓… · 节省 ¥…) is GONE —
+      // it printed once per round and never moved (the user called it
+      // 摆设), and the money line is not wanted. The right-side context
+      // panel now carries all of it LIVE (used/window, ↑ input, ↓ output,
+      // hit rate) with no cost estimate anywhere in the TUI.
 
       setState(prev => ({ ...prev, isThinking: false, lastUsage }));
 
@@ -235,7 +239,7 @@ export function useChat(app: App) {
       // Plan mode's approval dialog triggers from here.
       if (!wasAborted) app.onTurnComplete?.();
     } catch (error: any) {
-      flushText();
+      flushText(true);
       if (abortRef.current) {
         commit({ content: '[已中断]', plain: true });
         setState(prev => ({ ...prev, isThinking: false }));

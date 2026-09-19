@@ -15,6 +15,10 @@ interface Props {
   window: number;
   /** 0..1 rolling cache hit rate; null when no round has completed yet. */
   hitRate: number | null;
+  /** Cumulative input tokens across the session (↑). */
+  inTokens: number;
+  /** Cumulative output tokens across the session (↓). */
+  outTokens: number;
   /** Ordered categories; 「其他」 (remainder to `used`) is appended here. */
   categories: ContextCategory[];
   width?: number;
@@ -37,13 +41,13 @@ function fmtPct(ratio: number): string {
 }
 
 /**
- * v3.2.0: right-side context usage panel (opencode parity — the screenshot
- * the user asked for). Shows total occupancy against the model window, a
- * bar, a per-category share breakdown (share of USED, like opencode) and
- * the rolling cache hit rate. Pure display — all numbers are computed by
- * the caller (App fields + SystemPromptBuilder.estimateBreakdown).
+ * v3.2.1: right-side info panel (opencode parity — the screenshot the user
+ * asked for). Total occupancy against the model window, a bar, a
+ * share-of-used category breakdown, session ↑ input / ↓ output totals and
+ * the rolling cache hit rate. NO cost/money line (user explicitly removed
+ * it). Pure display — numbers are computed by the caller.
  */
-export function ContextPanel({ used, window: win, hitRate, categories, width = 38 }: Props) {
+export function ContextPanel({ used, window: win, hitRate, inTokens, outTokens, categories, width = 38 }: Props) {
   const total = Math.max(0, used);
   const sumKnown = categories.reduce((a, c) => a + Math.max(0, c.tokens), 0);
   const rows: ContextCategory[] = [
@@ -70,8 +74,16 @@ export function ContextPanel({ used, window: win, hitRate, categories, width = 3
           <Text color={theme.textDim}>{fmtPct(total > 0 ? c.tokens / total : 0)}</Text>
         </Box>
       ))}
-      <Box marginTop={1} borderTop={false}>
+      <Box marginTop={1}>
         <Text color={theme.border}>{'─'.repeat(width - 2)}</Text>
+      </Box>
+      <Box justifyContent="space-between">
+        <Text color={theme.textDim}>↑ 输入</Text>
+        <Text color={theme.textDim}>{fmtWan(inTokens)}</Text>
+      </Box>
+      <Box justifyContent="space-between">
+        <Text color={theme.textDim}>↓ 输出</Text>
+        <Text color={theme.textDim}>{fmtWan(outTokens)}</Text>
       </Box>
       <Box justifyContent="space-between">
         <Text color={theme.textDim}>平均缓存命中率</Text>

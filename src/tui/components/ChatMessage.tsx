@@ -54,7 +54,7 @@ function UserMessage({ content }: { content: string }) {
   );
 }
 
-function AssistantMessage({ content, toolCalls, mode, model, tokens }: { content: string; toolCalls?: ToolCallData[]; mode?: string; model?: string; tokens?: number }) {
+function AssistantMessage({ content, toolCalls, mode, model, tokens, width }: { content: string; toolCalls?: ToolCallData[]; mode?: string; model?: string; tokens?: number; width?: number }) {
   return (
     <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
       {toolCalls && toolCalls.map((tc, i) => (
@@ -66,14 +66,14 @@ function AssistantMessage({ content, toolCalls, mode, model, tokens }: { content
             ▪ {mode ?? 'Build'}{model ? ` · ${model}` : ''}
             {tokens ? ` · ${formatTokens(tokens)}t` : ''}
           </Text>
-          <Markdown content={content} />
+          <Markdown content={content} width={width} />
         </Box>
       )}
     </Box>
   );
 }
 
-export const ChatMessage = React.memo(function ChatMessage({ message, mode, model }: Props) {
+export const ChatMessage = React.memo(function ChatMessage({ message, mode, model, width }: Props) {
   if (message.role === 'user') {
     return <UserMessage content={message.content} />;
   }
@@ -85,7 +85,9 @@ export const ChatMessage = React.memo(function ChatMessage({ message, mode, mode
       </Box>
     );
   }
-  return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} tokens={message.tokens} />;
+  // v3.2.1: width flows down so the answer wraps at the WORKSPACE width,
+  // not marked-terminal's 80-column default.
+  return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} tokens={message.tokens} width={width} />;
 });
 
 export type { MessageData };

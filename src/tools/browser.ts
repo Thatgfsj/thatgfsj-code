@@ -25,6 +25,21 @@ const GOTO_TIMEOUT_MS = 25000;
 const MAX_PAGE_TEXT = 6000;
 const MAX_RESULTS = 10;
 
+/**
+ * v3.2.1: honor the shell's proxy env (HTTP(S)_PROXY / ALL_PROXY). The
+ * user's network often needs a proxy for github.com etc. — Chromium does
+ * NOT read those env vars by itself, which is why every external page
+ * timed out at 25s. Same precedence style as utils/net (https first).
+ */
+export function proxyFromEnv(): string | null {
+  const keys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'];
+  for (const k of keys) {
+    const v = process.env[k];
+    if (v && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 /** Result extractors per search engine — page-local selectors. */
 const ENGINES: Record<string, { url: (q: string) => string; results: () => { item: string; title: string; snippet: string } }> = {
   bing: {
@@ -151,7 +166,16 @@ export class BrowserTool implements Tool {
   }
 
   private async launch(): Promise<any> {
-    if (BrowserTool.browser) return BrowserTool.browser;
+    // v3.2.1: liveness check — a cached browser whose process died (crash,
+    // OOM killer, manual close) poisoned every later call. 给每次都打上服务:
+    // verify the pipe is connected, relaunch when it is not.
+    if (BrowserTool.browser) {
+      const alive = typeof BrowserTool.browser.isConnected === 'function'
+        ? BrowserTool.browser.isConnected()
+        : true;
+      if (alive) return BrowserTool.browser;
+      BrowserTool.browser = null;
+    }
     if (BrowserTool.launchError) throw new Error(BrowserTool.launchError);
 
     if (!BrowserTool.pw) {
@@ -167,7 +191,11 @@ export class BrowserTool implements Tool {
     // launched (their explicit preference). Chromium is installed via
     // `npx playwright install chromium` in the first-run setup.
     try {
-      BrowserTool.browser = await BrowserTool.pw.chromium.launch({ headless: true });
+      const proxy = proxyFromEnv();
+      BrowserTool.browser = await BrowserTool.pw.chromium.launch({
+        headless: true,
+        ...(proxy ? { proxy: { server: proxy } } : {}),
+      });
     } catch {
       BrowserTool.launchError =
         'Built-in Chromium (内置 Chromium) is not installed yet. Run `gfcode` once and choose ' +
@@ -182,6 +210,36 @@ export class BrowserTool implements Tool {
       });
     }
     return BrowserTool.browser;
+  }
+
+  /**
+   * v3.2.1: navigate with one retry on a BRAND-NEW page (and a relaunched
+   * browser when the old one died). First navigation after launch or on a
+   * flaky network can wedge the page; the retry gets a fresh service every
+   * time instead of surfacing a bare 25s timeout.
+   */
+  private async gotoWithRetry(browser: any, makePage: () => Promise<any>, url: string, signal: AbortSignal | undefined): Promise<{ page: any; closeOnAbort: (() => void) | undefined }> {
+    let page = await makePage();
+    let closeOnAbort = this.bindAbortToPage(signal, page);
+    try {
+      await page.goto(url, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+      return { page, closeOnAbort };
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      const stale = /Timeout .*exceeded|ECONNRESET|ECONNREFUSED|ERR_|Target closed|Session closed|Browser has been closed/i.test(msg);
+      if (!stale) throw err;
+      // Fresh service: same browser when alive, otherwise a full relaunch.
+      closeOnAbort?.();
+      await page.close().catch(() => {});
+      if (typeof browser.isConnected === 'function' && !browser.isConnected()) {
+        await this.dispose();
+        browser = await this.launch();
+      }
+      page = await makePage();
+      closeOnAbort = this.bindAbortToPage(signal, page);
+      await page.goto(url, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+      return { page, closeOnAbort };
+    }
   }
 
   /** Sentinel result for a cancelled call (ctx.signal aborted). */
@@ -209,10 +267,13 @@ export class BrowserTool implements Tool {
         if (!query) return { success: false, error: 'query is required for action=search' };
         const engine = ENGINES[String(params.engine || 'bing').toLowerCase()] ? String(params.engine || 'bing').toLowerCase() : 'bing';
         const browser = await this.launch();
-        const page = await browser.newPage();
-        const closeOnAbort = this.bindAbortToPage(ctx?.signal, page);
+        const { page, closeOnAbort } = await this.gotoWithRetry(
+          browser,
+          () => browser.newPage(),
+          ENGINES[engine].url(query),
+          ctx?.signal,
+        );
         try {
-          await page.goto(ENGINES[engine].url(query), { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
           await page.waitForSelector(ENGINES[engine].results().item, { timeout: 8000 }).catch(() => {});
           const results: Array<{ title: string; url: string; snippet: string }> = await page.evaluate(
             ({ item, title, snippet }: { item: string; title: string; snippet: string }) => {
@@ -251,10 +312,13 @@ export class BrowserTool implements Tool {
           return { success: false, error: 'blocked: 不允许访问内网/环回地址' };
         }
         const browser = await this.launch();
-        const page = await browser.newPage();
-        const closeOnAbort = this.bindAbortToPage(ctx?.signal, page);
+        const { page, closeOnAbort } = await this.gotoWithRetry(
+          browser,
+          () => browser.newPage(),
+          normalized,
+          ctx?.signal,
+        );
         try {
-          await page.goto(normalized, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(500);
           const text = await page.evaluate(() => {
             // Strip the obvious noise before reading text.

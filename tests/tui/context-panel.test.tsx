@@ -9,6 +9,7 @@ import { ContextPanel } from '../../src/tui/components/ContextPanel.js';
  * v3.2.0: the right-side 上下文容量 panel (opencode parity, user-requested
  * from a screenshot). Numbers mirror the screenshot exactly: 33k/200k used
  * with a 61.4/22/7.3/5.1/4.2 share split and a 99% cache hit rate.
+ * v3.2.1: live ↑ input / ↓ output rows (no money line — user removed it).
  */
 
 const CATEGORIES = [
@@ -26,7 +27,7 @@ function toFrame(ui: { lastFrame: () => string | undefined }): string {
 describe('ContextPanel', () => {
   it('renders title, 万-format totals, percentage and the breakdown', () => {
     const frame = toFrame(render(
-      <ContextPanel used={33000} window={200000} hitRate={0.99} categories={CATEGORIES} />
+      <ContextPanel used={33000} window={200000} hitRate={0.99} inTokens={351900} outTokens={493} categories={CATEGORIES} />
     ));
     expect(frame).toContain('上下文容量');
     expect(frame).toContain('3.3万/20万');
@@ -40,9 +41,21 @@ describe('ContextPanel', () => {
     expect(frame).toContain('99%');
   });
 
+  it('shows live ↑ input / ↓ output totals in 万 format', () => {
+    const frame = toFrame(render(
+      <ContextPanel used={33000} window={200000} hitRate={0.99} inTokens={351900} outTokens={493} categories={CATEGORIES} />
+    ));
+    expect(frame).toContain('↑ 输入');
+    expect(frame).toContain('35.2万');
+    expect(frame).toContain('↓ 输出');
+    expect(frame).toContain('493');
+    // Money must never appear (user explicitly removed it).
+    expect(frame).not.toContain('¥');
+  });
+
   it('shows an em dash for the cache rate before the first completed round', () => {
     const frame = toFrame(render(
-      <ContextPanel used={1000} window={128000} hitRate={null} categories={CATEGORIES} />
+      <ContextPanel used={1000} window={128000} hitRate={null} inTokens={0} outTokens={0} categories={CATEGORIES} />
     ));
     expect(frame).toContain('—');
     expect(frame).toContain('1000/12.8万');
@@ -50,7 +63,7 @@ describe('ContextPanel', () => {
 
   it('caps the bar at full when usage exceeds the window', () => {
     const frame = toFrame(render(
-      <ContextPanel used={250000} window={200000} hitRate={0.5} categories={[]} />
+      <ContextPanel used={250000} window={200000} hitRate={0.5} inTokens={0} outTokens={0} categories={[]} />
     ));
     expect(frame).toContain('25万/20万');
     expect(frame).toContain('100%');

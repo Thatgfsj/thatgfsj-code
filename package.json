@@ -1,6 +1,6 @@
 {
   "name": "thatgfsj-code",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Thatgfsj Code - AI Coding Assistant with Reasonix-style prompt caching",
   "main": "dist/cmd/index.js",
   "type": "module",

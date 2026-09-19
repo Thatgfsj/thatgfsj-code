@@ -4,6 +4,7 @@ import { Box, Text, useStdout } from 'ink';
 import chalk from 'chalk';
 import { Header } from './components/Header.js';
 import { ChatList } from './components/ChatList.js';
+import { ChatMessage } from './components/ChatMessage.js';
 import { Thinking } from './components/Thinking.js';
 import { UserInput } from './components/UserInput.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -91,6 +92,33 @@ export function TuiApp({ app }: Props) {
     setCacheSnapshot(app.cacheStats.snapshot());
     setResolvedTtl(app.resolvedTtl);
   }, [messages.length]);
+
+  // v3.2.1: 1s heartbeat so the right-hand info column (plan + context
+  // panel) updates in real time even when nothing else re-renders the
+  // frame — the user asked for 要让 agent 及时更新.
+  const [, setHeartbeat] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setHeartbeat(h => h + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // v3.2.1: conversation pager (翻页). scroll = messages hidden from the
+  // bottom; null = live tail. ↑/↓ on an EMPTY input drive it — which also
+  // gives the mouse wheel paging, since terminals deliver wheel events as
+  // ↑/↓ inside the alternate screen (that used to recall old inputs).
+  const [scroll, setScroll] = useState<number | null>(null);
+  const allMessagesRef = useRef<MessageData[]>([]);
+  const scrollBy = useCallback((d: number) => {
+    setScroll(prev => {
+      const next = (prev ?? 0) + d;
+      const max = Math.max(0, allMessagesRef.current.length - 1);
+      return next <= 0 ? null : Math.min(next, max);
+    });
+  }, []);
+  useEffect(() => {
+    // New output arrives (or /new clears) → snap back to the live tail.
+    setScroll(null);
+  }, [allMessagesRef.current.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addMsg = useCallback((content: string) => {
     setSystemMessages(prev => [...prev, { role: 'assistant', content }]);
@@ -321,23 +349,28 @@ export function TuiApp({ app }: Props) {
   }, [handleCommand, sendMessage, app, viewMode, addMsg, hydrateMessages, clearMessages]);
 
   const allMessages = [...systemMessages, ...messages];
+  allMessagesRef.current = allMessages;
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
   const cfg = app.config.get();
 
-  // ── v3.2.0: right-side context panel (opencode 上下文容量 parity) ──
-  // estimateBreakdown reads instruction files + NWT history from disk, so it
-  // is memoized per message count / mode rather than run on every frame.
-  // Numbers mirror the screenshot the user asked for: total vs window, a
-  // share-of-used breakdown and the rolling cache hit rate.
+  // ── v3.2.1: right-hand info column (opencode parity) — plan ABOVE the
+  // context panel, both live. Widths reserve room for the divider.
   const PANEL_WIDTH = 38;
-  const PANEL_RESERVE = PANEL_WIDTH + 2; // + gap
+  const PANEL_RESERVE = PANEL_WIDTH + 3; // divider + padding + gap
   const showContextPanel = terminalWidth >= 100;
+  const pagerRows = Math.max(3, terminalRows - 9);
+  const pagerMessages = scroll !== null
+    ? allMessages.slice(Math.max(0, allMessages.length - scroll - 12), allMessages.length - scroll)
+    : [];
   const contextBreakdown = useMemo(() => {
     try {
       const bd = app.prompts.estimateBreakdown();
       let msgTokens = 0;
       for (const m of app.session.getMessages()) {
+        // v3.2.1 fix: the session stores the SYSTEM message too — counting
+        // it here double-counted the prompt (消息 showed an inflated 45%).
+        if ((m as { role?: string }).role === 'system') continue;
         const c = (m as { content?: unknown }).content;
         msgTokens += estimateTokens(typeof c === 'string' ? c : JSON.stringify(c ?? '')) + 4;
       }
@@ -353,6 +386,8 @@ export function TuiApp({ app }: Props) {
         used={used}
         window={app.getContextWindow()}
         hitRate={cacheSnapshot.totalRequests > 0 ? cacheSnapshot.hitRate : null}
+        inTokens={cacheSnapshot.totalInputTokens}
+        outTokens={cacheSnapshot.totalOutputTokens}
         width={PANEL_WIDTH}
         categories={[
           { label: '系统工具', tokens: contextBreakdown.systemTools },
@@ -364,6 +399,7 @@ export function TuiApp({ app }: Props) {
       />
     );
   })() : null;
+  const chatWidth = terminalWidth - 4 - (contextPanel ? PANEL_RESERVE : 0);
 
   // v3.0.18: header is committed as a Static item by useChat (manual
   // stdout.write fought Ink's frame cursor and stamped header copies into
@@ -400,14 +436,16 @@ export function TuiApp({ app }: Props) {
   ) : (
     <UserInput
       onSubmit={onSubmit}
-      onCancel={cancel}
+      onCancel={() => { setScroll(null); cancel(); }}
       disabled={false}
       mode={app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}
       provider={cfg.provider}
       model={cfg.model}
       thinking={thinking}
       fullWidth={!splashMode}
-      width={splashMode ? Math.min(terminalWidth - 4 - (contextPanel ? PANEL_RESERVE : 0), 64) : undefined}
+      width={splashMode ? Math.min(terminalWidth - 4, 64) : undefined}
+      onEmptyUp={splashMode ? undefined : () => scrollBy(1)}
+      onEmptyDown={splashMode ? undefined : () => scrollBy(-1)}
     />
   );
 
@@ -448,17 +486,12 @@ export function TuiApp({ app }: Props) {
   }
 
   return (
-    <Box flexDirection="column" width={terminalWidth} paddingX={1} {...(splashMode ? { height: terminalRows } : {})}>
+    <Box flexDirection="column" width={terminalWidth} paddingX={1} height={terminalRows}>
       {splashMode ? (
         <>
           <Splash />
           {modeBadge}
-          {/* v3.2.0: input + context panel sit side by side (opencode
-              splash); the pair stays centered together. */}
-          <Box justifyContent="center" gap={2}>
-            {inputArea}
-            {contextPanel}
-          </Box>
+          <Box justifyContent="center">{inputArea}</Box>
           <Box justifyContent="center" paddingTop={1}>
             <Text color={theme.textFaint}>
               <Text color={theme.accent}>◆ Tip </Text>
@@ -476,37 +509,48 @@ export function TuiApp({ app }: Props) {
         </>
       ) : (
         <>
-          <ChatList
-            key={`list-${listEpoch}`}
-            messages={allMessages}
-            width={terminalWidth - 4}
-            mode="Build"
-            model={cfg.model}
-          />
-          {/* v3.2.0: the live bottom area becomes a two-column row — chat on
-              the left, the context panel pinned right (hidden on narrow
-              terminals). With no panel this degrades to the old layout. */}
-          <Box flexDirection="row" gap={2}>
-            <Box flexDirection="column" flexGrow={1} minWidth={0}>
-              {/* v3.0.20: live plan panel (Codex update_plan parity) — hidden
-                  when the model has no active plan. */}
-              <PlanPanel width={terminalWidth - 4 - (contextPanel ? PANEL_RESERVE : 0)} />
-              <Thinking active={isThinking} />
-              {queuedMessage && (
-                <Box paddingLeft={1}>
-                  <Text color={theme.warning}>📎 已排队: </Text>
-                  <Text color={theme.textDim}>{queuedMessage}</Text>
+          {/* v3.2.1 three-zone layout (user mockup): 工作区 (workspace,
+              left) + 信息展示区 (right column: plan ABOVE context, both
+              live) + 输入区域 (full-width input pinned to the very
+              bottom, below BOTH zones). */}
+          <Box flexDirection="row" flexGrow={1} minHeight={0}>
+            <Box flexGrow={1} minWidth={0}>
+              {scroll !== null ? (
+                <Box flexDirection="column" height={pagerRows} overflow="hidden" paddingLeft={1}>
+                  <Text color={theme.textFaint}>
+                    ── 翻页 {Math.min(scroll, Math.max(0, allMessages.length - 1))}/{Math.max(0, allMessages.length - 1)} · ↑ 更早 · ↓ 返回 · esc 退出 ──
+                  </Text>
+                  {pagerMessages.map((m, i) => (
+                    <ChatMessage key={`${i}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
+                  ))}
                 </Box>
+              ) : (
+                <ChatList
+                  key={`list-${listEpoch}`}
+                  messages={allMessages}
+                  width={chatWidth}
+                  mode="Build"
+                  model={cfg.model}
+                />
               )}
-              {modeBadge}
-              {inputArea}
             </Box>
-            {contextPanel}
+            {contextPanel && (
+              <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} paddingLeft={2}>
+                <PlanPanel width={PANEL_WIDTH} />
+                <Box marginTop={1}>{contextPanel}</Box>
+              </Box>
+            )}
           </Box>
-          {/* v3.0.16: StatusBar/version live only in the splash branch —
-              during chat they would be re-stamped into the scrollback by
-              the append-only writer on every frame. Chat prints a one-line
-              stats summary after each round instead (useChat). */}
+          {!contextPanel && <PlanPanel width={terminalWidth - 4} />}
+          <Thinking active={isThinking} />
+          {queuedMessage && (
+            <Box paddingLeft={1}>
+              <Text color={theme.warning}>📎 已排队: </Text>
+              <Text color={theme.textDim}>{queuedMessage}</Text>
+            </Box>
+          )}
+          {modeBadge}
+          {inputArea}
         </>
       )}
       {splashMode && (
