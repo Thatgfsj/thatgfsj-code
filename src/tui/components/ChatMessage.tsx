@@ -3,6 +3,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { Markdown } from './Markdown.js';
 import { ToolCall, type ToolCallData } from './ToolCall.js';
+import { theme } from '../theme.js';
 
 interface MessageData {
   role: 'user' | 'assistant' | 'tool';
@@ -15,12 +16,18 @@ interface Props {
   width?: number;
 }
 
+/**
+ * v3.0.6 (opencode-style): no "You"/"AI" headers, no boxes.
+ * user      → dim `❯` mark + plain text
+ * assistant → accent `⏺` bullet + markdown body, tool calls as
+ *             `⎿ tool(args)` continuation lines above the text
+ */
 function UserMessage({ content }: { content: string }) {
   return (
-    <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
-      <Text bold color="#06B6D4">You</Text>
-      <Box paddingLeft={2}>
-        <Text>{content}</Text>
+    <Box flexDirection="column" marginBottom={1}>
+      <Box>
+        <Text color={theme.userMark} bold>❯ </Text>
+        <Text color={theme.text}>{content}</Text>
       </Box>
     </Box>
   );
@@ -33,9 +40,9 @@ function AssistantMessage({ content, toolCalls }: { content: string; toolCalls?:
         <ToolCall key={i} tool={tc} />
       ))}
       {content && (
-        <Box flexDirection="column" paddingLeft={1}>
-          <Text bold color="#22D3EE">AI</Text>
-          <Box paddingLeft={2}>
+        <Box>
+          <Text color={theme.assistantMark}>⏺ </Text>
+          <Box flexDirection="column">
             <Markdown content={content} />
           </Box>
         </Box>

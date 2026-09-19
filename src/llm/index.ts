@@ -253,7 +253,34 @@ export class LLMService {
           }
 
           try {
-            const params = JSON.parse(toolCall.function.arguments || '{}');
+            const parsed = JSON.parse(toolCall.function.arguments || '{}');
+
+            // v3.0.5 fix (found in live testing): validate required params
+            // BEFORE executing. A missing `content` on file write used to
+            // silently create an EMPTY file and report success — the model
+            // got no signal to correct itself and re-issued the same broken
+            // call. Fail fast with a repair message instead.
+            const required = (tool.parameters || []).filter(p => p.required);
+            const missing = required
+              .filter(p => parsed?.[p.name] === undefined || parsed?.[p.name] === null || parsed?.[p.name] === '')
+              .map(p => p.name);
+            if (required.length > 0 && missing.length > 0) {
+              const errMsg = `[PARAM_ERROR] Missing required parameter(s): ${missing.join(', ')}. Retry the call with all required parameters filled.`;
+              currentMessages.push({
+                role: 'tool',
+                content: errMsg,
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+              });
+              currentMessages.push({
+                role: 'system',
+                content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" was called with missing required parameters (${missing.join(', ')}). Re-issue the call and include them.`,
+              });
+              callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
+              continue;
+            }
+
+            const params = parsed;
             const result = await tool.execute(params, this.toolCtx);
             const output = result.success ? (result.output || JSON.stringify(result.data)) : (result.error || 'Tool failed');
 

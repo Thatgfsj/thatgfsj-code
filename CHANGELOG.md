@@ -4,6 +4,30 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.6] - 2026-09-19  - opencode 风格 TUI 重设计
+
+### Changed
+
+- **TUI 视觉语言对齐 opencode**：新增语义色主题模块（`src/tui/theme.ts`，暖橙 accent + 灰阶），
+  全面替换硬编码颜色。具体变化：
+  - 消息流去框线化：用户消息 `❯` 暗色标记，助手消息 `⏺` 强调色圆点 + Markdown 正文，
+    不再有 "You"/"AI" 标题块
+  - 工具调用改单行 `⎿ shell(npm test)` 延续行样式 + 2 行结果摘要（错误红色），
+    取代原来的整块面板
+  - 头部一行化：`◆ gfcode v3.0.6` + 缓存命中率/节省 chips + 细分隔线；
+    provider/model 移至底部状态条
+  - 输入框改圆角边框 + `❯` 前缀 + 空态占位文案 + 底部快捷键提示条
+  - Thinking 改 braille 动画 spinner + 已用时秒数
+  - 权限确认对话框、欢迎屏、消息排队提示同步换新配色
+- 新增 9 个组件渲染测试（ink-testing-library）。
+
+### Fixed
+
+- **工具参数校验**（真实测试发现）：模型调用 file write 漏传 `content` 时，
+  此前会静默写入空文件并报成功，模型得不到反馈导致连续重试同一坏调用。
+  现在执行前校验必填参数，缺失即返回 `[PARAM_ERROR]` 修复消息，模型下一轮自我修正。
+- `npm publish` 需要 2FA OTP / granular token（账号策略），发布流程文档已注明。
+
 ## [3.0.5] - 2026-09-19  - 对齐主流 CLI：MCP / 会话持久化 / Headless / 权限管线
 
 > 从本版本起，`gfcode --version`、TUI Header、欢迎屏统一从 `package.json`

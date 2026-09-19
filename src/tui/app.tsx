@@ -14,6 +14,7 @@ import { useCommands } from './hooks/useCommands.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
+import { theme } from './theme.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -180,11 +181,10 @@ export function TuiApp({ app }: Props) {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Header
-        provider={app.config.get().provider}
-        model={app.config.get().model}
         cacheHitRate={cacheSnapshot.hitRate > 0 ? cacheSnapshot.hitRate : null}
         cacheSavingsCNY={cacheSnapshot.estimatedSavingsCNY}
         cacheTtl={resolvedTtl ?? configTtl ?? null}
+        width={terminalWidth}
       />
       <ChatList
         messages={allMessages}
@@ -195,8 +195,8 @@ export function TuiApp({ app }: Props) {
       <Thinking active={isThinking} />
       {queuedMessage && (
         <Box paddingLeft={1}>
-          <Text color="#F59E0B">📎 已排队: </Text>
-          <Text color="#94A3B8">{queuedMessage}</Text>
+          <Text color={theme.warning}>📎 已排队: </Text>
+          <Text color={theme.textDim}>{queuedMessage}</Text>
         </Box>
       )}
       {viewMode === 'model_select' ? (
@@ -232,7 +232,12 @@ export function TuiApp({ app }: Props) {
           <UserInput onSubmit={onSubmit} onCancel={cancel} disabled={false} />
         </Box>
       )}
-      <StatusBar messageCount={allMessages.length} skills={activeSkills} />
+      <StatusBar
+        messageCount={allMessages.length}
+        skills={activeSkills}
+        provider={app.config.get().provider}
+        model={app.config.get().model}
+      />
     </Box>
   );
 }

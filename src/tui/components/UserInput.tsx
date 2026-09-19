@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput, useApp, useFocus } from 'ink';
 import { COMMAND_LIST } from '../hooks/useCommands.js';
+import { theme } from '../theme.js';
 
 interface Props {
   onSubmit: (input: string) => void;
@@ -9,6 +10,11 @@ interface Props {
   disabled?: boolean;
 }
 
+/**
+ * v3.0.6 (opencode-style input): a rounded-border input field with an
+ * accent `❯` prompt, placeholder text when empty, and a dim keybinding
+ * hint bar underneath. Command completion still pops up above the box.
+ */
 export function UserInput({ onSubmit, onCancel, disabled }: Props) {
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
@@ -46,17 +52,8 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
       }
       if (key.tab || key.return) {
         const selected = filteredCommands[selectedCmd] || filteredCommands[0];
-        // v3.0.0 bug fix: previously we set `value = selected.name + ' '` and
-        // returned, which forced the user to press Enter a SECOND time to
-        // actually execute the command. For single-word commands like
-        // /模型 /新建 /压缩 /帮助 /技能 etc. that meant: "press Enter twice
-        // to switch model", which is confusing and a reproduce-and-exit
-        // vector if the user panics and Ctrl+C's in the middle.
-        //
-        // Fix: when Enter is pressed on a command-list item, EXECUTE the
-        // command directly. If the user wants to append args (e.g. /模型
-        // <name>), they can type them after the slash. Tab still writes
-        // the name into the input so the user can append text.
+        // Enter on a list item EXECUTES the command directly; Tab writes
+        // the name into the input so the user can append args.
         if (key.return) {
           setSelectedCmd(0);
           setValue('');
@@ -65,7 +62,6 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
           onSubmit(selected.name);
           return;
         }
-        // Tab: write the name into the input so the user can append args.
         setValue(selected.name + ' ');
         setSelectedCmd(0);
         return;
@@ -125,26 +121,40 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
   });
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" marginBottom={0}>
       {showCommands && filteredCommands.length > 0 && (
         <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
           {filteredCommands.map((cmd, i) => (
             <Box key={cmd.name}>
-              <Text color={i === selectedCmd ? '#06B6D4' : '#64748B'}>
+              <Text color={i === selectedCmd ? theme.accent : theme.textFaint}>
                 {i === selectedCmd ? '▸ ' : '  '}
               </Text>
-              <Text color={i === selectedCmd ? '#06B6D4' : '#94A3B8'} bold={i === selectedCmd}>
+              <Text color={i === selectedCmd ? theme.accent : theme.textDim} bold={i === selectedCmd}>
                 {cmd.name}
               </Text>
-              <Text color="#64748B">  {cmd.desc}</Text>
+              <Text color={theme.textFaint}>  {cmd.desc}</Text>
             </Box>
           ))}
         </Box>
       )}
-      <Box paddingY={0}>
-        <Text color="#06B6D4" bold>{disabled ? '  ' : '❯ '}</Text>
-        <Text>{value}</Text>
-        {!disabled && <Text color="#06B6D4">█</Text>}
+      <Box
+        borderStyle="round"
+        borderColor={disabled ? theme.border : theme.accentDim}
+        paddingX={1}
+        width="100%"
+      >
+        <Box>
+          <Text color={theme.accent} bold>{disabled ? ' ' : '❯ '}</Text>
+          {value ? (
+            <Text>{value}</Text>
+          ) : (
+            !disabled && <Text color={theme.textFaint}>有什么可以帮你？（/ 命令 · exit 退出）</Text>
+          )}
+          {!disabled && <Text color={theme.accent}>█</Text>}
+        </Box>
+      </Box>
+      <Box paddingLeft={1}>
+        <Text color={theme.textFaint}>↑↓ 历史 · /help 命令 · esc 取消 · ctrl+c 退出</Text>
       </Box>
     </Box>
   );

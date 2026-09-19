@@ -21,16 +21,15 @@ export class WelcomeScreen {
     if (hasApiKey) return;
 
     console.log();
-    console.log(chalk.cyan.bold('  ⚡ Thatgfsj Code') + chalk.gray(` v${getVersion()}`));
-    console.log(chalk.gray('  AI Coding Assistant'));
+    console.log(chalk.hex('#FF8C42')('  ◆ ') + chalk.bold('gfcode') + chalk.gray(` v${getVersion()}`));
+    console.log(chalk.gray('  AI 编程助手 · 终端里的 AI 编程伙伴'));
     console.log(line);
     console.log();
-    console.log(chalk.yellow('  ⚠  No API key configured'));
+    console.log(chalk.yellow('  ⚠  尚未配置 API Key'));
     console.log();
-    console.log(chalk.gray('  Run ') + chalk.cyan.bold('gfcode init') + chalk.gray(' to set up your provider.'));
+    console.log(chalk.gray('  运行 ') + chalk.cyan.bold('gfcode init') + chalk.gray(' 选择服务商并配置。'));
     console.log();
-    console.log(chalk.gray('  Supported providers:'));
-    console.log(chalk.gray('  OpenAI · Claude · DeepSeek · Kimi · GLM · Gemini · 中转站'));
+    console.log(chalk.gray('  支持: OpenAI · Claude · DeepSeek · Kimi · GLM · Gemini · 硅基流动 · 中转站'));
     console.log(line);
     console.log();
   }

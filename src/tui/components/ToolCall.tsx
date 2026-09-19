@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Box, Text } from 'ink';
+import { theme } from '../theme.js';
 
 interface ToolCallData {
   name: string;
@@ -14,85 +15,72 @@ interface Props {
   width?: number;
 }
 
-function formatToolName(name: string, args: string): string {
+/**
+ * Compact one-line arg preview per tool, opencode-style:
+ *   ⎿ shell(npm test)
+ *   ⎿ file(write src/app.ts)
+ */
+function formatToolLabel(name: string, args: string): { title: string; detail: string } {
   try {
     const obj = JSON.parse(args);
     switch (name) {
-      case 'file': {
-        const action = obj.action || '';
-        const path = (obj.path || '').replace(/.*[/\\]/, '');
-        return `${action} ${path || obj.path || ''}`;
+      case 'file':
+        return { title: `${obj.action || 'file'}`, detail: obj.path || '' };
+      case 'shell':
+        return { title: 'shell', detail: obj.command?.slice(0, 70) || '' };
+      case 'git':
+        return { title: `git ${obj.action || ''}`.trim(), detail: obj.message ? `"${String(obj.message).slice(0, 50)}"` : (obj.args || '') };
+      case 'search':
+        return { title: obj.action || 'search', detail: obj.pattern || obj.query || '' };
+      case 'nwt':
+        return { title: `nwt ${obj.action || ''}`.trim(), detail: obj.task || obj.query || '' };
+      default: {
+        if (name.startsWith('mcp__')) {
+          const short = name.replace(/^mcp__/, '').replace(/__/, ' · ');
+          return { title: short, detail: Object.keys(obj).slice(0, 2).map(k => `${k}=${JSON.stringify(obj[k])}`.slice(0, 40)).join(' ') };
+        }
+        return { title: name, detail: Object.keys(obj).slice(0, 2).join(', ') };
       }
-      case 'shell': return obj.command?.slice(0, 60) || '';
-      case 'git': return obj.command || '';
-      case 'search': return obj.query || obj.pattern || '';
-      case 'nwt': return obj.action || '';
-      default: return Object.keys(obj).slice(0, 2).join(', ');
     }
   } catch {
-    return '';
+    return { title: name, detail: (args || '').slice(0, 50) };
   }
 }
 
-function truncateOutput(output: string, maxLines = 8): { text: string; truncated: boolean } {
-  const lines = output.split('\n');
-  if (lines.length <= maxLines) return { text: output, truncated: false };
-  return { text: lines.slice(0, maxLines).join('\n'), truncated: true };
-}
+/**
+ * v3.0.6 (opencode-style): tool calls render as a dim `⎿` continuation
+ * line with a compact result summary — 2 lines of output (or the error),
+ * not a full panel. The full text stays in the conversation history.
+ */
+export function ToolCall({ tool }: Props) {
+  const { title, detail } = formatToolLabel(tool.name, tool.args);
+  const running = tool.result === undefined;
 
-export function ToolCall({ tool, width }: Props) {
-  const label = formatToolName(tool.name, tool.args);
-  const result = tool.result !== undefined ? truncateOutput(tool.result) : null;
+  let resultLine: { text: string; color: string } | null = null;
+  if (tool.result !== undefined) {
+    const lines = tool.result.split('\n').filter(l => l.trim());
+    if (tool.isError) {
+      resultLine = { text: lines[0]?.slice(0, 90) || 'failed', color: theme.error };
+    } else if (lines.length === 0) {
+      resultLine = { text: 'ok (no output)', color: theme.textFaint };
+    } else if (lines.length <= 2) {
+      resultLine = { text: lines.join(' · ').slice(0, 100), color: theme.textDim };
+    } else {
+      resultLine = { text: `${lines.length} 行 · ${lines[0].slice(0, 70)}`, color: theme.textFaint };
+    }
+  }
 
   return (
-    <Box flexDirection="column" marginBottom={0} paddingLeft={1}>
-      {/* Tool header */}
+    <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
       <Box>
-        <Text color="#06B6D4" bold>⚙ </Text>
-        <Text color="#06B6D4">{tool.name}</Text>
-        {label && <Text color="#64748B"> {label}</Text>}
+        <Text color={theme.toolMark}>⎿ </Text>
+        <Text color={theme.accentDim}>{title}</Text>
+        {detail && <Text color={theme.textDim}> {detail}</Text>}
+        {running && <Text color={theme.textFaint}> ⟳</Text>}
       </Box>
-
-      {/* Result — v2.2.6 fix:
-          - Use `!== undefined` (not truthy) so empty string results
-            still render (truthy check dropped them, making it look
-            like the tool result was missing).
-          - Switch wrap from "truncate" to "wrap" so long lines don't
-            silently disappear off-screen.
-          - Always render the Box even when result is empty (just
-            with a "(no output)" marker), so the visual frame stays
-            consistent.
-          - If truncated, show explicit "(+N more lines)" indicator
-            so users know the result was clipped. */}
-      {result !== null && (
-        <Box paddingLeft={2} flexDirection="column">
-          {result.text.length === 0 ? (
-            <Text color="#94A3B8" dimColor>(no output)</Text>
-          ) : (
-            <>
-              {result.text.split('\n').map((line, i) => (
-                <Text
-                  key={i}
-                  color={tool.isError ? '#EF4444' : '#64748B'}
-                  wrap="wrap"
-                >
-                  {line || ' '}
-                </Text>
-              ))}
-              {result.truncated && (
-                <Text color="#94A3B8" dimColor>
-                  {'  '}(+{tool.result!.split('\n').length - 8} more lines)
-                </Text>
-              )}
-            </>
-          )}
-        </Box>
-      )}
-      {/* v2.2.6: if result is undefined (still running), show a
-          pending indicator so the user knows the tool is in flight. */}
-      {result === null && tool.result === undefined && (
+      {resultLine && (
         <Box paddingLeft={2}>
-          <Text color="#94A3B8" dimColor>  ⏳ running...</Text>
+          <Text color={resultLine.color} wrap="truncate-end">{resultLine.text}</Text>
         </Box>
       )}
     </Box>
