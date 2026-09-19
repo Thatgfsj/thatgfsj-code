@@ -207,18 +207,38 @@ export class OpenAIProvider implements LLMProvider {
    * future refactors (spread / Object.fromEntries / map merging).
    */
   protected buildRequest(messages: ChatMessage[], stream: boolean, options?: ChatOptions, tools?: Tool[]) {
+    // v3.0.5 fix (found in live testing on SiliconFlow/Qwen): strict
+    // OpenAI-compatible providers reject mid-conversation system messages
+    // ("System message must be at the beginning", code 20015). Our
+    // [TOOL_REPAIR] append-only design adds them after tool failures, so on
+    // the wire any system message after the first is downgraded to a user
+    // message with a `[system note]` prefix — semantically equivalent for
+    // the model and accepted everywhere.
+    let seenSystem = false;
     const body: any = {
       model: this.config.model,
-      messages: messages.map(m => ({
-        role: m.role,
-        // content is string | ContentBlock[]. OpenAI wire format accepts both:
-        // - string for plain text messages
-        // - array of {type,text} or {type,image_url} blocks for multimodal
-        content: m.content,
-        ...(m.name && { name: m.name }),
-        ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
-        ...(m.tool_calls && { tool_calls: m.tool_calls }),
-      })),
+      messages: messages.map(m => {
+        if (m.role === 'system') {
+          if (!seenSystem) {
+            seenSystem = true;
+            return { role: 'system', content: m.content };
+          }
+          const text = typeof m.content === 'string'
+            ? m.content
+            : m.content.filter(b => b.type === 'text').map(b => (b as any).text).join('');
+          return { role: 'user', content: `[system note] ${text}` };
+        }
+        return {
+          role: m.role,
+          // content is string | ContentBlock[]. OpenAI wire format accepts both:
+          // - string for plain text messages
+          // - array of {type,text} or {type,image_url} blocks for multimodal
+          content: m.content,
+          ...(m.name && { name: m.name }),
+          ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+          ...(m.tool_calls && { tool_calls: m.tool_calls }),
+        };
+      }),
       temperature: options?.temperature ?? this.config.temperature,
       max_tokens: options?.maxTokens ?? this.config.maxTokens,
       stream,

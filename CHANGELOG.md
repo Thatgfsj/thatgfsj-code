@@ -4,6 +4,22 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.7] - 2026-09-19  - 真实环境实测修复（SiliconFlow/Qwen）
+
+> 本版由硅基流动 + Qwen3.5-35B-A3B 的端到端实测驱动：工具调用闭环、
+> 权限拒绝路径、缓存命中、会话落盘均在线上验证通过。
+
+### Fixed
+
+- **中段 system 消息被严格服务商 400**（实测发现）：权限拒绝后追加的
+  `[TOOL_REPAIR]` system 消息会导致 SiliconFlow/Qwen 系列报
+  `"System message must be at the beginning"`（code 20015），agent 循环中断。
+  OpenAI 协议层现在把首条之后的 system 消息降级为带 `[system note]`
+  前缀的 user 消息（语义等价，全平台可接受）。Anthropic/Gemini 层本就
+  上提 system，不受影响。新增 4 个 wire 格式单测。
+- **headless `--json` result 事件前导空行**：Qwen 输出开头的空行会污染
+  下游 `jq` 解析，result.content 现在 trim。
+
 ## [3.0.6] - 2026-09-19  - opencode 风格 TUI 重设计
 
 ### Changed

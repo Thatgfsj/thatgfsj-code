@@ -284,7 +284,7 @@ program
           app.session.persist();
 
           if (jsonMode) {
-            emit({ type: 'result', success: true, content: toPersist });
+            emit({ type: 'result', success: true, content: toPersist.trim() });
           }
         }
       } catch (error: any) {
