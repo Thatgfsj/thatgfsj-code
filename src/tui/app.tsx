@@ -417,6 +417,14 @@ export function TuiApp({ app }: Props) {
               {' '}/models 可添加模型、设置上下文长度和思考强度 · /help 查看全部命令
             </Text>
           </Box>
+          {app.usingBuiltinModel && (
+            <Box justifyContent="center" paddingBottom={1}>
+              <Text color={theme.textFaint}>
+                <Text color={theme.info}>ℹ </Text>
+                未配置 API Key · 正在使用内置共享模型 Qwen/Qwen3.5-4B（共享额度） · gfcode init 配置自己的
+              </Text>
+            </Box>
+          )}
         </>
       ) : (
         <>

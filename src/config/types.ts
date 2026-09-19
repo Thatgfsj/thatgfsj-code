@@ -95,6 +95,11 @@ export interface AIConfig {
    * getAIConfig before, so cache.ttl config never reached the wire).
    */
   cache?: Config['cache'];
+  /**
+   * v3.1.2: true when no user API key is configured and getAIConfig fell
+   * back to the built-in shared SiliconFlow model (Qwen/Qwen3.5-4B).
+   */
+  usingBuiltinKey?: boolean;
 }
 
 export interface ModelInfo {

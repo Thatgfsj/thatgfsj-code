@@ -103,6 +103,8 @@ export class App {
    * a note (add --yolo to allow them).
    */
   confirmHandler?: (req: ConfirmRequest) => Promise<boolean>;
+  /** v3.1.2: true when getAIConfig fell back to the built-in shared model. */
+  usingBuiltinModel: boolean = false;
   /**
    * v3.1.0: fired by useChat when a streaming turn actually finishes (NOT
    * when isThinking flips false — that happens at the first token). The TUI
@@ -135,6 +137,7 @@ export class App {
   static async create(): Promise<App> {
     const config = await ConfigManager.load();
     const aiConfig = config.getAIConfig();
+    const usingBuiltinModel = !!aiConfig.usingBuiltinKey;
 
     const llm = LLMService.fromConfig(aiConfig);
     const cacheStats = new CacheStatsStore();
@@ -194,6 +197,7 @@ export class App {
     });
     const app = new App(config, llm, session, tools, hooks, prompts, skills, cacheStats, mcp);
     app.mcpStartupResults = mcpResults;
+    app.usingBuiltinModel = usingBuiltinModel;
 
     // v3.0.20: model-facing context self-check (Codex get_context_remaining
     // parity). Registered here because the numbers live on the App singleton;

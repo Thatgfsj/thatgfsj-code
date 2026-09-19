@@ -108,30 +108,14 @@ program
 
       // Check if API key is configured
       if (!app.config.hasApiKey()) {
-        // In --json mode the setup wizard can not work — report and exit.
-        if (jsonMode) {
-          process.stdout.write(JSON.stringify({
-            type: 'error',
-            message: 'No API key configured. Run `gfcode init` first.',
-          }) + '\n');
-          process.exit(1);
-        }
-        console.log(chalk.yellow('\n  ⚠  No API key configured\n'));
-        console.log(chalk.gray('  Run ') + chalk.cyan('gfcode init') + chalk.gray(' to set up your provider.\n'));
-        const readline = await import('node:readline');
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>(resolve => {
-          rl.question(chalk.cyan('  Run init now? (Y/n): '), resolve);
-        });
-        rl.close();
-        if (answer.toLowerCase() !== 'n') {
-          await WelcomeScreen.interactiveSetup();
-          // Reload config after setup
-          const newApp = await App.create();
-          newApp.setYolo(!!options.yolo);
-          Object.assign(app, newApp);
+        // v3.1.2: a built-in shared SiliconFlow model (Qwen/Qwen3.5-4B) ships
+        // with the CLI, so a missing key no longer blocks startup — getAIConfig
+        // falls back to it. Just tell the user; `gfcode init` configures a
+        // personal key (and stops sharing the pooled quota).
+        if (!jsonMode) {
+          console.log(chalk.gray('  ℹ 未检测到 API Key，将使用内置共享模型 Qwen/Qwen3.5-4B（共享额度）。运行 gfcode init 配置自己的 key。'));
         } else {
-          process.exit(0);
+          process.stderr.write('[builtin] using built-in shared model Qwen/Qwen3.5-4B (no API key configured)\n');
         }
       }
 

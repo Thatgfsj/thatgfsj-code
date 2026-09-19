@@ -8,9 +8,10 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 import type { Config, AIConfig, ProviderName } from './types.js';
 import { PROVIDERS, getApiKeyFromEnv, isCustomProvider } from './providers.js';
+import { BUILTIN_MODEL_ID, BUILTIN_PROVIDER, revealBuiltinKey } from './builtin.js';
 
 const DEFAULT_CONFIG: Config = {
-  model: 'Qwen/Qwen2.5-7B-Instruct',
+  model: 'Qwen/Qwen3.5-4B',
   apiKey: '',
   temperature: 0.7,
   maxTokens: 4096,
@@ -143,14 +144,33 @@ export class ConfigManager {
    * the user's cache.enabled / cache.ttl config never reached the wire.
    */
   getAIConfig(): AIConfig {
-    return {
-      model: this.config.model,
-      apiKey: this.config.apiKey,
+    const base = {
       temperature: this.config.temperature,
       maxTokens: this.config.maxTokens,
+      cache: this.config.cache,
+    };
+
+    // v3.1.2: out-of-box fallback. With no user API key configured (file or
+    // env), fall back to the built-in shared SiliconFlow model so a fresh
+    // install works immediately. The shared key is reassembled in memory —
+    // it is NEVER written into config.json.
+    if (!this.config.apiKey) {
+      return {
+        ...base,
+        provider: BUILTIN_PROVIDER,
+        model: BUILTIN_MODEL_ID,
+        apiKey: revealBuiltinKey(),
+        baseUrl: PROVIDERS.siliconflow.baseUrl,
+        usingBuiltinKey: true,
+      };
+    }
+
+    return {
+      ...base,
+      model: this.config.model,
+      apiKey: this.config.apiKey,
       baseUrl: this.config.baseUrl,
       provider: this.config.provider,
-      cache: this.config.cache,
     };
   }
 

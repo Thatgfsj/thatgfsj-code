@@ -6,6 +6,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { PROVIDERS, getModelsForProvider } from '../../config/providers.js';
+import { BUILTIN_MODEL_ID } from '../../config/builtin.js';
 import type { ProviderName } from '../../config/types.js';
 
 interface Props {
@@ -24,6 +25,15 @@ function loadSavedModels(currentProvider?: ProviderName): SavedModel[] {
   const configPath = join(homedir(), '.thatgfsj', 'config.json');
   const models: SavedModel[] = [];
   const seen = new Set<string>();
+
+  // 0. v3.1.2: built-in shared model first when shopping on SiliconFlow —
+  // it always works, even with no API key of one's own.
+  if (!currentProvider || currentProvider === 'siliconflow') {
+    if (!seen.has(BUILTIN_MODEL_ID)) {
+      seen.add(BUILTIN_MODEL_ID);
+      models.push({ label: `${BUILTIN_MODEL_ID}（内置共享）`, value: BUILTIN_MODEL_ID });
+    }
+  }
 
   // 1. Load from history if exists
   const historyPath = join(homedir(), '.thatgfsj', 'models.json');
