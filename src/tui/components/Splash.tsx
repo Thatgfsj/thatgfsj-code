@@ -4,33 +4,32 @@ import { Box, Text } from 'ink';
 import { theme } from '../theme.js';
 
 /**
- * Block-letter logo, opencode-style two-tone: "gf" in dim gray,
- * "code" in bright white. 5 rows, 49 columns — fits an 80-col terminal.
+ * Wordmark in ANSI Shadow (figlet), two-tone like opencode:
+ * "gf" in dim gray, "code" in bright white. Generated once with figlet
+ * and embedded verbatim — do not hand-edit the glyphs.
+ * Both parts are exactly 6 rows and constant-width per part.
  */
 const LOGO_DIM = [
-  ' ██████  ███████',
-  '██       ██     ',
-  '██  ████  █████ ',
-  '██    ██  ██    ',
-  ' ██████  ███████',
+  ' ██████╗ ███████╗',
+  '██╔════╝ ██╔════╝',
+  '██║  ███╗█████╗  ',
+  '██║   ██║██╔══╝  ',
+  '╚██████╔╝██║     ',
+  ' ╚═════╝ ╚═╝     ',
 ];
 const LOGO_BRIGHT = [
-  '  ██████   ██████  ███████',
-  ' ██    ██ ██    ██ ██     ',
-  ' ██    ██ ██    ██ ███████',
-  ' ██    ██ ██    ██ ██     ',
-  '  ██████   ██████  ███████',
+  ' ██████╗ ██████╗ ██████╗ ███████╗',
+  '██╔════╝██╔═══██╗██╔══██╗██╔════╝',
+  '██║     ██║   ██║██║  ██║█████╗  ',
+  '██║     ██║   ██║██║  ██║██╔══╝  ',
+  '╚██████╗╚██████╔╝██████╔╝███████╗',
+  ' ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝',
 ];
 
-interface Props {
-  /** Terminal width — used to keep long lines from wrapping on narrow terms. */
-  width?: number;
-}
+interface Props {}
 
 /**
- * v3.0.8 (opencode-style splash): full-screen first impression — centered
- * logo, the input lives just below it (rendered by the parent), and the
- * whole thing vertically centers in the remaining viewport.
+ * v3.0.8 (opencode-style splash): centered wordmark on the first screen.
  */
 export const Splash = React.memo(function Splash({}: Props) {
   return (

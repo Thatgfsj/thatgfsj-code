@@ -4,6 +4,25 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.9] - 2026-09-19  - 全屏修复：消息视口化 + 用户报告问题
+
+> 由用户实测反馈驱动：3.0.8 全屏模式下回复"闪一下就消失"、窗口放大布局不变、
+> logo 字形错误、窗口标题缺失。
+
+### Fixed
+
+- **全屏模式消息消失**（关键）：消息列表此前使用 Ink `<Static>`（打印一次即脱离
+  渲染树），而全屏布局的帧高是整个终端——每次重绘整帧被擦除重建时，刚打印的
+  Static 消息被一并擦掉（回复闪现后消失）。改为**受管视口**：按行数估算切片渲染
+  最近消息（与 opencode 同思路），旧消息折叠提示"已折叠较早的 N 条消息"。
+- **窗口缩放布局不变**：Ink 在 resize 时只重放旧帧，React 不重渲——补上
+  resize 监听强制重算行列。
+- **logo 字形错误**（手拼成了"GEOE"）：改用 figlet ANSI Shadow 生成的标准字形，
+  "gf" 灰 / "code" 亮双色调，与 opencode 品牌页一致。
+- **终端窗口/标签页标题**：启动时设置为 THATGFSJ。
+- **会话页对齐 opencode 真机截图**：用户消息改为左侧强调条块样式；助手回复为
+  `▪ Build · 模型名` 暗色标签 + 正文。
+
 ## [3.0.8] - 2026-09-19  - 全屏 opencode 风格 + 模型设置面板
 
 ### Added

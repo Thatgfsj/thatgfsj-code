@@ -126,7 +126,12 @@ program
         const { TuiApp } = await import('../tui/app.js');
         const out = process.stdout;
         const altScreen = !!out.isTTY;
-        if (altScreen) out.write('\x1b[?1049h\x1b[2J\x1b[H');
+        if (altScreen) {
+          // v3.0.8: set the terminal window/tab title and enter the
+          // alternate screen buffer.
+          out.write('\x1b]2;THATGFSJ\x07');
+          out.write('\x1b[?1049h\x1b[2J\x1b[H');
+        }
         try {
           const instance = render(<TuiApp app={app} />);
           const restore = () => instance.unmount();

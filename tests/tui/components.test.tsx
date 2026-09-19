@@ -13,6 +13,8 @@ import { Splash } from '../../src/tui/components/Splash.js';
 import { UserInput } from '../../src/tui/components/UserInput.js';
 import { mcpToolName } from '../../src/mcp/client.js';
 import { getVersion } from '../../src/version.js';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 describe('TUI components (v3.0.6 opencode-style render)', () => {
   it('Header shows brand + version from single source', () => {
@@ -63,13 +65,15 @@ describe('TUI components (v3.0.6 opencode-style render)', () => {
     expect(frame).toContain('EACCES');
   });
 
-  it('ChatMessage renders user ❯ and assistant ⏺ marks', () => {
+  it('ChatMessage renders opencode session view (user bar + assistant label)', () => {
     const user = render(<ChatMessage message={{ role: 'user', content: '你好' }} />);
-    expect(user.lastFrame() || '').toContain('❯');
     expect(user.lastFrame() || '').toContain('你好');
 
-    const assistant = render(<ChatMessage message={{ role: 'assistant', content: '答案' }} />);
-    expect(assistant.lastFrame() || '').toContain('⏺');
+    const assistant = render(<ChatMessage message={{ role: 'assistant', content: '答案' }} mode="Build" model="m1" />);
+    const frame = assistant.lastFrame() || '';
+    expect(frame).toContain('▪');
+    expect(frame).toContain('Build · m1');
+    expect(frame).toContain('答案');
   });
 
   it('Thinking renders spinner while active, nothing when idle', () => {
@@ -128,7 +132,12 @@ describe('TUI components (v3.0.6 opencode-style render)', () => {
     expect(lastFrame() || '').not.toContain('thinking');
   });
 
-  it('version helper matches package.json (single source)', () => {
-    expect(getVersion()).toBe('3.0.8');
+  it('version helper tracks package.json (single source, not hardcoded)', () => {
+    const require = createRequire(import.meta.url);
+    const path = require('node:path');
+    const pkgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json');
+    const pkg = require(pkgPath);
+    expect(getVersion()).toBe(pkg.version);
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });

@@ -57,6 +57,18 @@ export function TuiApp({ app }: Props) {
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
   const terminalRows = (stdout as any)?.rows || 30;
+  /**
+   * v3.0.8 fix (user report): maximizing the window left the layout at the
+   * old size — Ink replays the last computed frame on resize, but React
+   * never re-renders, so rows/columns went stale. Force a re-render when
+   * the terminal is resized.
+   */
+  const [, setResizeTick] = useState(0);
+  useEffect(() => {
+    const onResize = () => setResizeTick(t => t + 1);
+    (stdout as any)?.on?.('resize', onResize);
+    return () => { (stdout as any)?.off?.('resize', onResize); };
+  }, [stdout]);
 
   const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
   const [resolvedTtl, setResolvedTtl] = useState<'5m' | '1h' | null>(app.resolvedTtl);
@@ -254,6 +266,12 @@ export function TuiApp({ app }: Props) {
               streaming={streaming}
               streamingToolCalls={streamingToolCalls}
               width={terminalWidth - 4}
+              // v3.0.9: managed viewport — chrome rows (header 2 + input 3 +
+              // hints 1 + status 1 + bottom 1 + margins ~2) are reserved so
+              // the message list never overflows the fixed-height frame.
+              viewportHeight={Math.max(5, terminalRows - 10)}
+              mode="Build"
+              model={cfg.model}
             />
             <Thinking active={isThinking} />
             {queuedMessage && (
