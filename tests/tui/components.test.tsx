@@ -10,13 +10,15 @@ import { ChatMessage } from '../../src/tui/components/ChatMessage.js';
 import { Thinking } from '../../src/tui/components/Thinking.js';
 import { ConfirmPrompt } from '../../src/tui/components/ConfirmPrompt.js';
 import { mcpToolName } from '../../src/mcp/client.js';
+import { getVersion } from '../../src/version.js';
 
 describe('TUI components (v3.0.6 opencode-style render)', () => {
   it('Header shows brand + version from single source', () => {
     const { lastFrame } = render(<Header width={80} />);
     const frame = lastFrame() || '';
     expect(frame).toContain('gfcode');
-    expect(frame).toContain('v3.0.6');
+    // version must come from package.json (single source), never hardcoded
+    expect(frame).toContain(`v${getVersion()}`);
     expect(frame).toContain('─');
   });
 
