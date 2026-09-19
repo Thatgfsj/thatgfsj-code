@@ -59,7 +59,12 @@ function KeyHint({ keys, desc, last = false }: { keys: string; desc: string; las
 
 export function ModelSettings({ app, onClose, width }: Props) {
   const [models, setModels] = useState<string[]>(() => app.listConfiguredModels());
-  const [selected, setSelected] = useState(0);
+  // v3.0.20: selection starts ON the current model.
+  const [selected, setSelected] = useState(() => {
+    const list = app.listConfiguredModels();
+    const i = list.indexOf(app.config.get().model);
+    return i >= 0 ? i : 0;
+  });
   const [submode, setSubmode] = useState<Submode>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [, forceRender] = useState(0);
@@ -72,12 +77,28 @@ export function ModelSettings({ app, onClose, width }: Props) {
 
   const currentModel = app.config.get().model;
   const settings = app.config.get().modelSettings || {};
-  const idx = Math.min(selected, models.length - 1);
+  const idx = Math.min(Math.max(selected, 0), Math.max(0, models.length - 1));
   const active = models[idx];
 
   const flash = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2500);
+  };
+
+  /** Loose identity: case + separators insensitive (glm5.3 vs glm-5.3). */
+  const normId = (s: string) => s.toLowerCase().replace(/[-_.\s]/g, '');
+
+  /** v3.0.20: make the highlighted model the active one (enter). */
+  const switchTo = async (target: string) => {
+    if (!target) return;
+    if (target === currentModel) {
+      flash(`${target} 已是当前模型`);
+      return;
+    }
+    await app.config.save({ model: target });
+    await app.reloadModel();
+    rerender();
+    flash(`已切换使用 ${target}`);
   };
 
   const commitSubmode = async () => {
@@ -87,6 +108,12 @@ export function ModelSettings({ app, onClose, width }: Props) {
       if (!id) { setSubmode(null); return; }
       if (models.includes(id)) {
         setSubmode({ ...submode, error: '该模型已存在' });
+        return;
+      }
+      // v3.0.20: near-duplicate guard (glm5.3-flash vs glm-5.3-flash).
+      const twin = models.find(m => m !== id && normId(m) === normId(id));
+      if (twin) {
+        setSubmode({ ...submode, error: `与已有模型 ${twin} 高度相似，疑似重复。仍要添加请换个名字` });
         return;
       }
       await app.addCustomModel(id);
@@ -156,21 +183,25 @@ export function ModelSettings({ app, onClose, width }: Props) {
     if (key.upArrow) { setSelected(i => Math.max(0, i - 1)); return; }
     if (key.downArrow) { setSelected(i => Math.min(models.length - 1, i + 1)); return; }
 
+    // v3.0.20: enter switches the highlighted model to be the active one.
+    if (key.return) { void switchTo(active); return; }
+
     if (input === 'a' || input === 'A') {
       setSubmode({ type: 'add', value: '' });
       return;
     }
-    if (input === 'c' || input === 'C') {
+    // v3.0.20 key map (user spec): a=添加 b=上下文长度 c=思考强度 w=窗口 d=删除
+    if (input === 'b' || input === 'B') {
       const cur = settings[active]?.contextLength ?? app.session.getMaxMessages();
       setSubmode({ type: 'context', value: String(cur) });
       return;
     }
-    if (input === 'w' || input === 'W') {
-      setSubmode({ type: 'window', value: String(app.getContextWindow(active)) });
+    if (input === 'c' || input === 'C') {
+      void cycleThinking();
       return;
     }
-    if (input === 't' || input === 'T') {
-      void cycleThinking();
+    if (input === 'w' || input === 'W') {
+      setSubmode({ type: 'window', value: String(app.getContextWindow(active)) });
       return;
     }
     if (input === 'd' || input === 'D') {
@@ -253,17 +284,20 @@ export function ModelSettings({ app, onClose, width }: Props) {
         </Box>
       ) : (
         // two-line compact key table: accent keys, dim descriptions.
+        // v3.0.20 key map (user spec): enter=切换 a=添加 b=上下文长度
+        // c=思考强度 w=上下文窗口 d=删除 esc=关闭
         <Box flexDirection="column" width={contentW}>
           <Box>
             <KeyHint keys="↑↓" desc="选择" />
-            <KeyHint keys="enter/a" desc="添加" />
+            <KeyHint keys="enter" desc="切换使用" />
+            <KeyHint keys="a" desc="添加模型" />
             <KeyHint keys="d" desc="删除" />
             <KeyHint keys="esc" desc="关闭" last />
           </Box>
           <Box>
-            <KeyHint keys="c" desc="上下文长度" />
+            <KeyHint keys="b" desc="上下文长度" />
             <KeyHint keys="w" desc="上下文窗口" />
-            <KeyHint keys="t" desc="思考强度" last />
+            <KeyHint keys="c" desc="思考强度" last />
           </Box>
         </Box>
       )}

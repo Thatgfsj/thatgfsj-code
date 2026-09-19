@@ -78,10 +78,16 @@ describe('FileTool permission gate (v3.0.5)', () => {
   });
 });
 
-describe('ShellTool permission gate (v3.0.5)', () => {
-  it('fails closed without a confirmation channel', async () => {
+describe('ShellTool permission gate', () => {
+  it('read-only commands run without a confirmation channel (v3.0.20 grading)', async () => {
     const tool = new ShellTool();
     const r = await tool.execute({ command: 'echo hi' }, {});
+    expect(r.success).toBe(true);
+  });
+
+  it('non-read-only commands fail closed without a confirmation channel', async () => {
+    const tool = new ShellTool();
+    const r = await tool.execute({ command: 'mkdir gfcode-perm-nochan' }, {});
     expect(r.success).toBe(false);
     expect(r.error).toContain('--yolo');
   });

@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import type { App } from '../../app/index.js';
 import { SessionManager } from '../../session/index.js';
+import { planStore } from '../../plan/store.js';
 
 interface CommandResult {
   handled: boolean;
@@ -11,8 +12,9 @@ interface CommandResult {
    * session load are async or need React state access).
    * v3.0.16: 'browser_check' — BrowserTool.verifyLaunch() spawns Chromium,
    * so it must run async in app.tsx (handleCommand stays sync).
+   * v3.0.20: 'init_agents' — /init generates AGENTS.md via the LLM.
    */
-  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check';
+  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check' | 'init_agents';
   payload?: any;
 }
 
@@ -37,6 +39,16 @@ const CMD_ALIASES: Record<string, string> = {
   '/YOLO': '/yolo',
   '/模型设置': '/models',
   '/模型管理': '/models',
+  '/计划': '/plan',
+  '/状态': '/status',
+  '/计划模式': '/plan',
+  '/只读模式': '/plan',
+  '/planmode': '/plan',
+  '/完整权限模式': '/fullperm',
+  '/完全权限模式': '/fullperm',
+  '/YOLO模式': '/fullperm',
+  '/任务': '/tasks',
+  '/任务计划': '/tasks',
 };
 
 export const COMMAND_LIST = [
@@ -46,6 +58,11 @@ export const COMMAND_LIST = [
   { name: '/新建', desc: '新建会话' },
   { name: '/resume', desc: '恢复历史会话' },
   { name: '/压缩', desc: '压缩上下文' },
+  { name: '/init', desc: '生成 AGENTS.md 项目说明' },
+  { name: '/plan', desc: '计划模式：只读+列计划，批准后全自动（蓝）' },
+  { name: '/完整权限模式', desc: 'YOLO：写/执行不再确认（红）' },
+  { name: '/tasks', desc: '查看/清除任务计划' },
+  { name: '/status', desc: '会话状态一览（模型/token/缓存）' },
   { name: '/缓存', desc: '缓存命中率' },
   { name: '/ttl', desc: '查看/设置 Cache TTL' },
   { name: '/技能', desc: '管理技能' },
@@ -102,7 +119,14 @@ export function useCommands(app: App) {
       // v3.0.5: reset() keeps the system prompt — clear() used to wipe it,
       // leaving the model unprompted until restart.
       app.session.reset();
+      // v3.0.20: a new session means a new task — drop the plan panel too.
+      planStore.clear();
       return { handled: true, output: '新会话已创建（系统提示已保留）。', action: 'clear' };
+    }
+
+    // ── /init — 生成 AGENTS.md（Codex parity） ───────────
+    if (name === '/init') {
+      return { handled: true, output: '', action: 'init_agents' };
     }
 
     // ── /compact ────────────────────────────────────────
@@ -155,6 +179,60 @@ export function useCommands(app: App) {
       // and posts the report (config.browserSetup + launch probe) as a
       // chat notice — same delegation pattern as /models.
       return { handled: true, action: 'browser_check' };
+    }
+
+    // ── /plan — 计划模式（蓝）：只读 + 列计划（Codex /plan parity） ──
+    if (name === '/plan') {
+      if (app.permissionMode === 'plan') {
+        app.setPlanMode(false);
+        return { handled: true, output: '✓ 已退出计划模式，回到默认确认模式。' };
+      }
+      app.setPlanMode(true);
+      return {
+        handled: true,
+        output: [
+          '🔵 计划模式已开启（界面蓝色标识）:',
+          '  · 我只做只读研究：读文件 / 搜索 / 只读命令',
+          '  · 所有写入和执行操作会被自动拒绝',
+          '  · 我会用 update_plan 列出实施计划，你批准后自动进入完整权限模式（红色）开始执行',
+          '',
+          '再次输入 /plan（或 /计划模式）可退出。',
+        ].join('\n'),
+      };
+    }
+
+    // ── /tasks — 查看/清除当前任务计划 ───────────────────
+    if (name === '/tasks') {
+      if (arg === 'clear' || arg === '清除' || arg === '清空') {
+        planStore.clear();
+        return { handled: true, output: '✓ 计划已清除' };
+      }
+      const items = planStore.getSnapshot();
+      if (items.length === 0) {
+        return { handled: true, output: '当前没有任务计划。多步任务中模型会通过 update_plan 工具自动维护；/plan 开启计划模式。' };
+      }
+      const glyph: Record<string, string> = { completed: '✓', in_progress: '●', pending: '○' };
+      return {
+        handled: true,
+        output: [
+          `任务计划（${planStore.progressText()}）:`,
+          ...items.map(i => `  ${glyph[i.status]} ${i.step}`),
+          '',
+          '/tasks clear  ·  清除计划',
+        ].join('\n'),
+      };
+    }
+
+    // ── /fullperm — 完整权限模式（红）：YOLO ──────────────
+    if (name === '/fullperm') {
+      if (app.permissionMode === 'accept') {
+        return { handled: true, output: '已处于完整权限模式（红色）。' };
+      }
+      app.setFullPermission();
+      return {
+        handled: true,
+        output: '🔴 完整权限模式已开启（界面红色标识，等同 --yolo）：写/执行类操作不再询问，直接执行。慎用；/yolo 可切回确认模式。',
+      };
     }
 
     // ── /yolo ───────────────────────────────────────────
@@ -298,6 +376,31 @@ export function useCommands(app: App) {
       return { handled: true, output: `用法: /thinking on|off (当前: ${app.showThinking ? 'on' : 'off'})` };
     }
 
+    // ── /status — 会话状态一览（Codex parity） ───────────
+    if (name === '/status') {
+      const c = app.config.get();
+      const win = app.getContextWindow();
+      const stats = app.sessionStats;
+      const pct = stats.promptTokens > 0 && win > 0 ? Math.round((stats.promptTokens / win) * 100) : 0;
+      const s = app.cacheStats.snapshot();
+      const mcpConfigured = app.mcp.getStatus().length;
+      const lines = [
+        '📊 会话状态',
+        '─────────────────────────',
+        `  模型:       ${c.provider} / ${c.model}`,
+        `  思考强度:   ${app.getThinking()}`,
+        `  权限:       ${app.permissionMode === 'accept' ? '完整权限 (yolo，红)' : app.permissionMode === 'plan' ? '计划模式 (只读，蓝)' : '写入/执行需确认'}`,
+        `  上下文:     ${stats.promptTokens.toLocaleString()} / ${win.toLocaleString()} tokens（${pct}%，85% 自动压缩）`,
+        `  本会话轮次: ${stats.rounds} · 输出 ${stats.completionTokens.toLocaleString()} tokens`,
+        `  缓存命中:   ${s.totalRequests > 0 ? `${(s.hitRate * 100).toFixed(1)}%（累计节省 ¥${s.estimatedSavingsCNY.toFixed(2)}）` : '暂无请求'}`,
+        `  计划:       ${planStore.getSnapshot().length > 0 ? planStore.progressText() : '无'}`,
+        `  MCP:        ${mcpConfigured > 0 ? `${mcpConfigured} 个服务器` : '未配置'}`,
+        '',
+        '相关: /cache 缓存详情 · /ttl TTL 设置 · /tasks 计划详情',
+      ];
+      return { handled: true, output: lines.join('\n') };
+    }
+
     // ── /help ───────────────────────────────────────────
     if (name === '/help') {
       return {
@@ -310,6 +413,11 @@ export function useCommands(app: App) {
           '  /新建            新建会话（保留系统提示）',
           '  /resume [序号]   恢复历史会话',
           '  /压缩            压缩上下文（保留工具调用完整性）',
+          '  /init            扫描项目并生成 AGENTS.md（自动注入系统提示）',
+          '  /plan            计划模式：只读研究+列计划（蓝色），批准后进入完整权限',
+          '  /完整权限模式    YOLO 模式（红色）：写/执行操作不再确认',
+          '  /tasks           查看/清除任务计划（模型多步任务自动维护）',
+          '  /status          会话状态一览（模型/上下文/缓存/计划）',
           '  /缓存            查看缓存命中率',
           '  /ttl 5m|1h       设置缓存 TTL（立即生效）',
           '  /思考 [on|off]   切换思考块显示',

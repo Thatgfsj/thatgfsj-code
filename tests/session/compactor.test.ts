@@ -85,7 +85,8 @@ describe('ContextCompactor (v3.0.5 atomic groups)', () => {
     expect(compacted[0].role).toBe('system');
     expect(compacted[0].content).toBe('sys');
     expect(compacted[1].role).toBe('system');
-    expect(compacted[1].content).toContain('[Earlier conversation summary');
+    expect(compacted[1].content).toContain('[CONTEXT CHECKPOINT');
+    expect(compacted[1].content).toContain('q0');
     // no assistant tool_calls carriers left dangling
     for (const m of compacted) {
       if (m.role === 'assistant') {

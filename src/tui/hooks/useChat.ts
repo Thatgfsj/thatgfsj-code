@@ -230,6 +230,10 @@ export function useChat(app: App) {
       }
 
       app.session.persist();
+
+      // v3.1.0: the turn is REALLY done (all rounds, stats, persistence).
+      // Plan mode's approval dialog triggers from here.
+      if (!wasAborted) app.onTurnComplete?.();
     } catch (error: any) {
       flushText();
       if (abortRef.current) {

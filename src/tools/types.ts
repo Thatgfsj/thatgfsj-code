@@ -44,6 +44,12 @@ export interface ToolContext {
    * rendered diff so the UI can show exactly what will change.
    */
   confirmEdit?: (info: { message: string }) => Promise<boolean>;
+  /**
+   * v3.1.0: true while plan mode (/计划模式) is active. Tools that write
+   * WITHOUT going through confirmAction/confirmEdit (nwt timeline) must
+   * consult this gate too, otherwise plan mode's read-only promise leaks.
+   */
+  readOnly?: () => boolean;
   signal?: AbortSignal;
   toolCallId?: string;
 }

@@ -32,6 +32,7 @@ import { SkillRegistry } from '../skills/index.js';
 import { CacheStatsStore } from '../cache/stats.js';
 import { compressThinking } from '../utils/thinking.js';
 import { MCPServerManager, type McpConfigFile } from '../mcp/client.js';
+import { createGetContextTool } from '../tools/context.js';
 import type { ChatMessage, ChatResponse, StreamChunk, Usage } from '../types.js';
 
 /** Read ~/.thatgfsj/mcp.json. Missing or corrupted file = no servers. */
@@ -91,14 +92,23 @@ export class App {
   /**
    * v3.0.5: permission mode. 'ask' requires confirmation for write/execute
    * tool actions; 'accept' (--yolo) allows everything.
+   * v3.1.0: 'plan' — read-only research mode: confirmable actions are
+   * auto-denied while the model researches and drafts a plan; approval
+   * transitions to 'accept'.
    */
-  permissionMode: 'ask' | 'accept' = 'ask';
+  permissionMode: 'ask' | 'accept' | 'plan' = 'ask';
   /**
    * v3.0.5: pluggable confirmation UI. The TUI installs an Ink prompt;
    * headless mode leaves it unset → write/execute actions are denied with
    * a note (add --yolo to allow them).
    */
   confirmHandler?: (req: ConfirmRequest) => Promise<boolean>;
+  /**
+   * v3.1.0: fired by useChat when a streaming turn actually finishes (NOT
+   * when isThinking flips false — that happens at the first token). The TUI
+   * uses it to offer plan approval after each turn in plan mode.
+   */
+  onTurnComplete?: () => void;
 
   private constructor(
     config: ConfigManager,
@@ -185,6 +195,17 @@ export class App {
     const app = new App(config, llm, session, tools, hooks, prompts, skills, cacheStats, mcp);
     app.mcpStartupResults = mcpResults;
 
+    // v3.0.20: model-facing context self-check (Codex get_context_remaining
+    // parity). Registered here because the numbers live on the App singleton;
+    // the prompt builder below takes tools.list() AFTER this so the tool is
+    // documented to the model from turn one.
+    tools.register(createGetContextTool(() => ({
+      used: app.sessionStats.promptTokens,
+      window: app.getContextWindow(),
+    })));
+    llm.registerTools(tools.list());
+    prompts.setTools(tools.list());
+
     // v3.0.5: route tool confirmations through App (mode + handler aware)
     app.applyToolContext();
 
@@ -203,6 +224,8 @@ export class App {
       workingDirectory: process.cwd(),
       confirmAction: (msg: string) => this.requestConfirmation({ message: msg }),
       confirmEdit: (info) => this.requestConfirmation({ message: info.message }),
+      // v3.1.0: plan-mode gate for tools that bypass confirmAction entirely.
+      readOnly: () => this.permissionMode === 'plan',
     };
     this.tools.setContext(ctx);
     this.llm.setToolContext(ctx);
@@ -216,6 +239,13 @@ export class App {
    */
   async requestConfirmation(req: ConfirmRequest): Promise<boolean> {
     if (this.permissionMode === 'accept') return true;
+    if (this.permissionMode === 'plan') {
+      // Plan mode is read-only: deny without prompting so the model gets an
+      // immediate "cancelled" signal and falls back to research + planning.
+      // No stderr note here on purpose — mid-stream writes corrupt the Ink
+      // frame; the tool's own cancel message reaches the transcript instead.
+      return false;
+    }
     if (!this.confirmHandler) {
       process.stderr.write(
         `\n  ⛔ 已拒绝：${firstLine(req.message)}\n     （headless 模式默认拒绝写入/执行操作；如需放行请加 --yolo）\n`,
@@ -243,6 +273,21 @@ export class App {
    */
   setYolo(on: boolean): void {
     this.permissionMode = on ? 'accept' : 'ask';
+    this.rebuildSystemPrompt();
+  }
+
+  /**
+   * v3.1.0: plan mode toggle (/计划模式). Read-only research + planning;
+   * the TUI's plan-approval overlay transitions to 'accept' on approval.
+   */
+  setPlanMode(on: boolean): void {
+    this.permissionMode = on ? 'plan' : 'ask';
+    this.rebuildSystemPrompt();
+  }
+
+  /** v3.1.0: enter full-permission (red) mode directly (/完整权限模式). */
+  setFullPermission(): void {
+    this.permissionMode = 'accept';
     this.rebuildSystemPrompt();
   }
 
@@ -277,7 +322,7 @@ export class App {
   /** v3.0.5: rebuild the system prompt (tools / permission mode changed). */
   rebuildSystemPrompt(): void {
     this.prompts.setTools(this.tools.list());
-    this.prompts.setPermissionMode(this.permissionMode === 'accept' ? 'accept' : 'ask');
+    this.prompts.setPermissionMode(this.permissionMode);
     const built = this.prompts.build();
     this.session.replaceSystemMessage(built);
   }

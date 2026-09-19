@@ -12,6 +12,8 @@ import { InitWizard } from './components/InitWizard.js';
 import { ModelSettings } from './components/ModelSettings.js';
 import { ConfirmPrompt } from './components/ConfirmPrompt.js';
 import { Splash } from './components/Splash.js';
+import { PlanPanel } from './components/PlanPanel.js';
+import { PlanApproval } from './components/PlanApproval.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import type { App, ConfirmRequest } from '../app/index.js';
@@ -19,7 +21,7 @@ import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
 import { theme } from './theme.js';
 import { getVersion } from '../version.js';
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -123,14 +125,35 @@ export function TuiApp({ app }: Props) {
         { role: 'assistant', content: `⚠️ 上下文较长（${info.before} 条），已自动压缩到 ${info.after} 条（工具调用块保持完整）。可用 /resume 随时找回历史。` },
       ]);
     };
+    // v3.1.0: offer plan approval when a turn completes in plan mode.
+    app.onTurnComplete = () => {
+      if (app.permissionMode === 'plan') setPlanApproval(true);
+    };
     return () => {
       app.confirmHandler = undefined;
+      app.onTurnComplete = undefined;
     };
   }, [app]);
 
   const onConfirmAnswer = useCallback((allowed: boolean, always: boolean) => {
     confirmResolveRef.current?.({ allowed, always });
   }, []);
+
+  // ── v3.1.0: plan mode (/计划模式) — approval after each turn ──
+  const [planApproval, setPlanApproval] = useState(false);
+  const onPlanApproval = useCallback((decision: 'approve' | 'stay' | 'exit') => {
+    setPlanApproval(false);
+    if (decision === 'approve') {
+      app.setFullPermission(); // red mode
+      addMsg('✓ 计划已批准 — 已进入完整权限模式（红色标识），开始按计划执行。');
+      sendMessage('计划已批准。请严格按照上面的计划开始实现；现在拥有完整权限，执行中的写/操作不再询问。');
+    } else if (decision === 'stay') {
+      addMsg('🔵 继续计划模式（只读）。可继续研究或调整计划；再次完成任务后会重新询问。');
+    } else {
+      app.setPlanMode(false);
+      addMsg('✓ 已退出计划模式，回到默认确认模式。');
+    }
+  }, [app, addMsg, sendMessage]);
 
   const onSubmit = useCallback(async (input: string) => {
     // Model selector - ignore text input
@@ -193,6 +216,66 @@ export function TuiApp({ app }: Props) {
         ].join('\n'));
       }
 
+      if (result.action === 'init_agents') {
+        // v3.0.20 (Codex /init parity): scan the project, have the LLM draft
+        // an AGENTS.md, confirm, write. Runs here because it needs async LLM
+        // access + the confirmation dialog.
+        addMsg('正在扫描项目并生成 AGENTS.md…');
+        try {
+          const cwd = process.cwd();
+          const SKIP = new Set(['node_modules', 'dist', 'build', '.git', '.nwt', 'coverage']);
+          const top = readdirSync(cwd, { withFileTypes: true })
+            .filter(e => !e.name.startsWith('.') && !SKIP.has(e.name))
+            .slice(0, 40)
+            .map(e => (e.isDirectory() ? e.name + '/' : e.name));
+          let pkgInfo = '';
+          try {
+            const p = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf-8'));
+            pkgInfo = [
+              `name: ${p.name}`,
+              `scripts: ${Object.keys(p.scripts || {}).join(', ')}`,
+              `dependencies: ${Object.keys(p.dependencies || {}).slice(0, 20).join(', ')}`,
+            ].join('\n');
+          } catch { /* not a node project */ }
+          let readme = '';
+          try { readme = readFileSync(join(cwd, 'README.md'), 'utf-8').slice(0, 1200); } catch { /* optional */ }
+
+          const prompt = [
+            '为当前项目生成一份 AGENTS.md（AI 编码代理的项目说明书）。只输出 Markdown 正文，不要包裹代码围栏，不要额外解释。',
+            '',
+            '要求：',
+            '- 开头一行项目一句话简介',
+            '- 列出：技术栈、常用命令（构建/测试/运行）、目录结构要点、编码约定（能推断多少写多少，不确定的不要编造）',
+            '- 全文控制在 60 行以内，简体中文',
+            '',
+            `顶层文件/目录:\n${top.join('\n')}`,
+            pkgInfo ? `\npackage.json:\n${pkgInfo}` : '',
+            readme ? `\nREADME 摘录:\n${readme}` : '',
+          ].filter(Boolean).join('\n');
+
+          const resp = await app.llm.chat([{ role: 'user', content: prompt }], { maxTokens: 2000 });
+          let md = (resp.content || '').trim();
+          const fence = md.match(/```(?:markdown)?\n([\s\S]*?)```/);
+          if (fence && /^#\s|^-{3,}/.test(fence[1].trim())) md = fence[1].trim();
+          if (!md) {
+            addMsg('✗ 生成失败：模型返回为空。');
+            return;
+          }
+          if (existsSync(join(cwd, 'AGENTS.md'))) {
+            const ok = await app.requestConfirmation({ message: `AGENTS.md 已存在，覆盖写入？\n\n${md.slice(0, 800)}` });
+            if (!ok) {
+              addMsg('已取消：AGENTS.md 未改动。');
+              return;
+            }
+          }
+          writeFileSync(join(cwd, 'AGENTS.md'), md + '\n', 'utf-8');
+          addMsg(`✓ 已生成 AGENTS.md（${md.split('\n').length} 行）。之后每次会话会自动注入系统提示；也可用 /new 立即生效。`);
+        } catch (e: any) {
+          addMsg(`✗ 生成失败: ${e.message || e}`);
+        }
+        return;
+      }
+
       if (result.action === 'reload_model') {
         await app.reloadModel();
         setResolvedTtl(null);
@@ -246,6 +329,8 @@ export function TuiApp({ app }: Props) {
   // session view); splash keeps the centered fixed-width block.
   const inputArea = confirmReq ? (
     <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
+  ) : planApproval ? (
+    <PlanApproval onAnswer={onPlanApproval} />
   ) : viewMode === 'model_select' ? (
     <ModelSelector
       currentModel={cfg.model}
@@ -274,7 +359,7 @@ export function TuiApp({ app }: Props) {
       onSubmit={onSubmit}
       onCancel={cancel}
       disabled={false}
-      mode="Build"
+      mode={app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}
       provider={cfg.provider}
       model={cfg.model}
       thinking={thinking}
@@ -282,6 +367,19 @@ export function TuiApp({ app }: Props) {
       width={splashMode ? Math.min(terminalWidth - 4, 64) : undefined}
     />
   );
+
+  // v3.1.0: colored mode badge — blue for plan mode, red for full permission.
+  const modeBadge = app.permissionMode === 'plan' ? (
+    <Box paddingLeft={1}>
+      <Text color={theme.info} bold>● 计划模式（只读）</Text>
+      <Text color={theme.textDim}> — 研究中，写/执行被拒绝；批准计划后进入完整权限模式</Text>
+    </Box>
+  ) : app.permissionMode === 'accept' ? (
+    <Box paddingLeft={1}>
+      <Text color={theme.error} bold>● 完整权限模式（YOLO）</Text>
+      <Text color={theme.textDim}> — 写/执行不再确认；/yolo 切回</Text>
+    </Box>
+  ) : null;
 
   // v3.0.15 (borrowed from opencode ui/dialog.tsx): /models opens as a
   // full-screen centered modal overlay, not squeezed into the input slot.
@@ -311,6 +409,7 @@ export function TuiApp({ app }: Props) {
       {splashMode ? (
         <>
           <Splash />
+          {modeBadge}
           <Box justifyContent="center">{inputArea}</Box>
           <Box justifyContent="center" paddingTop={1}>
             <Text color={theme.textFaint}>
@@ -328,6 +427,9 @@ export function TuiApp({ app }: Props) {
             mode="Build"
             model={cfg.model}
           />
+          {/* v3.0.20: live plan panel (Codex update_plan parity) — hidden
+              when the model has no active plan. */}
+          <PlanPanel width={terminalWidth - 4} />
           <Thinking active={isThinking} />
           {queuedMessage && (
             <Box paddingLeft={1}>
@@ -335,6 +437,7 @@ export function TuiApp({ app }: Props) {
               <Text color={theme.textDim}>{queuedMessage}</Text>
             </Box>
           )}
+          {modeBadge}
           {inputArea}
           {/* v3.0.16: StatusBar/version live only in the splash branch —
               during chat they would be re-stamped into the scrollback by

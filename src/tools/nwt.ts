@@ -9,7 +9,7 @@
 import type { Tool, ToolResult } from './types.js';
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync,
-  readdirSync, renameSync, unlinkSync
+  readdirSync, renameSync, unlinkSync, copyFileSync, rmSync
 } from 'fs';
 import { join } from 'path';
 
@@ -28,13 +28,23 @@ interface TimelineEvent {
 const NWT_DIR = '.nwt';
 const EVENTS_DIR = 'events';
 const ARCHIVE_DIR = 'archives';
+const SNAPSHOT_DIR = 'snapshots';
+const MAX_SNAPSHOTS = 5;
 const MAX_EVENTS = 500;
 const ARCHIVE_AFTER_DAYS = 30;
+
+/** v0.2.0 parity: paths are normalized to POSIX form on save so
+ * `src\foo.ts` and `src/foo.ts` index/explain under one key. */
+const toPosix = (p: string) => p.trim().replace(/\\/g, '/');
 
 export class NwtTool implements Tool {
   name = 'nwt';
   description = `NeuroWeave Timeline - Project evolution memory.
 Actions: init, log, history, search, story, explain, archive, diff, compact
+
+log auto-chains: the new event's parent defaults to the latest event.
+Pass parent="none" to start an explicit branch, or parent="<id>" to attach
+to a specific event.
 
 AUTO-LOG TRIGGERS (call nwt log silently when):
 - Created, modified, or deleted 2+ files
@@ -64,6 +74,7 @@ DO NOT log:
       files: { type: 'string', description: 'Comma-separated file paths (for log)' },
       tags: { type: 'string', description: 'Comma-separated tags (for log)' },
       importance: { type: 'string', description: 'Importance: low, normal, high, milestone (for log)' },
+      parent: { type: 'string', description: 'Parent event ID for log; "none" starts a branch; default = latest event' },
       query: { type: 'string', description: 'Search query (for search/explain)' },
       limit: { type: 'number', description: 'Max results (for history/search)' },
       from_id: { type: 'string', description: 'Start event ID (for diff)' },
@@ -85,6 +96,7 @@ DO NOT log:
     { name: 'files', type: 'string', description: 'Comma-separated file paths', required: false },
     { name: 'tags', type: 'string', description: 'Comma-separated tags', required: false },
     { name: 'importance', type: 'string', description: 'low/normal/high/milestone', required: false },
+    { name: 'parent', type: 'string', description: 'Parent event ID; "none" starts a branch; default = latest', required: false },
     { name: 'query', type: 'string', description: 'Search query', required: false },
     { name: 'limit', type: 'number', description: 'Max results', required: false },
     { name: 'from_id', type: 'string', description: 'Start event ID for diff', required: false },
@@ -94,6 +106,15 @@ DO NOT log:
   async execute(params: Record<string, any>, ctx?: any): Promise<ToolResult> {
     const cwd = ctx?.workingDirectory || process.cwd();
     const action = params.action;
+
+    // v3.1.0: plan-mode read-only gate. nwt writes directly to .nwt/ without
+    // a confirmation round-trip, so it must consult ctx.readOnly itself.
+    if (['init', 'log', 'archive', 'compact'].includes(action) && ctx?.readOnly?.()) {
+      return {
+        success: false,
+        error: '计划模式（只读）：NWT 写入已被拒绝。请继续研究与列计划；批准计划后再补记事件。',
+      };
+    }
 
     try {
       switch (action) {
@@ -175,10 +196,22 @@ DO NOT log:
     }, 0);
     const nextId = (maxId + 1).toString().padStart(6, '0');
 
-    // Get parent (last event)
-    const parent = existing.length > 0
-      ? existing.sort().pop()?.replace('.json', '')
-      : undefined;
+    // v0.2.0 parity (auto-chaining): default parent = latest event (highest
+    // id, not filename sort); parent="none" starts an explicit branch;
+    // parent="<id>" attaches to a validated event.
+    const parentParam = typeof params.parent === 'string' ? params.parent.trim() : '';
+    let parent: string | undefined;
+    if (parentParam.toLowerCase() === 'none') {
+      parent = undefined;
+    } else if (parentParam) {
+      const cand = parentParam.padStart(6, '0');
+      if (!existing.includes(`${cand}.json`)) {
+        return { success: false, error: `Parent event ${parentParam} not found. Use parent="none" to start a branch.` };
+      }
+      parent = cand;
+    } else if (maxId > 0) {
+      parent = maxId.toString().padStart(6, '0');
+    }
 
     // Validate importance
     const validImportance = ['low', 'normal', 'high', 'milestone'];
@@ -190,7 +223,7 @@ DO NOT log:
       task: task.trim(),
       summary: summary.trim(),
       reason: reason?.trim() || undefined,
-      files: files ? files.split(',').map((f: string) => f.trim()).filter(Boolean) : [],
+      files: files ? files.split(',').map((f: string) => toPosix(f)).filter(Boolean) : [],
       tags: tags ? tags.split(',').map((t: string) => t.trim().toLowerCase()).filter(Boolean) : [],
       parent: parent || undefined,
       importance: eventImportance as TimelineEvent['importance'],
@@ -348,9 +381,13 @@ DO NOT log:
     if (!fromEvent) return { success: false, error: `Event ${fromId} not found` };
     if (!toEvent) return { success: false, error: `Event ${toId} not found` };
 
-    // Get events between from and to
+    // Get events between from and to. v0.2.0 parity: a reversed range is a
+    // clean validation error (it used to silently produce an empty diff).
     const fromIdx = events.indexOf(fromEvent);
     const toIdx = events.indexOf(toEvent);
+    if (fromIdx > toIdx) {
+      return { success: false, error: `Reversed range: ${fromEvent.id} is newer than ${toEvent.id}. Swap from_id and to_id.` };
+    }
     const between = events.slice(fromIdx, toIdx + 1);
 
     // Collect all files touched
@@ -393,9 +430,13 @@ DO NOT log:
     const nwtDir = join(cwd, NWT_DIR);
     const eventsDir = join(nwtDir, EVENTS_DIR);
 
+    // v0.2.0 parity (corruption fix): snapshot the store BEFORE touching it
+    // — compact renumbers ids, so a mid-write failure must stay recoverable.
+    this.snapshotEvents(nwtDir, eventsDir);
+
     // Group consecutive events with same tags
-    const groups: TimelineEvent[][] = [];
-    let currentGroup: TimelineEvent[] = [events[0]];
+    const chains: TimelineEvent[][] = [];
+    let chain: TimelineEvent[] = [events[0]];
 
     for (let i = 1; i < events.length; i++) {
       const prev = events[i - 1];
@@ -407,38 +448,46 @@ DO NOT log:
       const closeInTime = timeDiff < 3600000; // 1 hour
 
       if (sameTags && closeInTime) {
-        currentGroup.push(curr);
+        chain.push(curr);
       } else {
-        groups.push(currentGroup);
-        currentGroup = [curr];
+        chains.push(chain);
+        chain = [curr];
       }
     }
-    groups.push(currentGroup);
+    chains.push(chain);
 
-    // Merge groups with 3+ events
+    // Merge chains with 3+ events
     let merged = 0;
-    const newEvents: TimelineEvent[] = [];
+    const survivors: TimelineEvent[] = [];
+    /** merged-away event id → the survivor (group head) that absorbed it. */
+    const absorbedBy = new Map<string, string>();
 
-    for (const group of groups) {
+    for (const group of chains) {
       if (group.length >= 3) {
-        // Merge into one summary event
+        // Merge into one summary event. The first event's task/reason/parent
+        // carry over so the merged event stays anchored in the chain.
         const first = group[0];
         const last = group[group.length - 1];
         const allFiles = [...new Set(group.flatMap(e => e.files))];
         const allTags = [...new Set(group.flatMap(e => e.tags))];
 
-        newEvents.push({
+        survivors.push({
           id: first.id,
           timestamp: first.timestamp,
-          task: `${first.task} ... ${last.task}`,
+          task: `${first.task} … ${last.task}`,
           summary: `Compacted ${group.length} events: ${group.map(e => e.task).join(', ')}`,
+          reason: first.reason,
           files: allFiles,
           tags: allTags,
-          importance: first.importance,
+          parent: first.parent,
+          importance: first.importance === 'milestone' ? 'milestone'
+            : group.some(e => e.importance === 'milestone') ? 'milestone'
+              : first.importance,
         });
+        for (const e of group) absorbedBy.set(e.id, first.id);
         merged += group.length - 1;
       } else {
-        newEvents.push(...group);
+        survivors.push(...group);
       }
     }
 
@@ -446,25 +495,71 @@ DO NOT log:
       return { success: true, output: 'No events to compact.' };
     }
 
-    // Re-write events
-    for (const file of readdirSync(eventsDir).filter(f => f.endsWith('.json'))) {
-      unlinkSync(join(eventsDir, file));
+    // Renumber contiguously and REMAP parent references (v0.2.0 corruption
+    // fix: renumbering used to leave parent fields pointing at ids that no
+    // longer exist). Parents pointing at merged-away events resolve to the
+    // absorbing survivor's new id; parents outside the store stay untouched.
+    const idMap = new Map<string, string>();
+    const renumbered: TimelineEvent[] = [];
+    survivors.forEach((e, i) => {
+      const newId = (i + 1).toString().padStart(6, '0');
+      idMap.set(e.id, newId);
+      renumbered.push({ ...e, id: newId });
+    });
+    for (const e of renumbered) {
+      if (!e.parent) continue;
+      const resolved = absorbedBy.get(e.parent) ?? e.parent;
+      if (idMap.has(resolved)) {
+        e.parent = idMap.get(resolved);
+      }
     }
 
-    for (let i = 0; i < newEvents.length; i++) {
-      const event = newEvents[i];
-      event.id = (i + 1).toString().padStart(6, '0');
-      writeFileSync(join(eventsDir, `${event.id}.json`), JSON.stringify(event, null, 2));
+    // Rewrite the store: write the new numbering first, then drop stale
+    // files beyond the new range (id N kept its file name when unchanged,
+    // so only delete what no longer belongs).
+    const newIds = new Set(renumbered.map(e => e.id));
+    for (const e of renumbered) {
+      writeFileSync(join(eventsDir, `${e.id}.json`), JSON.stringify(e, null, 2));
+    }
+    for (const file of readdirSync(eventsDir).filter(f => f.endsWith('.json'))) {
+      if (!newIds.has(file.replace('.json', ''))) {
+        try { unlinkSync(join(eventsDir, file)); } catch { /* best-effort */ }
+      }
     }
 
     return {
       success: true,
-      output: `Compacted: ${events.length} → ${newEvents.length} events (merged ${merged})`,
+      output: `Compacted: ${events.length} → ${renumbered.length} events (merged ${merged}, parents remapped). Snapshot: .nwt/${SNAPSHOT_DIR}/`,
     };
+  }
+
+  /** Copy every event file into .nwt/snapshots/<stamp>/ before a destructive rewrite. */
+  private snapshotEvents(nwtDir: string, eventsDir: string): void {
+    try {
+      if (!existsSync(eventsDir)) return;
+      const snapDir = join(nwtDir, SNAPSHOT_DIR, `compact-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+      mkdirSync(snapDir, { recursive: true });
+      for (const f of readdirSync(eventsDir).filter(f => f.endsWith('.json'))) {
+        try { copyFileSync(join(eventsDir, f), join(snapDir, f)); } catch { /* best-effort */ }
+      }
+      // Keep only the newest MAX_SNAPSHOTS snapshots.
+      const snapRoot = join(nwtDir, SNAPSHOT_DIR);
+      const dirs = readdirSync(snapRoot).sort();
+      while (dirs.length > MAX_SNAPSHOTS) {
+        const oldest = dirs.shift()!;
+        try { rmSync(join(snapRoot, oldest), { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    } catch { /* best-effort — snapshotting must never break the caller */ }
   }
 
   // ── Archive ───────────────────────────────────────────
 
+  /**
+   * Move events older than ARCHIVE_AFTER_DAYS out of events/ into the
+   * monthly archive. v0.2.0 parity fix: the aggregate archive file is
+   * APPENDED to (a second archive run on the same day used to overwrite
+   * the first one and lose those events).
+   */
   private archive(cwd: string): ToolResult {
     const nwtDir = join(cwd, NWT_DIR);
     const eventsDir = join(nwtDir, EVENTS_DIR);
@@ -478,20 +573,21 @@ DO NOT log:
     cutoff.setDate(cutoff.getDate() - ARCHIVE_AFTER_DAYS);
 
     const files = readdirSync(eventsDir).filter(f => f.endsWith('.json')).sort();
-    const toArchive: string[] = [];
-    const toKeep: string[] = [];
+    const toArchive: TimelineEvent[] = [];
+    const toArchiveFiles: string[] = [];
+    let kept = 0;
 
     for (const file of files) {
       try {
         const event = JSON.parse(readFileSync(join(eventsDir, file), 'utf-8'));
-        const eventDate = new Date(event.timestamp);
-        if (eventDate < cutoff) {
-          toArchive.push(file);
+        if (new Date(event.timestamp) < cutoff) {
+          toArchive.push(event);
+          toArchiveFiles.push(file);
         } else {
-          toKeep.push(file);
+          kept++;
         }
       } catch {
-        toKeep.push(file);
+        kept++; // corrupted file — keep in place rather than destroy it
       }
     }
 
@@ -499,85 +595,40 @@ DO NOT log:
       return { success: true, output: 'No events old enough to archive.' };
     }
 
-    // Create archive file
+    if (!existsSync(archiveDir)) mkdirSync(archiveDir, { recursive: true });
+
+    // Append to the same-day aggregate (never overwrite).
     const archiveName = `archive-${new Date().toISOString().split('T')[0]}.json`;
-    const archiveEvents = toArchive.map(f => {
-      return JSON.parse(readFileSync(join(eventsDir, f), 'utf-8'));
-    });
+    const archivePath = join(archiveDir, archiveName);
+    let aggregate: TimelineEvent[] = [];
+    if (existsSync(archivePath)) {
+      try { aggregate = JSON.parse(readFileSync(archivePath, 'utf-8')); } catch { aggregate = []; }
+      if (!Array.isArray(aggregate)) aggregate = [];
+    }
+    aggregate.push(...toArchive);
+    writeFileSync(archivePath, JSON.stringify(aggregate, null, 2));
 
-    writeFileSync(
-      join(archiveDir, archiveName),
-      JSON.stringify(archiveEvents, null, 2)
-    );
-
-    // Remove archived events from events dir
-    for (const file of toArchive) {
-      const src = join(eventsDir, file);
-      try { renameSync(src, join(archiveDir, file)); } catch {}
+    // Keep a per-event copy alongside the aggregate, then drop the original.
+    for (const file of toArchiveFiles) {
+      try { renameSync(join(eventsDir, file), join(archiveDir, file)); } catch {}
     }
 
     return {
       success: true,
-      output: `Archived ${toArchive.length} events to archives/${archiveName}. ${toKeep.length} events remain.`,
+      output: `Archived ${toArchive.length} events to archives/${archiveName}. ${kept} events remain.`,
     };
   }
 
   // ── Auto Archive ──────────────────────────────────────
 
+  /**
+   * v0.2.0 parity: init/log now share ONE archive implementation (the old
+   * duplicate grew a divergent overwrite behavior — same-day auto-archive
+   * and manual archive could clobber each other's aggregate file).
+   */
   private autoArchiveIfNeeded(cwd: string): void {
     try {
-      const nwtDir = join(cwd, NWT_DIR);
-      const eventsDir = join(nwtDir, EVENTS_DIR);
-      const archiveDir = join(nwtDir, ARCHIVE_DIR);
-
-      if (!existsSync(eventsDir)) return;
-
-      const files = readdirSync(eventsDir).filter(f => f.endsWith('.json'));
-      if (files.length === 0) return;
-
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - ARCHIVE_AFTER_DAYS);
-
-      const toArchive: string[] = [];
-      const toKeep: string[] = [];
-
-      for (const file of files) {
-        try {
-          const event = JSON.parse(readFileSync(join(eventsDir, file), 'utf-8'));
-          const eventDate = new Date(event.timestamp);
-          if (eventDate < cutoff) {
-            toArchive.push(file);
-          } else {
-            toKeep.push(file);
-          }
-        } catch {
-          toKeep.push(file);
-        }
-      }
-
-      if (toArchive.length === 0) return;
-
-      // Create monthly archive file
-      const archiveName = `archive-${new Date().toISOString().split('T')[0]}.json`;
-      const archiveEvents = toArchive.map(f => {
-        return JSON.parse(readFileSync(join(eventsDir, f), 'utf-8'));
-      });
-
-      if (!existsSync(archiveDir)) mkdirSync(archiveDir, { recursive: true });
-
-      // Append to existing archive or create new
-      const archivePath = join(archiveDir, archiveName);
-      let existing: any[] = [];
-      if (existsSync(archivePath)) {
-        try { existing = JSON.parse(readFileSync(archivePath, 'utf-8')); } catch {}
-      }
-      existing.push(...archiveEvents);
-      writeFileSync(archivePath, JSON.stringify(existing, null, 2));
-
-      // Remove archived files from events dir
-      for (const file of toArchive) {
-        try { renameSync(join(eventsDir, file), join(archiveDir, file)); } catch {}
-      }
+      this.archive(cwd);
     } catch {
       // Silent fail - don't break init
     }
@@ -594,7 +645,12 @@ DO NOT log:
 
     for (const file of files) {
       try {
-        events.push(JSON.parse(readFileSync(join(eventsDir, file), 'utf-8')));
+        const ev = JSON.parse(readFileSync(join(eventsDir, file), 'utf-8'));
+        // Shape guard: a structurally invalid event file (e.g. `{}`) must be
+        // skipped, not crash every read action that touches it.
+        if (ev && typeof ev.id === 'string' && typeof ev.timestamp === 'string' && typeof ev.task === 'string') {
+          events.push(ev);
+        }
       } catch {
         // Skip corrupted files
       }

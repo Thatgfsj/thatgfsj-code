@@ -8,6 +8,9 @@ AI 编程助手 — 终端里的 AI 编程伙伴
 
 - **Ink TUI** — React 驱动的终端 UI，流式输出、Markdown 渲染
 - **Agent 工具调用** — AI 可以读写文件、执行命令、搜索代码、操作 Git，写/删文件前展示 diff 并请求确认
+- **apply_patch 多文件原子补丁** — Codex V4A 格式：一次调用完成增/改/删/改名多个文件，上下文锚定定位，整包一次确认
+- **任务计划** — AI 对多步任务自动维护 `update_plan` 计划面板，实时显示进度；`/plan` 计划模式批准即执行；AGENTS.md 项目记忆逐层注入
+- **分级审批** — 只读命令免确认直接跑，写/执行类才询问（Codex 式），`--yolo` 全放行
 - **内置浏览器（Playwright）** — 首次运行可选择安装内置 Chromium（约 200MB，独立运行，不影响你的浏览器），AI 用它搜索网页、读取页面，零 API key
 - **MCP 支持** — 接入 Model Context Protocol 服务器（stdio），工具动态注册进对话，`~/.thatgfsj/mcp.json` 配置
 - **会话持久化** — 每轮自动保存到 `~/.thatgfsj/sessions/`，`/resume` 随时恢复历史会话
@@ -16,7 +19,7 @@ AI 编程助手 — 终端里的 AI 编程伙伴
 - **上下文自动压缩** — 超过阈值按"完整工具调用块"原子压缩，不产生孤儿 tool_calls
 - **Prompt Caching** — Reasonix 式缓存架构：稳定序列化、Anthropic cache_control 断点、智能 TTL、命中率统计
 - **16 个内置 Skills** — 规划、调试、TDD、架构优化、代码审查等
-- **NeuroWeave Timeline** — 项目演进记忆，自动归档（30天）
+- **NeuroWeave Timeline** — 项目演进记忆（v0.2.0 融合：事件自动链式、importance、diff/compact、快照备份与 parent 重映射、归档不丢数据）
 - **多 Provider** — 15 个平台 + 自定义中转站，含 Ollama 本地模型
 - **消息队列** — AI 工作时输入补充说明，完成后自动处理
 - **中文命令** — `/模型` `/新建` `/压缩` `/技能` 等
@@ -68,7 +71,7 @@ gfcode "跑一下测试并总结结果" --json
 gfcode --yolo
 
 # 指定模型
-gfcode -m gpt-4o "你的任务"
+gfcode -m deepseek-flash "你的任务"
 
 # 思考强度 off|low|medium|high（需模型支持）
 gfcode -t low "任务"
@@ -76,11 +79,21 @@ gfcode -t low "任务"
 
 ### 权限确认
 
-写/执行类操作（shell、git 写操作、文件写入/删除）默认需要确认：
+写/执行类操作默认需要确认（分级审批）：
 
-- 文件写入会展示**逐行 diff**（超长自动截断）
+- **只读命令免确认**：`git status/log/diff`、`ls`、`cat` 等检查类命令直接执行（Codex 式分级）
+- 文件写入展示**逐行 diff**（超长自动截断）；`apply_patch` 整包补丁一次确认
 - `y` 允许一次 · `a` 本会话全部允许 · `n` 拒绝（60 秒无响应自动拒绝）
 - headless / 非 TTY 环境默认**拒绝**，需要放行请加 `--yolo`（TUI 内也可用 `/yolo` 切换）
+- shell 输出超 8000 字符自动 head+tail 截断，保护上下文窗口
+
+### 三种权限模式
+
+| 模式 | 命令 | 界色标识 | 行为 |
+|------|------|----------|------|
+| 默认确认 | - | 无 | 只读免确认，写/执行询问 |
+| 🔵 计划模式 | `/plan`（`/计划模式`） | 蓝色 | 只读研究 + `update_plan` 列计划，写/执行自动拒绝；每轮结束弹出批准框，**批准后自动进入完整权限模式并开始执行** |
+| 🔴 完整权限模式 | `/完整权限模式`（`/yolo`） | 红色 | 写/执行不再确认，直接执行 |
 
 ### 内置命令
 
@@ -91,6 +104,10 @@ gfcode -t low "任务"
 | `/new` | `/新建` | 新建会话（保留系统提示） |
 | `/resume [序号]` | `/恢复` | 恢复历史会话 |
 | `/compact` | `/压缩` | 压缩上下文（保持工具调用完整） |
+| `/init` | - | 扫描项目并生成 AGENTS.md（自动注入系统提示） |
+| `/plan` | `/计划模式` | 计划模式：只读研究+列计划，批准后全自动执行（蓝色） |
+| `/tasks` | `/任务` | 查看/清除任务计划（模型多步任务自动维护） |
+| `/status` | `/状态` | 会话状态一览（模型/上下文/缓存/计划） |
 | `/cache` | `/缓存` | 缓存命中率统计（`/cache reset` 清零） |
 | `/ttl 5m\|1h` | `/ttl` | 设置缓存 TTL（立即生效） |
 | `/thinking on\|off` | `/思考` | 切换思考块显示 |
@@ -101,6 +118,10 @@ gfcode -t low "任务"
 | `exit` | - | 退出 |
 
 输入 `/` 会弹出命令选择框，↑↓ 选择，Tab 补全。
+
+### AGENTS.md 项目记忆
+
+启动时自动按链发现并注入系统提示：全局 `~/.thatgfsj/AGENTS.md` → 项目根（`.git` 所在目录）→ 当前目录，逐层拼接、去重、截断。运行 `/init` 可让 AI 扫描项目自动生成一份。
 
 ### MCP 配置
 
@@ -139,19 +160,19 @@ AI 工作时可以继续输入，消息会排队等待：
 
 | Provider | 格式 | 默认模型 |
 |----------|------|----------|
-| SiliconFlow | OpenAI | Qwen2.5-7B |
-| OpenAI | OpenAI | gpt-4o-mini |
-| DeepSeek | OpenAI | deepseek-chat |
+| SiliconFlow | OpenAI | Qwen/Qwen3.5-35B-A3B |
+| OpenAI | OpenAI | gpt-5.4-mini |
+| DeepSeek | OpenAI | deepseek-flash |
 | Kimi | OpenAI | kimi-k2.6 |
-| Zhipu GLM | OpenAI | glm-4-flash |
-| MiniMax | OpenAI | MiniMax-Text-01 |
+| Zhipu GLM | OpenAI | glm-5.2 |
+| MiniMax | OpenAI | MiniMax-M2.5 |
 | Baichuan | OpenAI | Baichuan4 |
 | Stepfun | OpenAI | step-1-flash |
 | Doubao | OpenAI | doubao-1.5-pro-32k |
 | Anthropic | Anthropic | claude-sonnet-5 |
-| Gemini | Gemini | gemini-2.0-flash |
-| ERNIE | OpenAI | ernie-4.5-8k |
-| Ollama | OpenAI | llama3.1 |
+| Gemini | Gemini | gemini-3.8-flash |
+| ERNIE | OpenAI | ernie-5.0-thinking-latest |
+| Ollama | OpenAI | qwen3.6 |
 | **自定义 OpenAI** | OpenAI | 中转站 |
 | **自定义 Anthropic** | Anthropic | 中转站 |
 
