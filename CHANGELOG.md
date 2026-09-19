@@ -4,6 +4,12 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.14] - 2026-09-19  - 浏览器策略调整：仅用内置 Chromium
+
+### Changed
+
+- 按用户要求，browser 工具改为**只使用内置 Chromium**，不再探测/启动用户自己的 Edge/Chrome；首次运行的安装选项即下载内置 Chromium（约 195MB）。
+
 ## [3.0.13] - 2026-09-19  - 本机浏览器（Playwright）+ token 统计 + 85% 自动压缩
 
 ### Added

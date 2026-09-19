@@ -1,10 +1,10 @@
 /**
- * First-run browser setup (v3.0.13).
+ * First-run browser setup (v3.0.14).
  *
- * On the first interactive run we ask whether to enable the Playwright
- * browser service. Priority: use the system Edge/Chrome (zero download) —
- * only offer the bundled Chromium download when no system browser exists.
- * The outcome is persisted so the question never repeats.
+ * On the first interactive run we ask whether to install the Playwright
+ * browser service. Choosing yes downloads the BUNDLED Chromium (~130MB) —
+ * the user's own Edge/Chrome is never touched or launched. The outcome is
+ * persisted so the question never repeats.
  *
  * Non-interactive environments (piped stdin, --json) skip silently.
  */
@@ -25,19 +25,10 @@ export async function ensureBrowserSetup(config: ConfigManager): Promise<void> {
 
   console.log();
   console.log(chalk.bold('  浏览器服务（Playwright）'));
-  console.log(chalk.gray('  让 AI 能用你本机的浏览器搜索网页、读取页面内容。'));
+  console.log(chalk.gray('  安装后 AI 能用内置浏览器搜索网页、读取页面内容（独立运行，不影响你的浏览器）。'));
 
   try {
-    console.log(chalk.gray('  正在检测本机浏览器（Edge/Chrome）…'));
-    const found = await BrowserTool.probeSystemBrowser();
-
-    if (found) {
-      await config.save({ browserSetup: { done: true, mode: found } });
-      console.log(chalk.green(`  ✓ 检测到本机 ${found === 'msedge' ? 'Edge' : 'Chrome'}，浏览器工具已就绪（无需下载）。`));
-      return;
-    }
-
-    const answer = await ask(chalk.cyan('  未检测到 Edge/Chrome。是否下载 Playwright 内置 Chromium（约 130MB）？[y/N] '));
+    const answer = await ask(chalk.cyan('  是否安装？将下载内置 Chromium（约 130MB，一次性）[y/N] '));
     if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
       console.log(chalk.gray('  正在下载 Chromium（一次性，可能需要几分钟）…'));
       try {

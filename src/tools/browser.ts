@@ -6,9 +6,9 @@
  * through the local network stack (works in China; Bing/Baidu are direct).
  *
  * Design notes:
- *   - Uses `playwright-core` (≈3MB, no browser downloads) and drives the
- *     system Edge/Chrome via the `channel` option — Windows ships Edge, so
- *     zero browser installation for virtually every user.
+ *   - Uses `playwright-core` (≈3MB, no browser downloads) with the BUNDLED
+ *     Chromium only (installed via `npx playwright install chromium` on
+ *     first run) — the user's own Edge/Chrome is never launched.
  *   - The browser launches lazily on first use and is reused across calls;
  *     it is killed on process exit.
  *   - `search`  : engine search (bing | baidu), returns title/url/snippet
@@ -96,26 +96,16 @@ export class BrowserTool implements Tool {
       }
     }
 
-    const channels = ['msedge', 'chrome']; // system browsers — no download needed
-    let lastErr: any = null;
-    for (const channel of channels) {
-      try {
-        BrowserTool.browser = await BrowserTool.pw.chromium.launch({ channel, headless: true });
-        break;
-      } catch (err) {
-        lastErr = err;
-      }
-    }
-    if (!BrowserTool.browser) {
-      // Last resort: playwright's own chromium, if the user installed it.
-      try {
-        BrowserTool.browser = await BrowserTool.pw.chromium.launch({ headless: true });
-      } catch {
-        BrowserTool.launchError =
-          `No usable browser found (tried Edge, Chrome, bundled Chromium). ` +
-          `Install one, or run: npx playwright install chromium. (${lastErr?.message ?? 'unknown error'})`;
-        throw new Error(BrowserTool.launchError);
-      }
+    // v3.0.14: bundled Chromium ONLY — the user's own Edge/Chrome is never
+    // launched (their explicit preference). Chromium is installed via
+    // `npx playwright install chromium` in the first-run setup.
+    try {
+      BrowserTool.browser = await BrowserTool.pw.chromium.launch({ headless: true });
+    } catch {
+      BrowserTool.launchError =
+        'Playwright Chromium is not installed yet. Run `gfcode` once and choose ' +
+        'to install it (≈130MB), or run manually: npx playwright install chromium';
+      throw new Error(BrowserTool.launchError);
     }
 
     if (!BrowserTool.exitHookInstalled) {
@@ -217,36 +207,11 @@ export class BrowserTool implements Tool {
   }
 
   /**
-   * v3.0.13: probe for a system browser WITHOUT keeping it open.
-   * Returns the channel name ('msedge' | 'chrome') or null.
-   * Used by the first-run setup to decide whether a Chromium download is
-   * needed. Non-fatal on every failure path.
+   * v3.0.14: verify the BUNDLED Chromium launches (setup completed).
+   * Returns 'chromium' on success, null otherwise. System browsers are
+   * intentionally not considered.
    */
-  static async probeSystemBrowser(): Promise<'msedge' | 'chrome' | null> {
-    let pw: any;
-    try {
-      pw = await import('playwright-core');
-    } catch {
-      return null;
-    }
-    for (const channel of ['msedge', 'chrome'] as const) {
-      let browser: any = null;
-      try {
-        browser = await pw.chromium.launch({ channel, headless: true });
-        return channel;
-      } catch {
-        // try next
-      } finally {
-        try { browser?.close(); } catch { /* ignore */ }
-      }
-    }
-    return null;
-  }
-
-  /** Verify a browser can launch; returns the mode that worked, else null. */
-  static async verifyLaunch(): Promise<'msedge' | 'chrome' | 'chromium' | null> {
-    const sys = await BrowserTool.probeSystemBrowser();
-    if (sys) return sys;
+  static async verifyLaunch(): Promise<'chromium' | null> {
     try {
       const pw: any = await import('playwright-core');
       const browser = await pw.chromium.launch({ headless: true });

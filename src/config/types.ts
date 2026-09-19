@@ -72,9 +72,10 @@ export interface Config {
   contextWindow?: number;
   /**
    * v3.0.13: first-run browser (Playwright) setup state — the question
-   * is only asked once; mode records what was set up.
+   * is only asked once; mode records what was set up. v3.0.14: the
+   * bundled Chromium is used exclusively (never the user's own browser).
    */
-  browserSetup?: { done: boolean; mode?: 'msedge' | 'chrome' | 'chromium' | 'declined' };
+  browserSetup?: { done: boolean; mode?: 'chromium' | 'declined' };
   /**
    * v3.0.8: user-added model ids (via /models → 添加模型). Free-text ids
    * that join the provider's catalog in the model picker.

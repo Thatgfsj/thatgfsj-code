@@ -8,7 +8,7 @@ AI 编程助手 — 终端里的 AI 编程伙伴
 
 - **Ink TUI** — React 驱动的终端 UI，流式输出、Markdown 渲染
 - **Agent 工具调用** — AI 可以读写文件、执行命令、搜索代码、操作 Git，写/删文件前展示 diff 并请求确认
-- **本机浏览器（Playwright）** — AI 直接驱动你本机的 Edge/Chrome 搜索网页、读取页面（无 API key、首次运行引导安装）
+- **本机浏览器（Playwright）** — 首次运行可选择安装内置 Chromium（约 130MB，独立运行，不影响你的浏览器），AI 用它搜索网页、读取页面，零 API key
 - **MCP 支持** — 接入 Model Context Protocol 服务器（stdio），工具动态注册进对话，`~/.thatgfsj/mcp.json` 配置
 - **会话持久化** — 每轮自动保存到 `~/.thatgfsj/sessions/`，`/resume` 随时恢复历史会话
 - **Headless 模式** — `gfcode "任务" --json` 输出行分隔 JSON 事件流，可脚本化 / 接 CI
