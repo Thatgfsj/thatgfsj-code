@@ -89,6 +89,15 @@ export interface ChatOptions {
    * Ctrl+C / the UI cancel button actually aborts the HTTP request.
    */
   signal?: AbortSignal;
+  /**
+   * v3.0.8: reasoning effort for thinking-capable models ('off' = send
+   * no thinking parameters at all — maximum provider compatibility).
+   * Wire mapping (OpenAI-compatible providers):
+   *   off        → nothing
+   *   low/medium/high → reasoning_effort: <level> + enable_thinking: true
+   * (SiliconFlow/Qwen3.5, DeepSeek 等支持 enable_thinking；其他厂商忽略未知字段)
+   */
+  thinking?: 'off' | 'low' | 'medium' | 'high';
 }
 
 /**

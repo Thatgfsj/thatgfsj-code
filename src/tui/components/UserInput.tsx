@@ -8,14 +8,21 @@ interface Props {
   onSubmit: (input: string) => void;
   onCancel: () => void;
   disabled?: boolean;
+  /** Second info line, opencode-style: mode · model · thinking. */
+  mode?: string;
+  provider?: string;
+  model?: string;
+  thinking?: 'off' | 'low' | 'medium' | 'high';
+  width?: number;
 }
 
 /**
- * v3.0.6 (opencode-style input): a rounded-border input field with an
- * accent `❯` prompt, placeholder text when empty, and a dim keybinding
- * hint bar underneath. Command completion still pops up above the box.
+ * v3.0.8 (opencode-style input): a left accent bar instead of a full
+ * border, placeholder text when empty, an info line (mode · model ·
+ * thinking) under the entry line, and keybinding hints below the box.
+ * Command completion still pops up above.
  */
-export function UserInput({ onSubmit, onCancel, disabled }: Props) {
+export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provider, model, thinking = 'off', width }: Props) {
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
@@ -52,8 +59,6 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
       }
       if (key.tab || key.return) {
         const selected = filteredCommands[selectedCmd] || filteredCommands[0];
-        // Enter on a list item EXECUTES the command directly; Tab writes
-        // the name into the input so the user can append args.
         if (key.return) {
           setSelectedCmd(0);
           setValue('');
@@ -121,7 +126,7 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
   });
 
   return (
-    <Box flexDirection="column" marginBottom={0}>
+    <Box flexDirection="column">
       {showCommands && filteredCommands.length > 0 && (
         <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
           {filteredCommands.map((cmd, i) => (
@@ -138,23 +143,35 @@ export function UserInput({ onSubmit, onCancel, disabled }: Props) {
         </Box>
       )}
       <Box
-        borderStyle="round"
-        borderColor={disabled ? theme.border : theme.accentDim}
-        paddingX={1}
-        width="100%"
+        borderLeft
+        borderLeftColor={disabled ? theme.border : theme.accent}
+        borderStyle="bold"
+        paddingLeft={1}
+        paddingRight={1}
+        flexDirection="column"
+        width={width ? Math.min(width, 64) : '100%'}
       >
         <Box>
-          <Text color={theme.accent} bold>{disabled ? ' ' : '❯ '}</Text>
-          {value ? (
-            <Text>{value}</Text>
-          ) : (
-            !disabled && <Text color={theme.textFaint}>有什么可以帮你？（/ 命令 · exit 退出）</Text>
+          <Text>{value ? value : <Text color={theme.textFaint}>随便问点什么…（"修一下 TODO" / /help 看命令）</Text>}</Text>
+          {!disabled && <Text color={theme.text}>█</Text>}
+        </Box>
+        <Box>
+          <Text color={theme.info}>{mode}</Text>
+          <Text color={theme.textFaint}> · </Text>
+          <Text color={theme.textDim}>{model || ''}</Text>
+          {provider && <Text color={theme.textFaint}> ({provider})</Text>}
+          {thinking !== 'off' && (
+            <>
+              <Text color={theme.textFaint}> · </Text>
+              <Text color={theme.accent}>thinking:{thinking}</Text>
+            </>
           )}
-          {!disabled && <Text color={theme.accent}>█</Text>}
         </Box>
       </Box>
-      <Box paddingLeft={1}>
-        <Text color={theme.textFaint}>↑↓ 历史 · /help 命令 · esc 取消 · ctrl+c 退出</Text>
+      <Box justifyContent="flex-end" width={width ? Math.min(width, 64) : '100%'} paddingRight={0}>
+        <Text color={theme.textFaint}>
+          enter 发送 · /help 命令 · /models 模型 · ctrl+c 退出
+        </Text>
       </Box>
     </Box>
   );

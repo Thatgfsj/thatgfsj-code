@@ -243,6 +243,14 @@ export class OpenAIProvider implements LLMProvider {
       max_tokens: options?.maxTokens ?? this.config.maxTokens,
       stream,
       ...(stream && { stream_options: { include_usage: true } }),
+      // v3.0.8: thinking effort. Only sent when the user opted in for this
+      // model ('off' sends nothing — unknown params can 400 on strict
+      // providers). reasoning_effort is the OpenAI-standard field;
+      // enable_thinking is the SiliconFlow/Qwen3.5 field.
+      ...(options?.thinking && options.thinking !== 'off' && {
+        reasoning_effort: options.thinking,
+        enable_thinking: true,
+      }),
     };
 
     // Add tools if provided - this is critical for structured tool calling

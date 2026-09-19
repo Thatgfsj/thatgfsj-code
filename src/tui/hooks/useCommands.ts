@@ -10,7 +10,7 @@ interface CommandResult {
    * app.tsx after the sync output is displayed (reloadModel / applyTtl /
    * session load are async or need React state access).
    */
-  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume';
+  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume' | 'model_settings';
   payload?: any;
 }
 
@@ -33,10 +33,13 @@ const CMD_ALIASES: Record<string, string> = {
   '/继续': '/resume',
   '/yolo': '/yolo',
   '/YOLO': '/yolo',
+  '/模型设置': '/models',
+  '/模型管理': '/models',
 };
 
 export const COMMAND_LIST = [
   { name: '/模型', desc: '切换模型' },
+  { name: '/models', desc: '模型设置（添加/上下文/思考）' },
   { name: '/服务商', desc: '更换服务商' },
   { name: '/新建', desc: '新建会话' },
   { name: '/resume', desc: '恢复历史会话' },
@@ -135,6 +138,11 @@ export function useCommands(app: App) {
       }
       // Async load handled by app.tsx (needs React hydration).
       return { handled: true, output: '', action: 'resume', payload: idx - 1 };
+    }
+
+    // ── /models — 模型设置对话框 ─────────────────────────
+    if (name === '/models') {
+      return { handled: true, action: 'model_settings' };
     }
 
     // ── /yolo ───────────────────────────────────────────
@@ -285,6 +293,7 @@ export function useCommands(app: App) {
         output: [
           '命令列表:',
           '  /模型 <名称>    切换模型（立即生效）',
+          '  /models         模型设置：添加模型/上下文长度/思考强度',
           '  /服务商          更换服务商',
           '  /新建            新建会话（保留系统提示）',
           '  /resume [序号]   恢复历史会话',

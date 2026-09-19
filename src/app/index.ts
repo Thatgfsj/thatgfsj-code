@@ -276,6 +276,51 @@ export class App {
     this.session.replaceSystemMessage(built);
   }
 
+  // ── v3.0.8: model settings (per-model thinking / context length, custom models)
+
+  /** Effective thinking effort for a model: per-model override → 'off'. */
+  getThinking(modelId?: string): 'off' | 'low' | 'medium' | 'high' {
+    const c = this.config.get();
+    const id = modelId || c.model;
+    return c.modelSettings?.[id]?.thinking ?? 'off';
+  }
+
+  async setModelThinking(modelId: string, thinking: 'off' | 'low' | 'medium' | 'high'): Promise<void> {
+    const c = this.config.get();
+    const ms = { ...(c.modelSettings || {}) };
+    ms[modelId] = { ...ms[modelId], thinking };
+    await this.config.save({ modelSettings: ms });
+  }
+
+  async setModelContextLength(modelId: string, n: number): Promise<void> {
+    const c = this.config.get();
+    const ms = { ...(c.modelSettings || {}) };
+    ms[modelId] = { ...ms[modelId], contextLength: n };
+    await this.config.save({ modelSettings: ms });
+    // Live-apply when editing the CURRENT model's session window.
+    if (modelId === c.model) {
+      this.session.setMaxMessages(n);
+    }
+  }
+
+  async addCustomModel(id: string): Promise<void> {
+    const c = this.config.get();
+    const list = [...new Set([...(c.customModels || []), id.trim()])].filter(Boolean);
+    await this.config.save({ customModels: list });
+  }
+
+  async removeCustomModel(id: string): Promise<void> {
+    const c = this.config.get();
+    const list = (c.customModels || []).filter(m => m !== id);
+    await this.config.save({ customModels: list });
+  }
+
+  /** Models available in the picker: current + custom additions. */
+  listConfiguredModels(): string[] {
+    const c = this.config.get();
+    return [...new Set([c.model, ...(c.customModels || [])])].filter(Boolean);
+  }
+
   /**
    * v3.0.5: TUI hook-up — show MCP startup results as an in-chat message.
    * Returns a short multi-line report (empty when no servers configured).
@@ -327,7 +372,8 @@ export class App {
    */
   async *streamResponse(messages?: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncGenerator<StreamChunk, ChatResponse> {
     const msgs = messages || this.session.getMessages();
-    const inner = this.llm.chatStream(msgs, { signal: opts?.signal });
+    // v3.0.8: per-model thinking effort rides along with every request.
+    const inner = this.llm.chatStream(msgs, { signal: opts?.signal, thinking: this.getThinking() });
     const debugUsage = !!process.env.GFCODE_DEBUG_USAGE;
     // v3.0.3: read TTL the LLMService resolved this round (sticky per session).
     this.resolvedTtl = this.llm.getResolvedTTL();

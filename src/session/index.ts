@@ -223,6 +223,18 @@ export class SessionManager {
   }
 
   /**
+   * v3.0.8: change the compaction threshold live (model settings dialog).
+   */
+  setMaxMessages(n: number): void {
+    this.maxMessages = Math.max(5, Math.min(1000, Math.floor(n) || 50));
+    this.compactor = new ContextCompactor({ maxMessages: this.maxMessages });
+  }
+
+  getMaxMessages(): number {
+    return this.maxMessages;
+  }
+
+  /**
    * v3.0.5: replace the (first) system prompt in place — used when tools or
    * the permission mode change and the prompt must be rebuilt without
    * resetting the conversation.

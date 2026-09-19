@@ -53,6 +53,21 @@ export interface Config {
     ttl?: '5m' | '1h' | 'auto';
     strategy?: 'auto' | 'manual' | 'off';
   };
+  /**
+   * v3.0.8: per-model settings managed by the /models dialog.
+   * - contextLength: overrides the global contextLength for this model
+   * - thinking: reasoning effort sent to thinking-capable models
+   *   ('off' sends no thinking params at all — maximum compatibility)
+   */
+  modelSettings?: Record<string, {
+    contextLength?: number;
+    thinking?: 'off' | 'low' | 'medium' | 'high';
+  }>;
+  /**
+   * v3.0.8: user-added model ids (via /models → 添加模型). Free-text ids
+   * that join the provider's catalog in the model picker.
+   */
+  customModels?: string[];
 }
 
 export interface AIConfig {

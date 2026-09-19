@@ -8,13 +8,16 @@ import { UserInput } from './components/UserInput.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ModelSelector } from './components/ModelSelector.js';
 import { InitWizard } from './components/InitWizard.js';
+import { ModelSettings } from './components/ModelSettings.js';
 import { ConfirmPrompt } from './components/ConfirmPrompt.js';
+import { Splash } from './components/Splash.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
 import { theme } from './theme.js';
+import { getVersion } from '../version.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -37,8 +40,15 @@ function saveModelToHistory(model: string) {
   }
 }
 
-type ViewMode = 'chat' | 'model_select' | 'init_wizard';
+type ViewMode = 'chat' | 'model_select' | 'init_wizard' | 'model_settings';
 
+/**
+ * v3.0.8 (opencode-style full-screen layout): the app owns the whole
+ * terminal (render fullscreen). First screen is a centered splash logo
+ * with the input right under it; once the conversation starts, the chat
+ * list fills the viewport and the input pins to the bottom. The version
+ * sits in the bottom-right corner at all times.
+ */
 export function TuiApp({ app }: Props) {
   const { messages, isThinking, streaming, streamingToolCalls, queuedMessage, sendMessage, cancel, hydrateMessages } = useChat(app);
   const { handleCommand } = useCommands(app);
@@ -46,12 +56,12 @@ export function TuiApp({ app }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
+  const terminalRows = (stdout as any)?.rows || 30;
 
-  // v3.0.0: cache stats snapshot for the Header.
   const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
-  // v3.0.3: resolved TTL (sticky per session). null until first round.
   const [resolvedTtl, setResolvedTtl] = useState<'5m' | '1h' | null>(app.resolvedTtl);
   const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
+  const thinking = app.getThinking();
   useEffect(() => {
     setCacheSnapshot(app.cacheStats.snapshot());
     setResolvedTtl(app.resolvedTtl);
@@ -62,17 +72,12 @@ export function TuiApp({ app }: Props) {
   }, []);
 
   // ── v3.0.5: permission prompt wiring ──────────────────────
-  // The pending confirmation is held in React state and rendered INSTEAD of
-  // UserInput, so keystrokes can not double-feed into the chat box while a
-  // tool asks for permission. App.requestConfirmation resolves through this.
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
   const confirmResolveRef = useRef<((v: { allowed: boolean; always: boolean }) => void) | null>(null);
 
   useEffect(() => {
     app.confirmHandler = (req) => new Promise<boolean>((resolve) => {
       setConfirmReq(req);
-      // v3.0.5 fix: dismiss the prompt UI itself on timeout — App's side of
-      // the race resolves the permission answer, this resolves the rendering.
       const timer = setTimeout(() => {
         confirmResolveRef.current?.({ allowed: false, always: false });
       }, 60000);
@@ -91,7 +96,6 @@ export function TuiApp({ app }: Props) {
         resolve(v.allowed);
       };
     });
-    // Route auto-compact notices into the chat area instead of stderr.
     app.session.onAutoCompact = (info) => {
       setSystemMessages(prev => [
         ...prev,
@@ -111,12 +115,16 @@ export function TuiApp({ app }: Props) {
     // Model selector - ignore text input
     if (viewMode === 'model_select') return;
 
-    // Normal command handling
     const result = handleCommand(input);
 
     if (result.handled) {
       if (input.trim() === '/模型' || input.trim() === '/model') {
         setViewMode('model_select');
+        return;
+      }
+
+      if (result.action === 'model_settings') {
+        setViewMode('model_settings');
         return;
       }
 
@@ -134,19 +142,16 @@ export function TuiApp({ app }: Props) {
         setViewMode('init_wizard');
       }
 
-      // v3.0.5: /model — hot-swap provider+model now.
       if (result.action === 'reload_model') {
         await app.reloadModel();
         setResolvedTtl(null);
       }
 
-      // v3.0.5: /ttl — apply immediately.
       if (result.action === 'apply_ttl' && result.payload) {
         await app.applyTtl(result.payload as '5m' | '1h');
         setResolvedTtl(result.payload);
       }
 
-      // v3.0.5: /resume <n> — load the session file and hydrate the chat list.
       if (result.action === 'resume') {
         const list = SessionManager.list(10);
         const summary = list[result.payload as number];
@@ -177,67 +182,101 @@ export function TuiApp({ app }: Props) {
 
   const allMessages = [...systemMessages, ...messages];
   const activeSkills = app.skills.listActive().map(s => s.id);
+  const splashMode = allMessages.length === 0;
+  const inputWidth = splashMode ? Math.min(terminalWidth - 4, 64) : Math.min(terminalWidth - 2, 100);
+  const cfg = app.config.get();
+
+  const inputArea = confirmReq ? (
+    <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
+  ) : viewMode === 'model_settings' ? (
+    <ModelSettings app={app} onClose={() => setViewMode('chat')} width={inputWidth} />
+  ) : viewMode === 'model_select' ? (
+    <ModelSelector
+      currentModel={cfg.model}
+      currentProvider={cfg.provider}
+      onSelect={(model) => {
+        app.config.save({ model });
+        saveModelToHistory(model);
+        void app.reloadModel().then(() => setResolvedTtl(null));
+        setViewMode('chat');
+        addMsg(`模型已切换: ${model}`);
+      }}
+      onAddNew={() => setViewMode('init_wizard')}
+    />
+  ) : viewMode === 'init_wizard' ? (
+    <InitWizard
+      onComplete={(provider, model, apiKey, baseUrl) => {
+        app.config.save({ provider, model, apiKey, baseUrl });
+        saveModelToHistory(model);
+        setViewMode('chat');
+        addMsg(`配置完成: ${provider} / ${model}`);
+      }}
+      onCancel={() => setViewMode('chat')}
+    />
+  ) : (
+    <UserInput
+      onSubmit={onSubmit}
+      onCancel={cancel}
+      disabled={false}
+      mode="Build"
+      provider={cfg.provider}
+      model={cfg.model}
+      thinking={thinking}
+      width={inputWidth}
+    />
+  );
 
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Header
-        cacheHitRate={cacheSnapshot.hitRate > 0 ? cacheSnapshot.hitRate : null}
-        cacheSavingsCNY={cacheSnapshot.estimatedSavingsCNY}
-        cacheTtl={resolvedTtl ?? configTtl ?? null}
-        width={terminalWidth}
-      />
-      <ChatList
-        messages={allMessages}
-        streaming={streaming}
-        streamingToolCalls={streamingToolCalls}
-        width={terminalWidth - 4}
-      />
-      <Thinking active={isThinking} />
-      {queuedMessage && (
-        <Box paddingLeft={1}>
-          <Text color={theme.warning}>📎 已排队: </Text>
-          <Text color={theme.textDim}>{queuedMessage}</Text>
-        </Box>
-      )}
-      {viewMode === 'model_select' ? (
-        <ModelSelector
-          currentModel={app.config.get().model}
-          currentProvider={app.config.get().provider}
-          onSelect={(model) => {
-            // v3.0.5: fire-and-forget hot reload — the selector returns to
-            // chat immediately, the provider swap lands a moment later.
-            app.config.save({ model });
-            saveModelToHistory(model);
-            void app.reloadModel().then(() => setResolvedTtl(null));
-            setViewMode('chat');
-            addMsg(`模型已切换: ${model}`);
-          }}
-          onAddNew={() => setViewMode('init_wizard')}
-        />
-      ) : viewMode === 'init_wizard' ? (
-        <InitWizard
-          onComplete={(provider, model, apiKey, baseUrl) => {
-            app.config.save({ provider, model, apiKey, baseUrl });
-            saveModelToHistory(model);
-            setViewMode('chat');
-            addMsg(`配置完成: ${provider} / ${model}`);
-          }}
-          onCancel={() => setViewMode('chat')}
-        />
-      ) : confirmReq ? (
-        // v3.0.5: exclusive input ownership while a tool asks for permission.
-        <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
+    <Box flexDirection="column" height={terminalRows} width={terminalWidth} paddingX={1}>
+      {splashMode ? (
+        <>
+          <Splash />
+          <Box justifyContent="center">{inputArea}</Box>
+          <Box justifyContent="center" paddingTop={1}>
+            <Text color={theme.textFaint}>
+              <Text color={theme.accent}>◆ Tip </Text>
+              {' '}/models 可添加模型、设置上下文长度和思考强度 · /help 查看全部命令
+            </Text>
+          </Box>
+          <Box flexGrow={1} />
+        </>
       ) : (
-        <Box flexDirection="column">
-          <UserInput onSubmit={onSubmit} onCancel={cancel} disabled={false} />
-        </Box>
+        <>
+          <Header
+            cacheHitRate={cacheSnapshot.hitRate > 0 ? cacheSnapshot.hitRate : null}
+            cacheSavingsCNY={cacheSnapshot.estimatedSavingsCNY}
+            cacheTtl={resolvedTtl ?? configTtl ?? null}
+            width={terminalWidth}
+          />
+          <Box flexDirection="column" flexGrow={1}>
+            <ChatList
+              messages={allMessages}
+              streaming={streaming}
+              streamingToolCalls={streamingToolCalls}
+              width={terminalWidth - 4}
+            />
+            <Thinking active={isThinking} />
+            {queuedMessage && (
+              <Box paddingLeft={1}>
+                <Text color={theme.warning}>📎 已排队: </Text>
+                <Text color={theme.textDim}>{queuedMessage}</Text>
+              </Box>
+            )}
+          </Box>
+          {inputArea}
+          <Box flexGrow={0} />
+        </>
       )}
       <StatusBar
         messageCount={allMessages.length}
         skills={activeSkills}
-        provider={app.config.get().provider}
-        model={app.config.get().model}
+        provider={cfg.provider}
+        model={cfg.model}
       />
+      <Box justifyContent="space-between" width="100%">
+        <Text color={theme.textFaint}>~</Text>
+        <Text color={theme.textFaint}>v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
+      </Box>
     </Box>
   );
 }

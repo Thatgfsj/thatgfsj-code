@@ -9,6 +9,8 @@ import { ToolCall } from '../../src/tui/components/ToolCall.js';
 import { ChatMessage } from '../../src/tui/components/ChatMessage.js';
 import { Thinking } from '../../src/tui/components/Thinking.js';
 import { ConfirmPrompt } from '../../src/tui/components/ConfirmPrompt.js';
+import { Splash } from '../../src/tui/components/Splash.js';
+import { UserInput } from '../../src/tui/components/UserInput.js';
 import { mcpToolName } from '../../src/mcp/client.js';
 import { getVersion } from '../../src/version.js';
 
@@ -91,5 +93,42 @@ describe('TUI components (v3.0.6 opencode-style render)', () => {
 
   it('MCP tool names stay provider-safe (used by ToolCall label)', () => {
     expect(mcpToolName('fs server', 'read/file')).toMatch(/^[a-zA-Z0-9_-]+$/);
+  });
+
+  it('Splash renders the two-tone block logo (v3.0.8)', () => {
+    const { lastFrame } = render(<Splash />);
+    const frame = lastFrame() || '';
+    expect(frame).toContain('███████');
+    expect(frame).toContain('██████');
+  });
+
+  it('UserInput shows placeholder, info line and thinking chip (v3.0.8)', () => {
+    const { lastFrame } = render(
+      <UserInput
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        mode="Build"
+        provider="siliconflow"
+        model="Qwen/Qwen3.5-35B-A3B"
+        thinking="low"
+      />,
+    );
+    const frame = lastFrame() || '';
+    expect(frame).toContain('随便问点什么');
+    expect(frame).toContain('Build');
+    expect(frame).toContain('Qwen/Qwen3.5-35B-A3B');
+    expect(frame).toContain('thinking:low');
+    expect(frame).toContain('/models');
+  });
+
+  it('UserInput hides thinking chip when off (v3.0.8)', () => {
+    const { lastFrame } = render(
+      <UserInput onSubmit={() => {}} onCancel={() => {}} mode="Build" provider="p" model="m" thinking="off" />,
+    );
+    expect(lastFrame() || '').not.toContain('thinking');
+  });
+
+  it('version helper matches package.json (single source)', () => {
+    expect(getVersion()).toBe('3.0.8');
   });
 });

@@ -1,8 +1,27 @@
 # Changelog
 
 All notable changes to **Thatgfsj Code** are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/) and the project adheres to
+[Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
+
+## [3.0.8] - 2026-09-19  - 全屏 opencode 风格 + 模型设置面板
+
+### Added
+
+- **全屏化 TUI**：交互模式进入终端交替屏幕缓冲（exit 恢复原终端），首屏为居中
+  块状 logo（gf 灰 / code 亮的双色调，仿 opencode）；对话开始后消息区占满视口、
+  输入框钉在底部；右下角常驻版本号。
+- **模型设置面板 `/models`**（别名 `/模型设置`）：
+  - `a` 添加自定义模型（任意 model id，持久化到 config.json）
+  - `c` 按模型设置上下文长度（当前模型即时生效到会话压缩阈值）
+  - `t` 思考强度循环 off → low → medium → high
+  - `d` 删除自定义模型；↑↓ 选择，esc 关闭
+- **思考强度参数接入**：`thinking ≠ off` 时 OpenAI 兼容层发送
+  `reasoning_effort` + `enable_thinking: true`（SiliconFlow/Qwen3.5 系列实测生效，
+  `off` 不发送任何参数保证兼容性）；新增 `-t, --thinking <level>` CLI 参数。
+- 输入框改 opencode 式左侧强调竖条 + 双行信息（Build · 模型 · thinking 标签）
+  + 底部快捷键提示行。
+- 各平台推荐模型目录更新至 2026-09 现行版本。
 
 ## [3.0.7] - 2026-09-19  - 真实环境实测修复（SiliconFlow/Qwen）
 

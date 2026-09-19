@@ -61,8 +61,14 @@ program
   .option('--show-thinking', 'Show full <think>...</think> reasoning blocks (default: compress to one-line summary)')
   .option('--json', 'Headless JSON output: line-delimited events on stdout, human text on stderr')
   .option('--yolo', 'Allow all tool actions without confirmation')
+  .option('-t, --thinking <level>', 'Reasoning effort for thinking-capable models: off|low|medium|high', (v: string) => {
+    if (!['off', 'low', 'medium', 'high'].includes(v)) {
+      throw new Error('--thinking 只接受 off | low | medium | high');
+    }
+    return v as 'off' | 'low' | 'medium' | 'high';
+  })
   .action(async (prompt: string | undefined, options: {
-    model?: string; interactive?: boolean; showThinking?: boolean; json?: boolean; yolo?: boolean;
+    model?: string; interactive?: boolean; showThinking?: boolean; json?: boolean; yolo?: boolean; thinking?: 'off' | 'low' | 'medium' | 'high';
   }) => {
     try {
       const jsonMode = !!options.json;
@@ -72,6 +78,10 @@ program
 
       const app = await App.create();
       app.setYolo(!!options.yolo);
+
+      if (options.thinking) {
+        await app.setModelThinking(app.config.get().model, options.thinking);
+      }
 
       // Check if API key is configured
       if (!app.config.hasApiKey()) {
@@ -108,13 +118,24 @@ program
       }
 
       if (!prompt || options.interactive) {
-        // Interactive mode - Ink TUI
+        // Interactive mode - Ink TUI, full-screen via the alternate screen
+        // buffer (opencode-style: owns the whole viewport, terminal is
+        // restored on exit). Ink v7 has no fullscreen option, so we drive
+        // the alt screen manually.
         const { render } = await import('ink');
         const { TuiApp } = await import('../tui/app.js');
-        const { unmount } = render(<TuiApp app={app} />);
-        await new Promise<void>((resolve) => {
-          process.on('exit', () => { unmount(); resolve(); });
-        });
+        const out = process.stdout;
+        const altScreen = !!out.isTTY;
+        if (altScreen) out.write('\x1b[?1049h\x1b[2J\x1b[H');
+        try {
+          const instance = render(<TuiApp app={app} />);
+          const restore = () => instance.unmount();
+          process.once('exit', restore);
+          await instance.waitUntilExit();
+          process.removeListener('exit', restore);
+        } finally {
+          if (altScreen) out.write('\x1b[?1049l');
+        }
         return;
       }
 
