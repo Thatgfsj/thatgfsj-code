@@ -1,107 +1,54 @@
 import { useState, useCallback, useRef } from 'react';
-import { useStdout } from 'ink';
-import chalk from 'chalk';
 import type { MessageData } from '../components/ChatMessage.js';
 import { formatToolLabel, formatToolResultLine } from '../components/ToolCall.js';
 import type { App } from '../../app/index.js';
 import { compressThinking } from '../../utils/thinking.js';
 import { formatTokens } from '../../utils/tokens.js';
-import { theme } from '../theme.js';
+import { getVersion } from '../../version.js';
 import type { StreamChunk, ToolCall, ToolCallResult, Usage } from '../../types.js';
 
 interface ChatState {
   /**
-   * v3.0.16: DISPLAY-ONLY message list. Completed assistant text no longer
-   * lives here — it is committed straight into the terminal scrollback while
-   * streaming (claude-code style append-only rendering), so the list only
-   * carries user messages, errors and notices (auto-compact, /commands…).
+   * The Static item list. EVERYTHING the user sees — user messages, streamed
+   * assistant text (in batched plain chunks), tool lines, stats, notices —
+   * lives here as immutable entries. Ink's <Static> renders each entry
+   * exactly once into the terminal scrollback and never touches it again,
+   * which is what keeps the mouse wheel usable while streaming.
    */
   messages: MessageData[];
   isThinking: boolean;
   queuedMessage: string | null;
-  /**
-   * v3.0.0: Latest cache usage emitted by the provider, surfaced to the TUI
-   * Header. Null when no usage data was returned (e.g. provider does not
-   * support cache stats or streaming without stream_options.include_usage).
-   */
+  /** Latest usage from the provider (cache chips / auto-compact checks). */
   lastUsage: Usage | null;
 }
 
 /**
  * Hook for managing chat state and the streaming response lifecycle.
  *
- * v3.0.16 (scroll-wheel fix, claude-code "two-region" rendering):
- * streaming text/tool lines are NO LONGER React state. The old design kept
- * the growing text in `streaming` state, so Ink re-rendered (and re-erase/
- * redrew) an ever-taller frame on every chunk — dragging the viewport back
- * to the bottom and locking the mouse wheel. Now:
+ * v3.0.18 (final scroll fix — "everything is Static"): the previous
+ * attempt (3.0.15/16) wrote streamed text to stdout BESIDE the live Ink
+ * frame. Manual writes move the cursor without telling Ink, so Ink's next
+ * frame redraw of the (constant-height) input box stomped old frame
+ * copies into the middle of the streamed text — the `┏━━┓` stamping the
+ * user reported. The robust design, per the Claude Code architecture
+ * study, is simpler:
  *
- *   - completed region: past messages via <Static> + streamed text/tool
- *     lines written straight to stdout through Ink's `useStdout().write()`
- *     (erase current frame → append text permanently → redraw frame below),
- *     batched to a ~30fps frame budget;
- *   - live region: a CONSTANT-height frame (thinking spinner + input +
- *     status bar + queue notice; the ChatList contributes 0 lines because
- *     it only renders <Static>). Row count never grows while streaming,
- *     so the terminal never auto-scrolls and the wheel stays usable.
+ *   - streamed text is buffered and committed as NEW <Static> items every
+ *     ~200ms (Static renders each item once, then never re-renders it —
+ *     Ink manages all cursor movement itself);
+ *   - tool pending/result lines, the token chip, and the per-round stats
+ *     line are Static items too;
+ *   - the live frame is ONLY the constant-height region (thinking spinner
+ *     + input box + queue notice).
  *
  * Persisted message order still matches the source chunks exactly:
  *   - text chunks → accumulated into fullContent (compressed via
  *     compressThinking before persistence)
  *   - tool_calls chunks → session/agent-loop behavior unchanged
- *   - usage chunks → surfaced via state.lastUsage for the TUI Header
+ *   - usage chunks → lastUsage state + auto-compact check
  */
 
-/** Batched writer: appends text to the permanent scrollback region. */
-class StreamWriter {
-  private buffer = '';
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  /** 3.0.9 assistant label, printed once before the first streamed char. */
-  private labelWritten = false;
-
-  constructor(
-    private readonly emit: (data: string) => void,
-    private readonly label: string,
-    private readonly throttleMs = 33,
-  ) {}
-
-  /** Queue a raw chunk of assistant text (label auto-prefixed once). */
-  text(s: string): void {
-    if (!s) return;
-    if (!this.labelWritten) {
-      this.labelWritten = true;
-      this.buffer += '\n' + chalk.hex(theme.textFaint)(this.label) + '\n';
-    }
-    this.buffer += s;
-    this.schedule();
-  }
-
-  /** Write immediately (tool lines / notices), flushing queued text first. */
-  now(data: string): void {
-    this.flush();
-    this.emit(data);
-  }
-
-  private schedule(): void {
-    if (this.timer) return;
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      this.flush();
-    }, this.throttleMs);
-    this.timer.unref?.();
-  }
-
-  flush(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    if (!this.buffer) return;
-    const data = this.buffer;
-    this.buffer = '';
-    this.emit(data);
-  }
-}
+const FLUSH_MS = 200;
 
 export function useChat(app: App) {
   const [state, setState] = useState<ChatState>({
@@ -110,163 +57,146 @@ export function useChat(app: App) {
     queuedMessage: null,
     lastUsage: null,
   });
-  // Ink's managed write: erase frame → write data permanently → redraw the
-  // (constant-height) frame below it. Falls back to raw stdout outside Ink.
-  const { write: inkWrite } = useStdout();
   const processingRef = useRef(false);
   const queuedRef = useRef<string | null>(null);
   const abortRef = useRef(false);
-  // v3.0.5: real AbortController — cancel now aborts the provider fetch
-  // instead of only stopping the render loop while tokens keep generating.
+  // v3.0.5: real AbortController — cancel aborts the provider fetch.
   const abortCtrlRef = useRef<AbortController | null>(null);
+  /** Brand header is committed once per process. */
+  const headerCommittedRef = useRef(false);
+
+  /** Append an immutable item to the Static list. */
+  const commit = useCallback((item: Partial<MessageData> & { content: string }) => {
+    setState(prev => ({
+      ...prev,
+      messages: [...prev.messages, { role: 'assistant' as const, ...item } as MessageData],
+    }));
+  }, []);
 
   const processStream = async (input: string) => {
     abortRef.current = false;
     const ctrl = new AbortController();
     abortCtrlRef.current = ctrl;
-    setState(prev => ({
-      ...prev,
-      messages: [...prev.messages, { role: 'user', content: input }],
-      isThinking: true,
-      queuedMessage: null,
-    }));
+    commit({ role: 'user', content: input } as any);
+    setState(prev => ({ ...prev, isThinking: true, queuedMessage: null }));
 
     app.session.addMessage('user', input);
 
-    const emit = (data: string) => {
-      if (inkWrite) inkWrite(data);
-      else process.stdout.write(data);
+    // ── streamed-text batching ──
+    let pendingText = '';
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushText = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (!pendingText) return;
+      const chunk = pendingText;
+      pendingText = '';
+      commit({ content: chunk, plain: true });
     };
-    const cfgModel = app.config.get().model || '';
-    const writer = new StreamWriter(emit, `▪ Build${cfgModel ? ` · ${cfgModel}` : ''}`);
+    const scheduleFlush = () => {
+      if (flushTimer) return;
+      flushTimer = setTimeout(() => { flushTimer = null; flushText(); }, FLUSH_MS);
+      flushTimer.unref?.();
+    };
+    const writeText = (s: string) => { pendingText += s; scheduleFlush(); };
 
-    /** Pending `⎿ name(args) ⟳` line, colored like the <ToolCall/> component. */
+    const cfgModel = app.config.get().model || '';
+    /** Dim plain line (tool calls, chips, stats). */
+    const commitDim = (line: string) => { flushText(); commit({ content: line, plain: true, dim: true }); };
+
+    // First turn in this session: brand header as Static items.
+    if (!headerCommittedRef.current) {
+      headerCommittedRef.current = true;
+      const cols = process.stdout.columns || 80;
+      commit({ content: `◆ THATGFSJ v${getVersion()}`, plain: true, dim: true });
+      commit({ content: '─'.repeat(Math.max(20, cols - 2)), plain: true, dim: true });
+    }
+    // Assistant label line (once per turn, before the first streamed char).
+    let labelWritten = false;
+    const writeLabelOnce = () => {
+      if (labelWritten) return;
+      labelWritten = true;
+      commitDim(`▪ Build${cfgModel ? ` · ${cfgModel}` : ''}`);
+    };
+
+    /** Pending `⎿ name(args) ⟳` line. */
     const writePendingLine = (tc: ToolCall) => {
       const { title, detail } = formatToolLabel(tc.function.name, tc.function.arguments);
-      writer.now(
-        '  ' +
-        chalk.hex(theme.toolMark)('⎿ ') +
-        chalk.hex(theme.accentDim)(title) +
-        (detail ? ' ' + chalk.hex(theme.textDim)(detail) : '') +
-        chalk.hex(theme.textFaint)(' ⟳') +
-        '\n',
-      );
+      commitDim(`  ⎿ ${title}${detail ? ' ' + detail : ''} ⟳`);
     };
 
-    /** Result summary line, same shape/color rules as <ToolCall/>. */
+    /** Result summary line, same shape as <ToolCall/>. */
     const writeResultLine = (r: ToolCallResult) => {
       const line = formatToolResultLine(r.output, !r.ok);
-      if (!line) return;
-      writer.now('    ' + chalk.hex(line.color)(line.text) + '\n');
+      if (line) commitDim(`    ${line.text}`);
     };
 
     const stream = app.streamResponse(undefined, { signal: ctrl.signal });
     let fullContent = '';
-    // Any tool call seen this turn (keeps persistence gating identical).
     let sawToolCalls = false;
-    // Latest usage from this round; surfaced via state.lastUsage.
     let lastUsage: Usage | null = null;
-    // v3.0.13: completion tokens summed across all rounds of this turn —
-    // appended as a faint `· Nt` chip when the turn completes.
+    // v3.0.13: completion tokens summed across all rounds of this turn.
     let turnCompletionTokens = 0;
-    // Spinner turns off at the first visible output (text or tool line).
     let sawOutput = false;
 
     try {
       for await (const chunk of stream as AsyncIterable<StreamChunk>) {
-        // Check abort
-        if (abortRef.current) {
-          break;
-        }
+        if (abortRef.current) break;
 
         switch (chunk.type) {
           case 'text':
             if (chunk.content) {
               fullContent += chunk.content;
-              if (!sawOutput) {
-                sawOutput = true;
-                setState(prev => ({ ...prev, isThinking: false }));
-              }
-              writer.text(chunk.content);
+              if (!sawOutput) { sawOutput = true; writeLabelOnce(); setState(prev => ({ ...prev, isThinking: false })); }
+              writeText(chunk.content);
             }
             break;
 
           case 'thinking':
-            // Reasoning text. We do not append it to fullContent (it is
-            // stripped from persistence in compressThinking), but when
-            // showThinking is on it streams straight to the scrollback too.
+            // Reasoning text: not part of fullContent unless showThinking.
             if (app.showThinking && chunk.content) {
-              fullContent += chunk.content;
-              if (!sawOutput) {
-                sawOutput = true;
-                setState(prev => ({ ...prev, isThinking: false }));
-              }
-              writer.text(chunk.content);
+              if (!sawOutput) { sawOutput = true; writeLabelOnce(); setState(prev => ({ ...prev, isThinking: false })); }
+              writeText(chunk.content);
             }
             break;
 
           case 'tool_calls':
             if (chunk.toolCalls && chunk.toolCalls.length > 0) {
               sawToolCalls = true;
-              if (!sawOutput) {
-                sawOutput = true;
-                setState(prev => ({ ...prev, isThinking: false }));
-              }
+              if (!sawOutput) { sawOutput = true; setState(prev => ({ ...prev, isThinking: false })); }
               if (chunk.pending) {
-                // v3.0.16: pre-execution announcement → one ⟳ line per call.
                 for (const tc of chunk.toolCalls) writePendingLine(tc);
               } else {
-                // Results chunk: index-aligned outcome line per call.
-                const results = chunk.results || [];
-                for (const r of results) writeResultLine(r);
+                for (const r of chunk.results || []) writeResultLine(r);
               }
             }
             break;
 
           case 'usage':
             lastUsage = chunk.usage;
-            // v3.0.13: sum completion tokens across agent-loop rounds.
             turnCompletionTokens += chunk.usage.completion_tokens || 0;
             setState(prev => ({ ...prev, lastUsage: chunk.usage }));
             break;
         }
       }
+      flushText();
 
-      // v2.2.4 (port from v2.1.0): DO NOT persist truncated assistant
-      // messages. The previous code literally wrote `'\n\n[已中断]'`
-      // as a suffix and persisted it — which is what created the
-      // hallucination loop where the next turn's LLM echoed the
-      // marker back. The fix is two-pronged:
-      //   1. Never persist when the stream was aborted (here).
-      //   2. SessionManager.addMessageSafe drops messages that match
-      //      the pollution filter as a belt-and-suspenders check
-      //      for cases where we somehow persist a polluted message.
+      // v2.2.4: never persist aborted/truncated assistant messages (the
+      // [已中断] hallucination loop — see SessionManager.addMessageSafe).
       const wasAborted = abortRef.current;
-      const shouldPersist = !wasAborted &&
-        (fullContent.trim() || sawToolCalls);
+      const shouldPersist = !wasAborted && (fullContent.trim() || sawToolCalls);
 
       if (shouldPersist) {
-        // v2.2.5: strip  blocks from the persisted message
-        // when compression is enabled. Same rationale as in
-        // cmd/index.tsx — keeps history compact, avoids re-feeding
-        // reasoning into the next turn's context window.
         const toPersist = compressThinking(fullContent, app.showThinking);
         app.session.addMessageSafe('assistant', toPersist);
       }
 
-      // Commit whatever is still queued, then the turn's token chip.
-      // v2.2.6 note: the old belt-and-suspenders "[tool: name → result]"
-      // summary was display-only; result lines are now painted under each
-      // ⎿ call line the moment the results chunk arrives, so no suffix.
-      writer.flush();
       if (shouldPersist && turnCompletionTokens > 0) {
-        emit(chalk.hex(theme.textFaint)(`  · ${formatTokens(turnCompletionTokens)}t\n`));
+        commitDim(`  · ${formatTokens(turnCompletionTokens)}t`);
       }
 
-      // v3.0.16: per-round session stats line (replaces the StatusBar in
-      // chat mode — a live StatusBar re-stamps into the scrollback on
-      // every frame; a printed line is permanent and scroll-safe).
-      // Defensive: missing app facilities degrade to zeros, never throw.
+      // v3.0.16: per-round session stats line (chat mode's replacement for
+      // the StatusBar — a live StatusBar re-stamps via frame redraws; a
+      // Static line is permanent). Defensive against stub apps in tests.
       let stats: any = { promptTokens: 0, completionTokens: 0 };
       let win = 128000;
       let snap: any = { totalInputTokens: 0, estimatedSavingsCNY: 0 };
@@ -278,42 +208,26 @@ export function useChat(app: App) {
       const pct = stats.promptTokens > 0 && win > 0
         ? Math.min(999, Math.round((stats.promptTokens / win) * 100))
         : 0;
-      emit(chalk.gray(
+      commitDim(
         `  ctx ${formatTokens(stats.promptTokens)}/${formatTokens(win)} (${pct}%)` +
         ` · ↑${formatTokens(snap.totalInputTokens ?? 0)} ↓${formatTokens(stats.completionTokens ?? 0)}` +
-        ` · 节省 ¥${Number(snap.estimatedSavingsCNY ?? 0).toFixed(2)}\n`,
-      ));
+        ` · 节省 ¥${Number(snap.estimatedSavingsCNY ?? 0).toFixed(2)}`,
+      );
 
-      // v3.0.16: the assistant text itself is ALREADY in the scrollback
-      // (appended live above the frame) — nothing is added to `messages`
-      // here. Only notices/errors land in the React display list.
-      setState(prev => ({
-        ...prev,
-        messages: [...prev.messages],
-        isThinking: false,
-        lastUsage,
-      }));
+      setState(prev => ({ ...prev, isThinking: false, lastUsage }));
 
-      // v3.0.13: token-aware auto-compact — when this round's prompt tokens
-      // reached 85% of the model's context window, compact now and surface
-      // the notice in the chat.
+      // v3.0.13: auto-compact at 85% of the model's context window.
       const compactNotice = app.maybeAutoCompact(lastUsage ?? undefined);
       if (compactNotice) {
-        setState(prev => ({
-          ...prev,
-          messages: [...prev.messages, { role: 'assistant' as const, content: compactNotice }],
-        }));
+        commit({ content: compactNotice });
       }
 
       app.session.persist();
     } catch (error: any) {
-      writer.flush();
+      flushText();
       if (abortRef.current) {
-        setState(prev => ({
-          ...prev,
-          messages: [...prev.messages, { role: 'assistant' as const, content: '[已中断]' }],
-          isThinking: false,
-        }));
+        commit({ content: '[已中断]' });
+        setState(prev => ({ ...prev, isThinking: false }));
       } else {
         const msg = error.message || String(error);
         let errorMsg = `Error: ${msg}`;
@@ -328,11 +242,8 @@ export function useChat(app: App) {
           errorMsg = `[已中断]`;
         }
 
-        setState(prev => ({
-          ...prev,
-          messages: [...prev.messages, { role: 'assistant' as const, content: errorMsg }],
-          isThinking: false,
-        }));
+        commit({ content: errorMsg });
+        setState(prev => ({ ...prev, isThinking: false }));
       }
     }
 
@@ -373,7 +284,7 @@ export function useChat(app: App) {
     setState(prev => ({ ...prev, messages: msgs }));
   }, []);
 
-  /** v3.0.16: /new — the session reset, the visible list resets with it. */
+  /** v3.0.16: /new clears the display list (session.reset keeps prompt). */
   const clearMessages = useCallback(() => {
     setState(prev => ({ ...prev, messages: [] }));
   }, []);

@@ -4,6 +4,12 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.18] - 2026-09-19  - 彻底修复流式文本被输入框盖章污染
+
+### Fixed
+
+- **流式回复中穿插输入框残骸**（3.0.15 回归的根因）：此前流式文本经手动 stdout.write 写入滚动缓冲，但 Ink 不知道光标已被移动——下次重绘输入框时按旧位置回退光标，把输入框的旧帧（┏━━┓ 框）整段盖进流式文字中间。现在彻底废弃手动写入，所有内容（流式文本按 200ms 批量、工具行、token 芯片、统计行、品牌头）一律作为 **Static 条目**提交——Static 由 Ink 管理光标、每条只渲染一次永不重绘，从机制上消灭了帧互相污染的可能。实时帧只剩 spinner+输入框，行数恒定。
+
 ## [3.0.17] - 2026-09-19  - 模型设置对话框渲染修复
 
 ### Fixed

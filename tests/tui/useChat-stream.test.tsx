@@ -107,12 +107,14 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     expect(captured.persisted[0]).toBe('ZQX-A-B-C ZQX-DONE');
     expect(captured.sessionMsgs).toEqual([{ role: 'user', content: 'hello' }]);
 
-    // 2. streamed content NEVER entered React state: every snapshot of the
-    //    display list holds only the user message (and notices).
+    // 2. v3.0.18: streamed content DOES enter the Static list, but only as
+    //    plain items — never as a labeled assistant message that the frame
+    //    would re-render.
     for (const msgs of snapshots.messages) {
       for (const m of msgs) {
-        expect(m.role).toBe('user');
-        expect(m.content).not.toContain('ZQX');
+        if (m.role === 'assistant' && String(m.content).includes('ZQX')) {
+          expect(m.plain).toBe(true);
+        }
       }
     }
 
@@ -130,8 +132,12 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     // 4. usage surfaced for the Header cache chip
     expect(snapshots.usage.at(-1)?.completion_tokens).toBe(1200);
 
-    // 5. the final display list still holds just the user message
-    expect(snapshots.messages.at(-1)).toEqual([{ role: 'user', content: 'hello' }]);
+    // 5. the final display list: user message + plain streamed items only
+    const finalMsgs = snapshots.messages.at(-1)!;
+    expect(finalMsgs.some(m => m.role === 'user' && m.content === 'hello')).toBe(true);
+    for (const m of finalMsgs) {
+      if (m.role === 'assistant') expect(m.plain).toBe(true);
+    }
   });
 
   it('abort keeps streamed text on stdout, skips persistence, adds only a notice', async () => {
@@ -165,13 +171,16 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     cancelRef.current!();
     await new Promise(r => setTimeout(r, 120));
 
-    // partial content was NOT persisted (v2.2.4 rule) and never entered state
+    // partial content was NOT persisted (v2.2.4 rule)
     expect(captured.persisted).toEqual([]);
-    // the only assistant-role item in the display list is the [已中断] notice
+    // the LAST item is the [已中断] notice; streamed partial text only
+    // appears as plain items (v3.0.18 contract)
     const flat = snapshots.messages.flat();
+    expect(flat.at(-1)?.content).toBe('[已中断]');
     for (const m of flat) {
-      if (m.role === 'assistant') expect(m.content).toBe('[已中断]');
+      if (m.role === 'assistant' && String(m.content).includes('ABORT-MARKER')) {
+        expect(m.plain).toBe(true);
+      }
     }
-    expect(flat.at(-1)).toEqual({ role: 'assistant', content: '[已中断]' });
   });
 });

@@ -15,6 +15,13 @@ interface MessageData {
    * agent-loop rounds). User messages show a heuristic estimate instead.
    */
   tokens?: number;
+  /**
+   * v3.0.18: plain items render as a single unadorned Text (no assistant
+   * label, no markdown) — used by streamed chunks, tool lines, chips and
+   * stats committed into the Static list. dim renders them faint.
+   */
+  plain?: boolean;
+  dim?: boolean;
 }
 
 interface Props {
@@ -69,6 +76,14 @@ function AssistantMessage({ content, toolCalls, mode, model, tokens }: { content
 export const ChatMessage = React.memo(function ChatMessage({ message, mode, model }: Props) {
   if (message.role === 'user') {
     return <UserMessage content={message.content} />;
+  }
+  // v3.0.18: plain Static items (streamed chunks, tool lines, chips, stats).
+  if (message.plain) {
+    return (
+      <Box marginBottom={0}>
+        <Text color={message.dim ? theme.textFaint : theme.text}>{message.content}</Text>
+      </Box>
+    );
   }
   return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} tokens={message.tokens} />;
 });

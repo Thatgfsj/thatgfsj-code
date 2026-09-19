@@ -225,25 +225,9 @@ export function TuiApp({ app }: Props) {
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
   const cfg = app.config.get();
-
-  // v3.0.16: the Header/StatusBar must NOT live in the re-rendered frame
-  // while streaming — the append-only writer stamps them into the
-  // scrollback on every chunk (user report: header fragments interleaved
-  // mid-sentence). The header is printed ONCE when the first message
-  // leaves the splash screen; per-round stats are written as a single
-  // summary line after each round (see useChat).
-  const headerWrittenRef = useRef(false);
-  useEffect(() => {
-    if (!splashMode && !headerWrittenRef.current) {
-      headerWrittenRef.current = true;
-      stdout.write(
-        chalk.hex(theme.accent)('◆ ') +
-        chalk.bold('THATGFSJ') +
-        chalk.gray(` v${getVersion()}\n`) +
-        chalk.gray('─'.repeat(Math.max(20, terminalWidth - 2)) + '\n'),
-      );
-    }
-  }, [splashMode, stdout, terminalWidth]);
+  // v3.0.18: header is committed as a Static item by useChat (manual
+  // stdout.write fought Ink's frame cursor and stamped header copies into
+  // streamed text). No dynamic header/status live in the chat frame.
   // v3.0.11: chat mode input spans the full terminal width (opencode
   // session view); splash keeps the centered fixed-width block.
   const inputArea = confirmReq ? (
