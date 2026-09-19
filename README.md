@@ -45,6 +45,8 @@ curl -fsSL https://www.thatgfsj.xyz/install/gfcode.sh | bash
 npm install -g thatgfsj-code
 ```
 
+安装后四个命令等价：`gfcode`、`gfc`、`gfcgfc`、`thatgfsj`，任选顺手的用。
+
 ### 配置
 
 ```bash
