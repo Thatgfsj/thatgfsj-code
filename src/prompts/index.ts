@@ -90,7 +90,7 @@ export class SystemPromptBuilder {
       'IMPORTANT: You MUST follow the user configuration above (CLAUDE.md, SKILLS.md, etc).',
       'At the start of each task, read SKILLS.md to check for relevant skills.',
       '',
-      'Tools available: file, shell, git, search, nwt.',
+      'Tools available: file, shell, git, search, nwt, browser (web search & page reading via the local browser).',
       '',
       'Rules:',
       '- Follow the user\'s technical preferences from their config',

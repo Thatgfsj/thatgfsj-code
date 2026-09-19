@@ -62,7 +62,19 @@ export interface Config {
   modelSettings?: Record<string, {
     contextLength?: number;
     thinking?: 'off' | 'low' | 'medium' | 'high';
+    /** v3.0.13: model context window in tokens — auto-compact fires at 85%. */
+    contextWindow?: number;
   }>;
+  /**
+   * v3.0.13: default context window (tokens) for models without a
+   * per-model override. Auto-compact triggers at 85% of it.
+   */
+  contextWindow?: number;
+  /**
+   * v3.0.13: first-run browser (Playwright) setup state — the question
+   * is only asked once; mode records what was set up.
+   */
+  browserSetup?: { done: boolean; mode?: 'msedge' | 'chrome' | 'chromium' | 'declined' };
   /**
    * v3.0.8: user-added model ids (via /models → 添加模型). Free-text ids
    * that join the provider's catalog in the model picker.

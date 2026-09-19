@@ -83,6 +83,12 @@ export class App {
    */
   resolvedTtl: '5m' | '1h' | null = null;
   /**
+   * v3.0.13: session-wide token accounting, surfaced in the status bar.
+   * promptTokens keeps the LAST round's value (= current context size);
+   * completionTokens accumulates across rounds.
+   */
+  sessionStats = { promptTokens: 0, completionTokens: 0, rounds: 0 };
+  /**
    * v3.0.5: permission mode. 'ask' requires confirmation for write/execute
    * tool actions; 'accept' (--yolo) allows everything.
    */
@@ -321,6 +327,40 @@ export class App {
     return [...new Set([c.model, ...(c.customModels || [])])].filter(Boolean);
   }
 
+  // ── v3.0.13: token-aware auto-compact ─────────────────────
+
+  /** Context window (tokens) for a model: per-model override → default 128k. */
+  getContextWindow(modelId?: string): number {
+    const c = this.config.get();
+    const id = modelId || c.model;
+    return c.modelSettings?.[id]?.contextWindow ?? c.contextWindow ?? 128000;
+  }
+
+  async setModelContextWindow(modelId: string, tokens: number): Promise<void> {
+    const c = this.config.get();
+    const ms = { ...(c.modelSettings || {}) };
+    ms[modelId] = { ...ms[modelId], contextWindow: tokens };
+    await this.config.save({ modelSettings: ms });
+  }
+
+  /**
+   * v3.0.13: auto-compact when the last round's prompt tokens reach 85% of
+   * the model's context window. Compaction keeps the most recent complete
+   * tool groups (see session/compactor) so the next request stays valid.
+   * Returns a user-facing notice when compaction ran, null otherwise.
+   */
+  maybeAutoCompact(usage?: Usage): string | null {
+    if (!usage?.prompt_tokens || usage.prompt_tokens <= 0) return null;
+    const win = this.getContextWindow();
+    const ratio = usage.prompt_tokens / win;
+    if (ratio < 0.85) return null;
+    const r = this.session.compactNow();
+    if (!r) {
+      return `⚠️ 上下文已用 ${Math.round(ratio * 100)}%（${usage.prompt_tokens}/${win} tokens），但没有可压缩的历史。建议 /new 开新会话。`;
+    }
+    return `⚠️ 上下文接近模型窗口（${Math.round(ratio * 100)}%），已自动压缩：${r.before} → ${r.after} 条（工具调用块保持完整）。建议之后找机会 /new。`;
+  }
+
   /**
    * v3.0.5: TUI hook-up — show MCP startup results as an in-chat message.
    * Returns a short multi-line report (empty when no servers configured).
@@ -383,6 +423,13 @@ export class App {
       // cache stats store so the TUI Header / /cache command can read it.
       if (next.value && next.value.type === 'usage') {
         try { this.cacheStats.record(next.value.usage); } catch { /* best-effort */ }
+        // v3.0.13: session token accounting for the status bar.
+        try {
+          const u = next.value.usage;
+          if (u.prompt_tokens > 0) this.sessionStats.promptTokens = u.prompt_tokens;
+          this.sessionStats.completionTokens += u.completion_tokens || 0;
+          this.sessionStats.rounds += 1;
+        } catch { /* best-effort */ }
         if (debugUsage) {
           process.stderr.write(
             '[debug_usage] ' + JSON.stringify(next.value.usage) + '\n'

@@ -240,7 +240,7 @@ export function TuiApp({ app }: Props) {
   );
 
   return (
-    <Box flexDirection="column" height={terminalRows} width={terminalWidth} paddingX={1}>
+    <Box flexDirection="column" width={terminalWidth} paddingX={1} {...(splashMode ? { height: terminalRows } : {})}>
       {splashMode ? (
         <>
           <Splash />
@@ -251,7 +251,6 @@ export function TuiApp({ app }: Props) {
               {' '}/models 可添加模型、设置上下文长度和思考强度 · /help 查看全部命令
             </Text>
           </Box>
-          <Box flexGrow={1} />
         </>
       ) : (
         <>
@@ -261,29 +260,22 @@ export function TuiApp({ app }: Props) {
             cacheTtl={resolvedTtl ?? configTtl ?? null}
             width={terminalWidth}
           />
-          <Box flexDirection="column" flexGrow={1}>
-            <ChatList
-              messages={allMessages}
-              streaming={streaming}
-              streamingToolCalls={streamingToolCalls}
-              width={terminalWidth - 4}
-              // v3.0.9: managed viewport — chrome rows (header 2 + input 3 +
-              // hints 1 + status 1 + bottom 1 + margins ~2) are reserved so
-              // the message list never overflows the fixed-height frame.
-              viewportHeight={Math.max(5, terminalRows - 10)}
-              mode="Build"
-              model={cfg.model}
-            />
-            <Thinking active={isThinking} />
-            {queuedMessage && (
-              <Box paddingLeft={1}>
-                <Text color={theme.warning}>📎 已排队: </Text>
-                <Text color={theme.textDim}>{queuedMessage}</Text>
-              </Box>
-            )}
-          </Box>
+          <ChatList
+            messages={allMessages}
+            streaming={streaming}
+            streamingToolCalls={streamingToolCalls}
+            width={terminalWidth - 4}
+            mode="Build"
+            model={cfg.model}
+          />
+          <Thinking active={isThinking} />
+          {queuedMessage && (
+            <Box paddingLeft={1}>
+              <Text color={theme.warning}>📎 已排队: </Text>
+              <Text color={theme.textDim}>{queuedMessage}</Text>
+            </Box>
+          )}
           {inputArea}
-          <Box flexGrow={0} />
         </>
       )}
       <StatusBar
@@ -291,6 +283,13 @@ export function TuiApp({ app }: Props) {
         skills={activeSkills}
         provider={cfg.provider}
         model={cfg.model}
+        stats={{
+          contextTokens: app.sessionStats.promptTokens,
+          contextWindow: app.getContextWindow(),
+          inTokens: cacheSnapshot.totalInputTokens,
+          outTokens: app.sessionStats.completionTokens,
+          savingsCNY: cacheSnapshot.estimatedSavingsCNY,
+        }}
       />
       <Box justifyContent="space-between" width="100%">
         <Text color={theme.textFaint}>~</Text>

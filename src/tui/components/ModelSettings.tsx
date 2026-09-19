@@ -4,7 +4,7 @@ import { Box, Text, useInput } from 'ink';
 import type { App } from '../../app/index.js';
 import { theme } from '../theme.js';
 
-type Submode = null | { type: 'add' | 'context'; value: string; error?: string };
+type Submode = null | { type: 'add' | 'context' | 'window'; value: string; error?: string };
 
 interface Props {
   app: App;
@@ -68,6 +68,15 @@ export function ModelSettings({ app, onClose, width }: Props) {
       await app.setModelContextLength(active, n);
       setSubmode(null);
       flash(`${active} 上下文长度 → ${n}`);
+    } else if (submode.type === 'window') {
+      const n = parseInt(submode.value, 10);
+      if (!Number.isFinite(n) || n < 1000 || n > 10000000) {
+        setSubmode({ ...submode, error: '请输入 1,000-10,000,000 的 token 数' });
+        return;
+      }
+      await app.setModelContextWindow(active, n);
+      setSubmode(null);
+      flash(`${active} 上下文窗口 → ${n} tokens（85% 时自动压缩）`);
     }
   };
 
@@ -122,6 +131,10 @@ export function ModelSettings({ app, onClose, width }: Props) {
       setSubmode({ type: 'context', value: String(cur) });
       return;
     }
+    if (input === 'w' || input === 'W') {
+      setSubmode({ type: 'window', value: String(app.getContextWindow(active)) });
+      return;
+    }
     if (input === 't' || input === 'T') {
       void cycleThinking();
       return;
@@ -162,6 +175,7 @@ export function ModelSettings({ app, onClose, width }: Props) {
               {m.slice(0, dialogWidth - 34)}
             </Text>
             <Text color={theme.textFaint}>  ctx {st.contextLength ?? app.session.getMaxMessages()}</Text>
+            <Text color={theme.textFaint}> · 窗口 {(app.getContextWindow(m) / 1000).toFixed(0)}k</Text>
             <Text color={thinking !== 'off' ? theme.accent : theme.textFaint}>
               {'  '}thinking {THINKING_LABEL[thinking]}
             </Text>
@@ -176,7 +190,9 @@ export function ModelSettings({ app, onClose, width }: Props) {
         <Box flexDirection="column">
           <Box>
             <Text color={theme.accent}>
-              {submode.type === 'add' ? '添加模型 id ❯ ' : `${active} 上下文长度 ❯ `}
+              {submode.type === 'add' ? '添加模型 id ❯ '
+                : submode.type === 'window' ? `${active} 上下文窗口(tokens) ❯ `
+                : `${active} 上下文长度 ❯ `}
             </Text>
             <Text>{submode.value}</Text>
             <Text color={theme.text}>█</Text>
@@ -191,6 +207,8 @@ export function ModelSettings({ app, onClose, width }: Props) {
           <Text color={theme.textFaint}> 添加模型 · </Text>
           <Text color={theme.accent}>c</Text>
           <Text color={theme.textFaint}> 上下文长度 · </Text>
+          <Text color={theme.accent}>w</Text>
+          <Text color={theme.textFaint}> 上下文窗口(tokens) · </Text>
           <Text color={theme.accent}>t</Text>
           <Text color={theme.textFaint}> 思考强度 · </Text>
           <Text color={theme.accent}>d</Text>

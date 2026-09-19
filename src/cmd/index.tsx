@@ -117,6 +117,13 @@ program
         await app.reloadModel();
       }
 
+      // v3.0.13: first-run browser (Playwright) setup — interactive only,
+      // asked once, persisted. Never in headless/--json mode.
+      if (!jsonMode && process.stdin.isTTY) {
+        const { ensureBrowserSetup } = await import('../setup/browser-setup.js');
+        await ensureBrowserSetup(app.config);
+      }
+
       if (!prompt || options.interactive) {
         // v3.0.9 fix (black-box finding): interactive TUI requires a TTY —
         // Ink's useInput needs raw mode and crashes with a stack trace on
@@ -207,6 +214,7 @@ program
 
         app.session.addMessage('user', prompt);
         let fullResponse = '';
+        let lastUsage: any = null;
 
         const stream = app.streamResponse(undefined, { signal: abortCtrl.signal });
 
@@ -259,6 +267,7 @@ program
               break;
             }
             case 'usage': {
+              lastUsage = chunk.usage;
               if (jsonMode) {
                 emit({ type: 'usage', usage: chunk.usage });
               } else {
@@ -316,6 +325,14 @@ program
             ));
           }
           app.session.persist();
+
+          app.session.persist();
+
+          // v3.0.13: token-aware auto-compact (headless path).
+          const compactNotice = app.maybeAutoCompact(lastUsage);
+          if (compactNotice) {
+            process.stderr.write(`\n  ${compactNotice}\n`);
+          }
 
           if (jsonMode) {
             emit({ type: 'result', success: true, content: toPersist.trim() });

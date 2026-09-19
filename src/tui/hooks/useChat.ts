@@ -70,6 +70,9 @@ export function useChat(app: App) {
     let currentToolCalls: ToolCallData[] = [];
     // Latest usage from this round; surfaced via state.lastUsage.
     let lastUsage: Usage | null = null;
+    // v3.0.13: completion tokens summed across all rounds of this turn —
+    // displayed as the assistant message's token chip.
+    let turnCompletionTokens = 0;
     let lastUpdateTime = 0;
     const THROTTLE_MS = 50;
 
@@ -136,6 +139,8 @@ export function useChat(app: App) {
 
           case 'usage':
             lastUsage = chunk.usage;
+            // v3.0.13: sum completion tokens across agent-loop rounds.
+            turnCompletionTokens += chunk.usage.completion_tokens || 0;
             setState(prev => ({ ...prev, lastUsage: chunk.usage }));
             break;
         }
@@ -208,6 +213,7 @@ export function useChat(app: App) {
                 role: 'assistant' as const,
                 content: displayContent + toolSummary,
                 toolCalls: currentToolCalls.length > 0 ? currentToolCalls : undefined,
+                tokens: turnCompletionTokens || undefined,
               }]
             : []),
         ],
@@ -217,11 +223,17 @@ export function useChat(app: App) {
         lastUsage,
       }));
 
-      // v3.0.5: persist the session after each completed round (was:
-      // `app.session.truncate()` every round — a silent rewrite that
-      // destroyed the cache prefix once history crossed 50 entries; the
-      // SessionManager now compacts itself at the threshold and /resume
-      // needs the on-disk history to be current).
+      // v3.0.13: token-aware auto-compact — when this round's prompt tokens
+      // reached 85% of the model's context window, compact now and surface
+      // the notice in the chat.
+      const compactNotice = app.maybeAutoCompact(lastUsage ?? undefined);
+      if (compactNotice) {
+        setState(prev => ({
+          ...prev,
+          messages: [...prev.messages, { role: 'assistant' as const, content: compactNotice }],
+        }));
+      }
+
       app.session.persist();
     } catch (error: any) {
       if (abortRef.current) {

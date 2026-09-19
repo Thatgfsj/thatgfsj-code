@@ -9,6 +9,7 @@ import { ShellTool } from './shell.js';
 import { GitTool } from './git.js';
 import { SearchTool } from './search.js';
 import { NwtTool } from './nwt.js';
+import { BrowserTool } from './browser.js';
 
 export class ToolRegistry {
   private tools: Map<string, Tool> = new Map();
@@ -27,6 +28,7 @@ export class ToolRegistry {
     this.register(new GitTool());
     this.register(new SearchTool());
     this.register(new NwtTool());
+    this.register(new BrowserTool());
   }
 
   setContext(ctx: Partial<ToolContext>): void {
@@ -109,3 +111,4 @@ export { ShellTool } from './shell.js';
 export { GitTool } from './git.js';
 export { SearchTool } from './search.js';
 export { NwtTool } from './nwt.js';
+export { BrowserTool } from './browser.js';

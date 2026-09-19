@@ -4,6 +4,17 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.13] - 2026-09-19  - 本机浏览器（Playwright）+ token 统计 + 85% 自动压缩
+
+### Added
+
+- **browser 工具**：AI 通过 Playwright 驱动本机 Edge/Chrome（headless）搜索网页（bing/baidu）和打开 URL 读正文。零 API key、走本机网络；playwright-core 按需加载，浏览器懒启动、随进程退出清理。
+- **首次运行引导**：交互模式下询问是否启用浏览器服务——优先检测本机 Edge/Chrome（命中即零下载），都没有才提供下载内置 Chromium（约 130MB），选择持久化不再重复询问。
+- **每条消息显示 token**：助手消息显示真实 completion tokens（跨轮累计），用户消息显示启发式估算（CJK 感知）。
+- **底部会话统计面板**：ctx 已用/窗口(占比变色，≥85% 红色) · ↑输入 ↓输出 tokens · 缓存节省。
+- **85% 自动压缩**：上一轮 prompt tokens 达到模型上下文窗口 85% 时自动压缩历史（保持工具调用块完整）；窗口可按模型在 /models → w 中设置（默认 128k）。
+- **历史展示策略回退**：消息列表回归 Static 打印（历史永久保留在终端滚动缓冲、可自由上滚查看，不再折叠）；仅在超过模型窗口 85% 时才压缩进上下文。
+
 ## [3.0.12] - 2026-09-19  - 首屏品牌修正
 
 ### Changed

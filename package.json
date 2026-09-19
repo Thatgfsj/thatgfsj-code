@@ -1,6 +1,6 @@
 {
   "name": "thatgfsj-code",
-  "version": "3.0.12",
+  "version": "3.0.13",
   "description": "Thatgfsj Code - AI Coding Assistant with Reasonix-style prompt caching",
   "main": "dist/cmd/index.js",
   "type": "module",
@@ -48,6 +48,7 @@
     "ink-text-input": "^6.0.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
+    "playwright-core": "^1.63.0",
     "react": "^19.2.7"
   },
   "devDependencies": {

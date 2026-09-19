@@ -4,11 +4,17 @@ import { Box, Text } from 'ink';
 import { Markdown } from './Markdown.js';
 import { ToolCall, type ToolCallData } from './ToolCall.js';
 import { theme } from '../theme.js';
+import { estimateTokens, formatTokens } from '../../utils/tokens.js';
 
 interface MessageData {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   toolCalls?: ToolCallData[];
+  /**
+   * v3.0.13: real completion tokens for this assistant turn (summed across
+   * agent-loop rounds). User messages show a heuristic estimate instead.
+   */
+  tokens?: number;
 }
 
 interface Props {
@@ -36,11 +42,12 @@ function UserMessage({ content }: { content: string }) {
       paddingRight={1}
     >
       <Text color={theme.text}>{content}</Text>
+      <Text color={theme.textFaint}>  ~{estimateTokens(content)}t</Text>
     </Box>
   );
 }
 
-function AssistantMessage({ content, toolCalls, mode, model }: { content: string; toolCalls?: ToolCallData[]; mode?: string; model?: string }) {
+function AssistantMessage({ content, toolCalls, mode, model, tokens }: { content: string; toolCalls?: ToolCallData[]; mode?: string; model?: string; tokens?: number }) {
   return (
     <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
       {toolCalls && toolCalls.map((tc, i) => (
@@ -48,7 +55,10 @@ function AssistantMessage({ content, toolCalls, mode, model }: { content: string
       ))}
       {content && (
         <Box flexDirection="column">
-          <Text color={theme.textFaint}>▪ {mode ?? 'Build'}{model ? ` · ${model}` : ''}</Text>
+          <Text color={theme.textFaint}>
+            ▪ {mode ?? 'Build'}{model ? ` · ${model}` : ''}
+            {tokens ? ` · ${formatTokens(tokens)}t` : ''}
+          </Text>
           <Markdown content={content} />
         </Box>
       )}
@@ -60,7 +70,7 @@ export const ChatMessage = React.memo(function ChatMessage({ message, mode, mode
   if (message.role === 'user') {
     return <UserMessage content={message.content} />;
   }
-  return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} />;
+  return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} tokens={message.tokens} />;
 });
 
 export type { MessageData };
