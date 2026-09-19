@@ -1,15 +1,23 @@
 import { useState, useCallback, useRef } from 'react';
+import { useStdout } from 'ink';
+import chalk from 'chalk';
 import type { MessageData } from '../components/ChatMessage.js';
-import type { ToolCallData } from '../components/ToolCall.js';
+import { formatToolLabel, formatToolResultLine } from '../components/ToolCall.js';
 import type { App } from '../../app/index.js';
-import { compressThinking, splitThinking, summarizeThinking } from '../../utils/thinking.js';
-import type { StreamChunk, Usage } from '../../types.js';
+import { compressThinking } from '../../utils/thinking.js';
+import { formatTokens } from '../../utils/tokens.js';
+import { theme } from '../theme.js';
+import type { StreamChunk, ToolCall, ToolCallResult, Usage } from '../../types.js';
 
 interface ChatState {
+  /**
+   * v3.0.16: DISPLAY-ONLY message list. Completed assistant text no longer
+   * lives here — it is committed straight into the terminal scrollback while
+   * streaming (claude-code style append-only rendering), so the list only
+   * carries user messages, errors and notices (auto-compact, /commands…).
+   */
   messages: MessageData[];
   isThinking: boolean;
-  streaming: string;
-  streamingToolCalls: ToolCallData[];
   queuedMessage: string | null;
   /**
    * v3.0.0: Latest cache usage emitted by the provider, surfaced to the TUI
@@ -22,27 +30,89 @@ interface ChatState {
 /**
  * Hook for managing chat state and the streaming response lifecycle.
  *
- * v3.0.0: streamResponse yields structured StreamChunks (text / tool_calls /
- * thinking / usage). The previous @@TOOL@@ sentinel-string parsing is gone.
+ * v3.0.16 (scroll-wheel fix, claude-code "two-region" rendering):
+ * streaming text/tool lines are NO LONGER React state. The old design kept
+ * the growing text in `streaming` state, so Ink re-rendered (and re-erase/
+ * redrew) an ever-taller frame on every chunk — dragging the viewport back
+ * to the bottom and locking the mouse wheel. Now:
  *
- * Persisted message order matches the source chunks exactly:
- *   - text chunks → accumulated into fullContent (later compressed via
+ *   - completed region: past messages via <Static> + streamed text/tool
+ *     lines written straight to stdout through Ink's `useStdout().write()`
+ *     (erase current frame → append text permanently → redraw frame below),
+ *     batched to a ~30fps frame budget;
+ *   - live region: a CONSTANT-height frame (thinking spinner + input +
+ *     status bar + queue notice; the ChatList contributes 0 lines because
+ *     it only renders <Static>). Row count never grows while streaming,
+ *     so the terminal never auto-scrolls and the wheel stays usable.
+ *
+ * Persisted message order still matches the source chunks exactly:
+ *   - text chunks → accumulated into fullContent (compressed via
  *     compressThinking before persistence)
- *   - tool_calls chunks → results are summarized into a `[tool: name → result]`
- *     suffix on the assistant message (same belt-and-suspenders behavior as
- *     v2.2.6)
- *   - usage chunks → surfaced via state.lastUsage so the TUI Header can render
- *     cache hit-rate (consumed by app.tsx via /cache command in M3)
+ *   - tool_calls chunks → session/agent-loop behavior unchanged
+ *   - usage chunks → surfaced via state.lastUsage for the TUI Header
  */
+
+/** Batched writer: appends text to the permanent scrollback region. */
+class StreamWriter {
+  private buffer = '';
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  /** 3.0.9 assistant label, printed once before the first streamed char. */
+  private labelWritten = false;
+
+  constructor(
+    private readonly emit: (data: string) => void,
+    private readonly label: string,
+    private readonly throttleMs = 33,
+  ) {}
+
+  /** Queue a raw chunk of assistant text (label auto-prefixed once). */
+  text(s: string): void {
+    if (!s) return;
+    if (!this.labelWritten) {
+      this.labelWritten = true;
+      this.buffer += '\n' + chalk.hex(theme.textFaint)(this.label) + '\n';
+    }
+    this.buffer += s;
+    this.schedule();
+  }
+
+  /** Write immediately (tool lines / notices), flushing queued text first. */
+  now(data: string): void {
+    this.flush();
+    this.emit(data);
+  }
+
+  private schedule(): void {
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.flush();
+    }, this.throttleMs);
+    this.timer.unref?.();
+  }
+
+  flush(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    if (!this.buffer) return;
+    const data = this.buffer;
+    this.buffer = '';
+    this.emit(data);
+  }
+}
+
 export function useChat(app: App) {
   const [state, setState] = useState<ChatState>({
     messages: [],
     isThinking: false,
-    streaming: '',
-    streamingToolCalls: [],
     queuedMessage: null,
     lastUsage: null,
   });
+  // Ink's managed write: erase frame → write data permanently → redraw the
+  // (constant-height) frame below it. Falls back to raw stdout outside Ink.
+  const { write: inkWrite } = useStdout();
   const processingRef = useRef(false);
   const queuedRef = useRef<string | null>(null);
   const abortRef = useRef(false);
@@ -58,35 +128,49 @@ export function useChat(app: App) {
       ...prev,
       messages: [...prev.messages, { role: 'user', content: input }],
       isThinking: true,
-      streaming: '',
-      streamingToolCalls: [],
       queuedMessage: null,
     }));
 
     app.session.addMessage('user', input);
 
+    const emit = (data: string) => {
+      if (inkWrite) inkWrite(data);
+      else process.stdout.write(data);
+    };
+    const cfgModel = app.config.get().model || '';
+    const writer = new StreamWriter(emit, `▪ Build${cfgModel ? ` · ${cfgModel}` : ''}`);
+
+    /** Pending `⎿ name(args) ⟳` line, colored like the <ToolCall/> component. */
+    const writePendingLine = (tc: ToolCall) => {
+      const { title, detail } = formatToolLabel(tc.function.name, tc.function.arguments);
+      writer.now(
+        '  ' +
+        chalk.hex(theme.toolMark)('⎿ ') +
+        chalk.hex(theme.accentDim)(title) +
+        (detail ? ' ' + chalk.hex(theme.textDim)(detail) : '') +
+        chalk.hex(theme.textFaint)(' ⟳') +
+        '\n',
+      );
+    };
+
+    /** Result summary line, same shape/color rules as <ToolCall/>. */
+    const writeResultLine = (r: ToolCallResult) => {
+      const line = formatToolResultLine(r.output, !r.ok);
+      if (!line) return;
+      writer.now('    ' + chalk.hex(line.color)(line.text) + '\n');
+    };
+
     const stream = app.streamResponse(undefined, { signal: ctrl.signal });
     let fullContent = '';
-    let currentToolCalls: ToolCallData[] = [];
+    // Any tool call seen this turn (keeps persistence gating identical).
+    let sawToolCalls = false;
     // Latest usage from this round; surfaced via state.lastUsage.
     let lastUsage: Usage | null = null;
     // v3.0.13: completion tokens summed across all rounds of this turn —
-    // displayed as the assistant message's token chip.
+    // appended as a faint `· Nt` chip when the turn completes.
     let turnCompletionTokens = 0;
-    let lastUpdateTime = 0;
-    const THROTTLE_MS = 50;
-
-    /**
-     * Flush streaming state to React. Throttled to ~20fps so the terminal
-     * doesn't flicker on long completions (combined with <Static> below the
-     * completion line stays put while the streaming line updates in place).
-     */
-    const flushStreaming = () => {
-      const now = Date.now();
-      if (now - lastUpdateTime < THROTTLE_MS) return;
-      lastUpdateTime = now;
-      setState(prev => ({ ...prev, isThinking: false, streaming: fullContent }));
-    };
+    // Spinner turns off at the first visible output (text or tool line).
+    let sawOutput = false;
 
     try {
       for await (const chunk of stream as AsyncIterable<StreamChunk>) {
@@ -99,41 +183,43 @@ export function useChat(app: App) {
           case 'text':
             if (chunk.content) {
               fullContent += chunk.content;
-              flushStreaming();
+              if (!sawOutput) {
+                sawOutput = true;
+                setState(prev => ({ ...prev, isThinking: false }));
+              }
+              writer.text(chunk.content);
             }
             break;
 
           case 'thinking':
             // Reasoning text. We do not append it to fullContent (it is
-            // stripped from persistence in compressThinking), but we surface
-            // it via the streaming display when app.showThinking is on.
+            // stripped from persistence in compressThinking), but when
+            // showThinking is on it streams straight to the scrollback too.
             if (app.showThinking && chunk.content) {
               fullContent += chunk.content;
-              flushStreaming();
+              if (!sawOutput) {
+                sawOutput = true;
+                setState(prev => ({ ...prev, isThinking: false }));
+              }
+              writer.text(chunk.content);
             }
             break;
 
           case 'tool_calls':
             if (chunk.toolCalls && chunk.toolCalls.length > 0) {
-              // Replace rather than append — LLMService emits one combined
-              // tool_calls chunk per iteration.
-              // v3.0.5: the chunk now carries index-aligned results, so the
-              // ToolCall panel shows the actual output instead of the
-              // "(see tool result above)" placeholder it used to print.
-              currentToolCalls = chunk.toolCalls.map((tc, i) => {
-                const r = chunk.results?.[i];
-                return {
-                  name: tc.function.name,
-                  args: tc.function.arguments,
-                  result: r ? (r.output.length > 400 ? r.output.slice(0, 400) + '...' : r.output) : undefined,
-                  isError: r ? !r.ok : false,
-                };
-              });
-              setState(prev => ({
-                ...prev,
-                isThinking: false,
-                streamingToolCalls: [...currentToolCalls],
-              }));
+              sawToolCalls = true;
+              if (!sawOutput) {
+                sawOutput = true;
+                setState(prev => ({ ...prev, isThinking: false }));
+              }
+              if (chunk.pending) {
+                // v3.0.16: pre-execution announcement → one ⟳ line per call.
+                for (const tc of chunk.toolCalls) writePendingLine(tc);
+              } else {
+                // Results chunk: index-aligned outcome line per call.
+                const results = chunk.results || [];
+                for (const r of results) writeResultLine(r);
+              }
             }
             break;
 
@@ -157,7 +243,7 @@ export function useChat(app: App) {
       //      for cases where we somehow persist a polluted message.
       const wasAborted = abortRef.current;
       const shouldPersist = !wasAborted &&
-        (fullContent.trim() || currentToolCalls.length > 0);
+        (fullContent.trim() || sawToolCalls);
 
       if (shouldPersist) {
         // v2.2.5: strip  blocks from the persisted message
@@ -168,57 +254,21 @@ export function useChat(app: App) {
         app.session.addMessageSafe('assistant', toPersist);
       }
 
-      // v2.2.5: build a displayable version. When thinking is hidden
-      // we still want the user to see a one-line indicator of how
-      // much reasoning the model did, plus the conclusion.
-      const split = splitThinking(fullContent);
-      const displayContent = app.showThinking
-        ? fullContent
-        : (split.thinking
-            ? `${summarizeThinking(split)}\n${split.conclusion}`
-            : fullContent);
+      // Commit whatever is still queued, then the turn's token chip.
+      // v2.2.6 note: the old belt-and-suspenders "[tool: name → result]"
+      // summary was display-only; result lines are now painted under each
+      // ⎿ call line the moment the results chunk arrives, so no suffix.
+      writer.flush();
+      if (shouldPersist && turnCompletionTokens > 0) {
+        emit(chalk.hex(theme.textFaint)(`  · ${formatTokens(turnCompletionTokens)}t\n`));
+      }
 
-      // v2.2.6 (tool-result belt-and-suspenders): if any tool call
-      // returned text, also append a compact "[tool: name → result]"
-      // summary to the persisted/displayed content. This guarantees
-      // the user sees the tool output regardless of whether the Ink
-      // <ToolCall/> component renders it correctly. Past sessions
-      // have had cases where the streaming ToolCall rendering failed
-      // silently (e.g. result was empty string, wrap=truncate cut
-      // long output off-screen) and the user had no idea what the
-      // tool actually returned.
-      //
-      // v3.0.0: since LLMService now folds tool results into
-      // currentMessages without surfacing them as separate chunks, we no
-      // longer have a `result` field on each ToolCallData here. The
-      // result summary is built by reading back from
-      // app.session.getMessages() — the latest `tool` role message per
-      // tool call id. To keep this lightweight we fall back to a brief
-      // "[tool: name → see message]" suffix when the result is not
-      // available in our local streaming state.
-      const toolSummary = currentToolCalls.length > 0
-        ? '\n\n' + currentToolCalls.map((tc) => {
-            const r = tc.result !== undefined ? tc.result : '(no output captured)';
-            const short = r.length > 200 ? r.slice(0, 197) + '...' : r;
-            return `[tool: ${tc.name} → ${short}]`;
-          }).join('\n')
-        : '';
-
+      // v3.0.16: the assistant text itself is ALREADY in the scrollback
+      // (appended live above the frame) — nothing is added to `messages`
+      // here. Only notices/errors land in the React display list.
       setState(prev => ({
         ...prev,
-        messages: [
-          ...prev.messages,
-          ...(shouldPersist
-            ? [{
-                role: 'assistant' as const,
-                content: displayContent + toolSummary,
-                toolCalls: currentToolCalls.length > 0 ? currentToolCalls : undefined,
-                tokens: turnCompletionTokens || undefined,
-              }]
-            : []),
-        ],
-        streaming: '',
-        streamingToolCalls: [],
+        messages: [...prev.messages],
         isThinking: false,
         lastUsage,
       }));
@@ -236,17 +286,11 @@ export function useChat(app: App) {
 
       app.session.persist();
     } catch (error: any) {
+      writer.flush();
       if (abortRef.current) {
         setState(prev => ({
           ...prev,
-          messages: [
-            ...prev.messages,
-            ...(fullContent.trim()
-              ? [{ role: 'assistant' as const, content: fullContent + '\n\n[已中断]' }]
-              : [{ role: 'assistant' as const, content: '[已中断]' }]),
-          ],
-          streaming: '',
-          streamingToolCalls: [],
+          messages: [...prev.messages, { role: 'assistant' as const, content: '[已中断]' }],
           isThinking: false,
         }));
       } else {
@@ -265,15 +309,7 @@ export function useChat(app: App) {
 
         setState(prev => ({
           ...prev,
-          messages: [
-            ...prev.messages,
-            ...(fullContent.trim()
-              ? [{ role: 'assistant' as const, content: fullContent }]
-              : []),
-            { role: 'assistant', content: errorMsg },
-          ],
-          streaming: '',
-          streamingToolCalls: [],
+          messages: [...prev.messages, { role: 'assistant' as const, content: errorMsg }],
           isThinking: false,
         }));
       }
@@ -316,5 +352,10 @@ export function useChat(app: App) {
     setState(prev => ({ ...prev, messages: msgs }));
   }, []);
 
-  return { ...state, sendMessage, cancel, hydrateMessages };
+  /** v3.0.16: /new — the session reset, the visible list resets with it. */
+  const clearMessages = useCallback(() => {
+    setState(prev => ({ ...prev, messages: [] }));
+  }, []);
+
+  return { ...state, sendMessage, cancel, hydrateMessages, clearMessages };
 }

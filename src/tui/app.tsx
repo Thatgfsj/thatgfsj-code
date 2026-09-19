@@ -50,7 +50,7 @@ type ViewMode = 'chat' | 'model_select' | 'init_wizard' | 'model_settings';
  * sits in the bottom-right corner at all times.
  */
 export function TuiApp({ app }: Props) {
-  const { messages, isThinking, streaming, streamingToolCalls, queuedMessage, sendMessage, cancel, hydrateMessages } = useChat(app);
+  const { messages, isThinking, queuedMessage, sendMessage, cancel, hydrateMessages, clearMessages } = useChat(app);
   const { handleCommand } = useCommands(app);
   const [systemMessages, setSystemMessages] = useState<MessageData[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
@@ -148,10 +148,38 @@ export function TuiApp({ app }: Props) {
         ]);
       }
 
-      if (result.action === 'clear') setSystemMessages([]);
+      if (result.action === 'clear') {
+        setSystemMessages([]);
+        // v3.0.16: /new resets the session — reset the visible list too
+        // (useChat messages are display-only now).
+        clearMessages();
+      }
 
       if (result.action === 'reinit') {
         setViewMode('init_wizard');
+      }
+
+      // v3.0.16: /browser — verifyLaunch is async (spawns Chromium), so
+      // handleCommand only returns the action and we run the check here,
+      // posting the report as a chat notice (same pattern as /models).
+      if (result.action === 'browser_check') {
+        const c = app.config.get() as any;
+        const setup = c.browserSetup as { done?: boolean; mode?: string } | undefined;
+        const configLine = !setup?.done
+          ? '配置: 未配置（首次运行 gfcode 时会询问是否安装）'
+          : setup.mode === 'chromium'
+            ? '配置: 已安装内置 Chromium'
+            : `配置: ${setup.mode === 'declined' ? '已跳过安装' : setup.mode}`;
+        addMsg('正在检查浏览器（启动内置 Chromium…）');
+        const { BrowserTool } = await import('../tools/browser.js');
+        const mode = await BrowserTool.verifyLaunch();
+        addMsg([
+          '🌐 浏览器工具状态',
+          `  ${configLine}`,
+          mode
+            ? '  启动: ✓ 可用（内置 Chromium 正常）'
+            : '  启动: ✗ 不可用。运行 `npx playwright install chromium` 后重试。',
+        ].join('\n'));
       }
 
       if (result.action === 'reload_model') {
@@ -190,7 +218,7 @@ export function TuiApp({ app }: Props) {
     }
 
     sendMessage(input);
-  }, [handleCommand, sendMessage, app, viewMode, addMsg, hydrateMessages]);
+  }, [handleCommand, sendMessage, app, viewMode, addMsg, hydrateMessages, clearMessages]);
 
   const allMessages = [...systemMessages, ...messages];
   const activeSkills = app.skills.listActive().map(s => s.id);
@@ -200,8 +228,6 @@ export function TuiApp({ app }: Props) {
   // session view); splash keeps the centered fixed-width block.
   const inputArea = confirmReq ? (
     <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
-  ) : viewMode === 'model_settings' ? (
-    <ModelSettings app={app} onClose={() => setViewMode('chat')} width={splashMode ? Math.min(terminalWidth - 4, 64) : terminalWidth - 2} />
   ) : viewMode === 'model_select' ? (
     <ModelSelector
       currentModel={cfg.model}
@@ -239,6 +265,18 @@ export function TuiApp({ app }: Props) {
     />
   );
 
+  // v3.0.15 (borrowed from opencode ui/dialog.tsx): /models opens as a
+  // full-screen centered modal overlay, not squeezed into the input slot.
+  // The dialog floats in the middle of the terminal with blank space around
+  // it (opencode centers horizontally + offsets vertically from the top).
+  if (viewMode === 'model_settings') {
+    return (
+      <Box height={terminalRows} width={terminalWidth} justifyContent="center" alignItems="center">
+        <ModelSettings app={app} onClose={() => setViewMode('chat')} width={Math.min(terminalWidth - 2, 72)} />
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" width={terminalWidth} paddingX={1} {...(splashMode ? { height: terminalRows } : {})}>
       {splashMode ? (
@@ -262,8 +300,6 @@ export function TuiApp({ app }: Props) {
           />
           <ChatList
             messages={allMessages}
-            streaming={streaming}
-            streamingToolCalls={streamingToolCalls}
             width={terminalWidth - 4}
             mode="Build"
             model={cfg.model}

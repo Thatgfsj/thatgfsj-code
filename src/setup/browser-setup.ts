@@ -33,6 +33,10 @@ export async function ensureBrowserSetup(config: ConfigManager): Promise<void> {
       console.log(chalk.gray('  正在下载 Chromium（一次性，可能需要几分钟）…'));
       try {
         execSync('npx -y playwright install chromium', { stdio: 'inherit', timeout: 15 * 60 * 1000 });
+        // v3.0.16: a failed lazy launch earlier in this process caches the
+        // error string; clear it so the freshly installed Chromium is used
+        // without a restart.
+        BrowserTool.clearLaunchError();
         const mode = await BrowserTool.verifyLaunch();
         if (mode) {
           await config.save({ browserSetup: { done: true, mode } });

@@ -4,6 +4,15 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.15] - 2026-09-19  - 滚动修复（追加式渲染）+ 工具执行预发射 + /browser
+
+### Fixed
+
+- **流式期间滚轮无法上滚**：流式文本/工具块不再走 React 整帧重绘，改为直接写入终端滚动缓冲（追加式、永不移重绘区），实时帧恒定 ≤8 行（spinner+输入框+状态栏）——流式期间随时可上滚查看历史。
+- **工具执行即反馈**：执行前先渲染 `⎿ name(args) ⟳` 待执行行，结果到达后补结果行，长耗时工具（browser/shell）不再静默空等。
+- **browser 工具增强**：launchError 缓存可自愈（安装后立即生效）；AbortSignal 穿透到页面操作（取消即中断）；`⎿` 标签适配 browser search/open/close。
+- **/browser 命令**：查看内置 Chromium 安装状态与就绪情况，首跑选了 N 也能随时补装。
+
 ## [3.0.14] - 2026-09-19  - 浏览器策略调整：仅用内置 Chromium
 
 ### Changed

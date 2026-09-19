@@ -11,10 +11,36 @@ import { Thinking } from '../../src/tui/components/Thinking.js';
 import { ConfirmPrompt } from '../../src/tui/components/ConfirmPrompt.js';
 import { Splash } from '../../src/tui/components/Splash.js';
 import { UserInput } from '../../src/tui/components/UserInput.js';
+import { ModelSettings } from '../../src/tui/components/ModelSettings.js';
+import type { App } from '../../src/app/index.js';
 import { mcpToolName } from '../../src/mcp/client.js';
 import { getVersion } from '../../src/version.js';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import stringWidth from 'string-width';
+
+/** Minimal App double exposing only what ModelSettings reads. */
+function fakeSettingsApp(opts: { current?: string; custom?: string[] } = {}): App {
+  const current = opts.current ?? 'gpt-4o';
+  const custom = opts.custom ?? ['deepseek-chat'];
+  const modelSettings: Record<string, { thinking?: string; contextLength?: number; contextWindow?: number }> = {
+    [current]: { thinking: 'low', contextLength: 40, contextWindow: 131072 },
+  };
+  const cfg = { model: current, provider: 'siliconflow', modelSettings, customModels: custom };
+  const app = {
+    config: { get: () => cfg, save: async () => {} },
+    listConfiguredModels: () => [cfg.model, ...custom],
+    getThinking: (id?: string) => modelSettings[id ?? cfg.model]?.thinking ?? 'off',
+    getContextWindow: (id?: string) => modelSettings[id ?? cfg.model]?.contextWindow ?? 128000,
+    session: { getMaxMessages: () => 20, setMaxMessages: () => {} },
+    addCustomModel: async () => {},
+    removeCustomModel: async () => {},
+    setModelContextLength: async () => {},
+    setModelContextWindow: async () => {},
+    setModelThinking: async () => {},
+  };
+  return app as unknown as App;
+}
 
 describe('TUI components (v3.0.6 opencode-style render)', () => {
   it('Header shows THATGFSJ brand + version from single source', () => {
@@ -139,5 +165,64 @@ describe('TUI components (v3.0.6 opencode-style render)', () => {
     const pkg = require(pkgPath);
     expect(getVersion()).toBe(pkg.version);
     expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe('ModelSettings dialog (v3.0.15 opencode-style centered modal)', () => {
+  const frameLines = (frame: string) => frame.replace(/\n+$/, '').split('\n');
+
+  it('renders a rounded full dialog with title, model rows and chips at 64 columns', () => {
+    const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} />);
+    const frame = lastFrame() || '';
+    const lines = frameLines(frame);
+    // rounded-border modal box (top and bottom corners present = intact box)
+    expect(lines[0]).toMatch(/^\s*╭/);
+    expect(frame).toContain('╰');
+    // header row: title + esc hint on the same line (space-between)
+    const header = lines.find(l => l.includes('◆ 模型设置'));
+    expect(header).toBeDefined();
+    expect(header).toContain('esc 关闭');
+    // model rows render id + per-model chips, current model marked
+    expect(frame).toContain('gpt-4o');
+    expect(frame).toContain('● 当前');
+    expect(frame).toContain('ctx 40');
+    expect(frame).toContain('131k');
+    // 2 border + header + 2 rules + 2 model rows + 2 hint lines = exactly 9
+    // (a wrapped line would push this count up)
+    expect(lines.length).toBe(9);
+  });
+
+  it('separator spans exactly the content width (dialogWidth-4), never two pieces', () => {
+    const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} />);
+    const lines = frameLines(lastFrame() || '');
+    // inner rules sit between the │ borders; the ╭─╮ / ╰─╯ box border lines
+    // are excluded (they start with a corner, not │)
+    const rules = lines.filter(l => l.trim().startsWith('│') && l.includes('─'));
+    expect(rules.length).toBe(2);
+    for (const r of rules) {
+      const run = r.match(/─+/)![0];
+      expect(run.length).toBe(60); // 64 - border(2) - paddingX(2) = one piece
+      expect(stringWidth(r)).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('key hints stay on two compact unwrapped lines and no line exceeds 64 columns', () => {
+    const longId = 'qwen/qwen3.5-max-ultra-long-organization-finetuned-2026-preview-model-id';
+    const { lastFrame } = render(
+      <ModelSettings app={fakeSettingsApp({ current: longId })} onClose={() => {}} width={64} />,
+    );
+    const frame = lastFrame() || '';
+    const lines = frameLines(frame);
+    // line 1 intact: ↑↓ 选择 … d 删除 … esc 关闭
+    const hint1 = lines.find(l => l.includes('选择'));
+    expect(hint1).toBeDefined();
+    expect(hint1).toContain('关闭');
+    // line 2 intact: c 上下文长度 · w 上下文窗口 · t 思考强度
+    const hint2 = lines.find(l => l.includes('上下文长度'));
+    expect(hint2).toBeDefined();
+    expect(hint2).toContain('思考强度');
+    // over-long model id is truncated, every line fits the 64-col dialog
+    expect(frame).not.toContain(longId);
+    for (const l of lines) expect(stringWidth(l)).toBeLessThanOrEqual(64);
   });
 });

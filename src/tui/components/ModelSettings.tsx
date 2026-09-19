@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import stringWidth from 'string-width';
 import type { App } from '../../app/index.js';
 import { theme } from '../theme.js';
 
@@ -13,16 +14,49 @@ interface Props {
 }
 
 /**
- * v3.0.8: the model settings dialog (opencode-style), opened with
- * /models. Manages the model list and per-model settings:
+ * v3.0.15: the model settings dialog (opencode-style), opened with /models.
+ * Renders as a fixed-width, rounded-border modal that the app centers in the
+ * terminal (see TuiApp's model_settings branch, mirroring opencode's
+ * ui/dialog.tsx full-screen + alignItems:center container).
  *
- *   ↑/↓  选择模型        a  添加模型
- *   t    思考强度循环     c  上下文长度
- *   d    删除自定义模型    esc 关闭
+ * Layout rules learned from opencode's dialog-select.tsx:
+ *   - header row: bold title left, muted "esc" right (space-between)
+ *   - every line is pre-truncated to the dialog content width
+ *     (dialogWidth - border 2 - paddingX 2) so nothing ever wraps
+ *   - footer key hints use the "key + dim description" pattern, split over
+ *     two compact rows instead of one over-long line
+ *
+ * Keys:
+ *   ↑/↓ 选择   a 添加模型   c 上下文长度(5-1000)   w 上下文窗口
+ *   t 思考强度循环(off/low/medium/high)   d 删除自定义模型   esc 关闭
  *
  * Settings persist to config.json (modelSettings / customModels) and the
  * current model's context length applies to the live session immediately.
  */
+
+/** CJK-aware truncation: never exceed `max` display columns. */
+function truncateToWidth(s: string, max: number): string {
+  if (max <= 0) return '';
+  if (stringWidth(s) <= max) return s;
+  let out = '';
+  for (const ch of s) {
+    if (stringWidth(out + ch) > max - 1) return out + '…';
+    out += ch;
+  }
+  return out;
+}
+
+/** opencode FooterAction pattern: accent key + dim description. */
+function KeyHint({ keys, desc, last = false }: { keys: string; desc: string; last?: boolean }) {
+  return (
+    <>
+      <Text color={theme.accent}>{keys}</Text>
+      <Text color={theme.textDim}> {desc}</Text>
+      {!last && <Text color={theme.textFaint}> · </Text>}
+    </>
+  );
+}
+
 export function ModelSettings({ app, onClose, width }: Props) {
   const [models, setModels] = useState<string[]>(() => app.listConfiguredModels());
   const [selected, setSelected] = useState(0);
@@ -145,77 +179,92 @@ export function ModelSettings({ app, onClose, width }: Props) {
     }
   });
 
-  const dialogWidth = Math.min(width || 80, 72);
-  const THINKING_LABEL: Record<string, string> = { off: 'off', low: 'low', medium: 'medium', high: 'high' };
+  // Dialog geometry. Content width = dialogWidth - border(2) - paddingX(2).
+  // Every rendered line is pre-truncated to this budget so the frame never
+  // wraps (the v3.0.14 separator/keys overflow bug).
+  const dialogWidth = Math.max(24, Math.min(width || 72, 72));
+  const contentW = dialogWidth - 4;
+  const rule = '─'.repeat(contentW);
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={theme.border}
-      paddingX={1}
-      width={dialogWidth}
-    >
-      <Box justifyContent="space-between">
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} width={dialogWidth}>
+      {/* header: bold title left, muted dismiss right (opencode header row) */}
+      <Box justifyContent="space-between" width={contentW}>
         <Text color={theme.accent} bold>◆ 模型设置</Text>
         <Text color={theme.textFaint}>esc 关闭</Text>
       </Box>
-      <Text color={theme.border}>{'─'.repeat(Math.max(10, dialogWidth - 2))}</Text>
+      <Text color={theme.border}>{rule}</Text>
 
-      <Text color={theme.textDim}>模型列表</Text>
       {models.map((m, i) => {
         const st = settings[m] || {};
         const isSel = i === idx;
         const isCurrent = m === currentModel;
         const thinking = st.thinking ?? 'off';
+        // chips render right of the id; the id shrinks (with …) so the
+        // whole row always fits in one line.
+        const chipsFull =
+          `ctx ${st.contextLength ?? app.session.getMaxMessages()}` +
+          ` · 窗口 ${(app.getContextWindow(m) / 1000).toFixed(0)}k` +
+          ` · thinking ${thinking}` +
+          (isCurrent ? ' · ● 当前' : '');
+        let chips = chipsFull;
+        let maxIdW = contentW - 2 - 2 - stringWidth(chips); // prefix '▸ ' + gap '  '
+        if (maxIdW < 4) {
+          // pathological narrow dialog: keep a minimal id, truncate chips too
+          maxIdW = 4;
+          chips = truncateToWidth(chipsFull, Math.max(1, contentW - 4 - maxIdW));
+        }
+        const id = truncateToWidth(m, maxIdW);
         return (
           <Box key={m}>
             <Text color={isSel ? theme.accent : theme.textFaint}>{isSel ? '▸ ' : '  '}</Text>
-            <Text color={isSel ? theme.text : theme.textDim} bold={isSel} wrap="truncate-end">
-              {m.slice(0, dialogWidth - 34)}
-            </Text>
-            <Text color={theme.textFaint}>  ctx {st.contextLength ?? app.session.getMaxMessages()}</Text>
-            <Text color={theme.textFaint}> · 窗口 {(app.getContextWindow(m) / 1000).toFixed(0)}k</Text>
-            <Text color={thinking !== 'off' ? theme.accent : theme.textFaint}>
-              {'  '}thinking {THINKING_LABEL[thinking]}
-            </Text>
-            {isCurrent && <Text color={theme.success}>  ● 当前</Text>}
+            <Text color={isSel ? theme.text : theme.textDim} bold={isSel} wrap="truncate-end">{id}</Text>
+            <Text color={theme.textFaint}>{'  '}{chips}</Text>
           </Box>
         );
       })}
 
-      <Text color={theme.border}>{'─'.repeat(Math.max(10, dialogWidth - 2))}</Text>
+      <Text color={theme.border}>{rule}</Text>
 
       {submode ? (
-        <Box flexDirection="column">
+        <Box flexDirection="column" width={contentW}>
+          {(() => {
+            const label =
+              submode.type === 'add' ? '添加模型 id ❯ '
+                : submode.type === 'window' ? `${truncateToWidth(active, 24)} 上下文窗口(tokens) ❯ `
+                : `${truncateToWidth(active, 24)} 上下文长度 ❯ `;
+            const budget = contentW - stringWidth(submode.value) - 1; // 1 = cursor █
+            return (
+              <Box>
+                <Text color={theme.accent}>{truncateToWidth(label, Math.max(4, budget))}</Text>
+                <Text color={theme.text}>{truncateToWidth(submode.value, Math.max(0, contentW - 1))}</Text>
+                <Text color={theme.text}>█</Text>
+              </Box>
+            );
+          })()}
+          {submode.error && <Text color={theme.error} wrap="truncate-end">{truncateToWidth(submode.error, contentW)}</Text>}
           <Box>
-            <Text color={theme.accent}>
-              {submode.type === 'add' ? '添加模型 id ❯ '
-                : submode.type === 'window' ? `${active} 上下文窗口(tokens) ❯ `
-                : `${active} 上下文长度 ❯ `}
-            </Text>
-            <Text>{submode.value}</Text>
-            <Text color={theme.text}>█</Text>
+            <KeyHint keys="enter" desc="确认" />
+            <KeyHint keys="esc" desc="取消" last />
           </Box>
-          {submode.error && <Text color={theme.error}>{submode.error}</Text>}
-          <Text color={theme.textFaint}>enter 确认 · esc 取消</Text>
         </Box>
       ) : (
-        <Box>
-          <Text color={theme.textFaint}>↑↓ 选择 · </Text>
-          <Text color={theme.accent}>a</Text>
-          <Text color={theme.textFaint}> 添加模型 · </Text>
-          <Text color={theme.accent}>c</Text>
-          <Text color={theme.textFaint}> 上下文长度 · </Text>
-          <Text color={theme.accent}>w</Text>
-          <Text color={theme.textFaint}> 上下文窗口(tokens) · </Text>
-          <Text color={theme.accent}>t</Text>
-          <Text color={theme.textFaint}> 思考强度 · </Text>
-          <Text color={theme.accent}>d</Text>
-          <Text color={theme.textFaint}> 删除自定义</Text>
+        // two-line compact key table: accent keys, dim descriptions.
+        <Box flexDirection="column" width={contentW}>
+          <Box>
+            <KeyHint keys="↑↓" desc="选择" />
+            <KeyHint keys="enter/a" desc="添加" />
+            <KeyHint keys="d" desc="删除" />
+            <KeyHint keys="esc" desc="关闭" last />
+          </Box>
+          <Box>
+            <KeyHint keys="c" desc="上下文长度" />
+            <KeyHint keys="w" desc="上下文窗口" />
+            <KeyHint keys="t" desc="思考强度" last />
+          </Box>
         </Box>
       )}
-      {toast && <Text color={theme.success}>✓ {toast}</Text>}
+      {toast && <Text color={theme.success} wrap="truncate-end">{truncateToWidth(`✓ ${toast}`, contentW)}</Text>}
     </Box>
   );
 }

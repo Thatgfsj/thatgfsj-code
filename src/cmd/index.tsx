@@ -245,6 +245,13 @@ program
               break;
             }
             case 'tool_calls': {
+              // v3.0.16: `pending: true` is the TUI-only pre-execution
+              // announcement. Headless keeps the original contract — exactly
+              // ONE tool_calls event per agent round, emitted after execution
+              // with results attached.
+              if (chunk.pending) {
+                break;
+              }
               if (chunk.toolCalls && chunk.toolCalls.length > 0) {
                 const results: ToolCallResult[] = chunk.results || [];
                 if (jsonMode) {

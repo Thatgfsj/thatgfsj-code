@@ -105,11 +105,15 @@ export interface ChatOptions {
  * protocol that the previous version of useChat parsed by string-splitting.
  *
  * - 'text':        regular model output
- * - 'tool_calls':  one or more tool calls ready to dispatch. After the agent
- *                  loop executes them it re-emits this chunk variant with
- *                  `results` attached (index-aligned with toolCalls) so the
- *                  TUI can render per-tool outcomes without reading session
- *                  internals.
+ * - 'tool_calls':  one or more tool calls. Two flavors:
+ *                    - `pending: true`  → pre-execution announcement (the
+ *                      agent loop yielded it BEFORE running the tools so the
+ *                      TUI can print `⎿ name(args) ⟳` immediately).
+ *                    - `results` attached (index-aligned with toolCalls) →
+ *                      emitted after execution so the TUI can render per-tool
+ *                      outcomes without reading session internals.
+ *                  Headless (--json) consumers skip `pending` chunks and keep
+ *                  emitting exactly ONE tool_calls event per agent round.
  * - 'thinking':    reasoning content (stripped from final persistence; kept in
  *                  VolatileScratch for the current round only)
  * - 'usage':       token usage + cache stats; emitted at end of stream if
@@ -119,6 +123,6 @@ export type ToolCallResult = { name: string; ok: boolean; output: string };
 
 export type StreamChunk =
   | { type: 'text'; content: string }
-  | { type: 'tool_calls'; toolCalls: ToolCall[]; results?: ToolCallResult[] }
+  | { type: 'tool_calls'; toolCalls: ToolCall[]; results?: ToolCallResult[]; pending?: boolean }
   | { type: 'thinking'; content: string }
   | { type: 'usage'; usage: Usage };

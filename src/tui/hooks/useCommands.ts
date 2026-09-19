@@ -9,8 +9,10 @@ interface CommandResult {
    * v3.0.5: 'reload_model' / 'apply_ttl' / 'resume' are handled async by
    * app.tsx after the sync output is displayed (reloadModel / applyTtl /
    * session load are async or need React state access).
+   * v3.0.16: 'browser_check' — BrowserTool.verifyLaunch() spawns Chromium,
+   * so it must run async in app.tsx (handleCommand stays sync).
    */
-  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume' | 'model_settings';
+  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check';
   payload?: any;
 }
 
@@ -48,6 +50,7 @@ export const COMMAND_LIST = [
   { name: '/ttl', desc: '查看/设置 Cache TTL' },
   { name: '/技能', desc: '管理技能' },
   { name: '/mcp', desc: 'MCP 服务器状态' },
+  { name: '/browser', desc: '浏览器工具状态' },
   { name: '/yolo', desc: '切换自动确认' },
   { name: '/帮助', desc: '查看帮助' },
 ];
@@ -143,6 +146,15 @@ export function useCommands(app: App) {
     // ── /models — 模型设置对话框 ─────────────────────────
     if (name === '/models') {
       return { handled: true, action: 'model_settings' };
+    }
+
+    // ── /browser — 浏览器工具状态 ────────────────────────
+    if (name === '/browser' || name === '/浏览器') {
+      // Sync part only: handleCommand can not await verifyLaunch (it
+      // spawns Chromium). Return the action; app.tsx runs the async check
+      // and posts the report (config.browserSetup + launch probe) as a
+      // chat notice — same delegation pattern as /models.
+      return { handled: true, action: 'browser_check' };
     }
 
     // ── /yolo ───────────────────────────────────────────
@@ -303,6 +315,7 @@ export function useCommands(app: App) {
           '  /思考 [on|off]   切换思考块显示',
           '  /技能 [id]       管理技能',
           '  /mcp             MCP 服务器状态',
+          '  /browser         浏览器工具状态（配置 + 启动检查）',
           '  /yolo            切换写/执行操作自动确认',
           '  /帮助            查看帮助',
           '  exit             退出',

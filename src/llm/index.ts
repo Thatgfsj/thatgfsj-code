@@ -205,6 +205,14 @@ export class LLMService {
 
       // If we got tool calls, execute them and loop
       if (detectedToolCalls && detectedToolCalls.length > 0) {
+        // v3.0.16 (tool_start pre-launch): announce the calls BEFORE running
+        // them. The TUI prints `⎿ name(args) ⟳` immediately instead of
+        // waiting for execution to finish (long browser/file tools used to
+        // leave a silent gap). Headless consumers skip pending chunks, so
+        // the --json event stream still carries exactly ONE tool_calls
+        // event per round (with results).
+        yield { type: 'tool_calls', toolCalls: detectedToolCalls, pending: true };
+
         // Add assistant message with tool calls (append-only, preserves prefix cache)
         currentMessages.push({
           role: 'assistant',
@@ -281,7 +289,10 @@ export class LLMService {
             }
 
             const params = parsed;
-            const result = await tool.execute(params, this.toolCtx);
+            // v3.0.16: overlay the per-turn AbortSignal onto the shared tool
+            // context so cancellation-aware tools (browser) can bail out
+            // mid-flight — Ctrl+C no longer leaves a page.goto running.
+            const result = await tool.execute(params, { ...this.toolCtx, signal: options?.signal });
             const output = result.success ? (result.output || JSON.stringify(result.data)) : (result.error || 'Tool failed');
 
             currentMessages.push({
@@ -321,6 +332,7 @@ export class LLMService {
 
         // Emit one tool_calls chunk for this iteration, with per-tool results
         // attached (index-aligned). TUI / headless render outcomes from here.
+        // (The pre-execution `pending: true` announcement went out above.)
         yield { type: 'tool_calls', toolCalls: detectedToolCalls, results: callResults };
         continue;
       }

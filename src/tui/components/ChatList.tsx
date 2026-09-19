@@ -2,12 +2,9 @@
 import React, { memo } from 'react';
 import { Box, Static } from 'ink';
 import { ChatMessage, type MessageData } from './ChatMessage.js';
-import type { ToolCallData } from './ToolCall.js';
 
 interface Props {
   messages: MessageData[];
-  streaming?: string;
-  streamingToolCalls?: ToolCallData[];
   width?: number;
   /** v3.0.9: assistant label info (opencode session view). */
   mode?: string;
@@ -18,15 +15,18 @@ interface Props {
  * v3.0.13: completed messages render through Ink <Static> — printed ONCE
  * into the terminal's scroll buffer and never touched again. History stays
  * visible indefinitely (scroll back freely); nothing is ever folded or
- * erased. Only the streaming tail + input live in the re-rendered frame.
+ * erased.
  *
- * (3.0.9 tried a sliced viewport inside a fixed-height fullscreen frame;
- * the user rejected it — history must stay visible, not fold after ~10
- * messages.)
+ * v3.0.16 (scroll-wheel fix): this component now renders EXCLUSIVELY
+ * <Static> items, so it contributes ZERO lines to the re-rendered frame.
+ * Streaming text/tool lines are appended directly to the scrollback by
+ * useChat (claude-code two-region rendering) — the live frame is just the
+ * spinner + input + status bar, at constant height while a response
+ * streams. The old `streaming`/`streamingToolCalls` live-frame branches
+ * are gone (they were the root cause of the wheel lockup: the frame grew
+ * with every token and Ink's full-frame redraw yanked the viewport down).
  */
-export const ChatList = memo(function ChatList({ messages, streaming, streamingToolCalls, width, mode, model }: Props) {
-  const hasStreaming = !!(streaming || (streamingToolCalls && streamingToolCalls.length > 0));
-
+export const ChatList = memo(function ChatList({ messages, width, mode, model }: Props) {
   return (
     <Box flexDirection="column">
       {messages.length > 0 && (
@@ -35,18 +35,6 @@ export const ChatList = memo(function ChatList({ messages, streaming, streamingT
             <ChatMessage key={`msg-${index}`} message={msg} width={width} mode={mode} model={model} />
           )}
         </Static>
-      )}
-      {hasStreaming && (
-        <ChatMessage
-          message={{
-            role: 'assistant',
-            content: streaming || '',
-            toolCalls: streamingToolCalls && streamingToolCalls.length > 0 ? streamingToolCalls : undefined,
-          }}
-          width={width}
-          mode={mode}
-          model={model}
-        />
       )}
     </Box>
   );

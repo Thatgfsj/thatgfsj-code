@@ -18,7 +18,7 @@
  * Read-only (`network` permission): never asks for confirmation.
  */
 
-import type { Tool, ToolResult } from './types.js';
+import type { Tool, ToolContext, ToolResult } from './types.js';
 
 const GOTO_TIMEOUT_MS = 25000;
 const MAX_PAGE_TEXT = 6000;
@@ -83,6 +83,16 @@ export class BrowserTool implements Tool {
   private static launchError: string | null = null;
   private static exitHookInstalled = false;
 
+  /**
+   * v3.0.16: reset a cached launch failure. A failed lazy launch poisons
+   * every later call with the stale error string; after the first-run
+   * setup installs Chromium successfully, browser-setup calls this so the
+   * tool can launch without a restart.
+   */
+  static clearLaunchError(): void {
+    BrowserTool.launchError = null;
+  }
+
   private async launch(): Promise<any> {
     if (BrowserTool.browser) return BrowserTool.browser;
     if (BrowserTool.launchError) throw new Error(BrowserTool.launchError);
@@ -117,8 +127,19 @@ export class BrowserTool implements Tool {
     return BrowserTool.browser;
   }
 
-  async execute(params: Record<string, any>): Promise<ToolResult> {
+  /** Sentinel result for a cancelled call (ctx.signal aborted). */
+  private static aborted(): ToolResult {
+    return { success: false, error: 'Aborted before the page request started.' };
+  }
+
+  async execute(params: Record<string, any>, ctx?: ToolContext): Promise<ToolResult> {
     const action = String(params.action || '').toLowerCase();
+
+    // v3.0.16: honor caller cancellation — bail out immediately when the
+    // signal already fired instead of launching a browser for a dead call.
+    if (ctx?.signal?.aborted) {
+      return BrowserTool.aborted();
+    }
 
     try {
       if (action === 'close') {
@@ -132,6 +153,7 @@ export class BrowserTool implements Tool {
         const engine = ENGINES[String(params.engine || 'bing').toLowerCase()] ? String(params.engine || 'bing').toLowerCase() : 'bing';
         const browser = await this.launch();
         const page = await browser.newPage();
+        const closeOnAbort = this.bindAbortToPage(ctx?.signal, page);
         try {
           await page.goto(ENGINES[engine].url(query), { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
           await page.waitForSelector(ENGINES[engine].results().item, { timeout: 8000 }).catch(() => {});
@@ -158,6 +180,7 @@ export class BrowserTool implements Tool {
           const blocks = results.map((r, i) => `[${i + 1}] ${r.title}\n    ${r.url}\n    ${r.snippet.slice(0, 300)}`);
           return { success: true, output: `${engine} search for "${query}" — ${results.length} results:\n\n${blocks.join('\n\n')}` };
         } finally {
+          closeOnAbort?.();
           await page.close().catch(() => {});
         }
       }
@@ -169,6 +192,7 @@ export class BrowserTool implements Tool {
         if (!/^https?:\/\//i.test(normalized)) normalized = 'https://' + normalized;
         const browser = await this.launch();
         const page = await browser.newPage();
+        const closeOnAbort = this.bindAbortToPage(ctx?.signal, page);
         try {
           await page.goto(normalized, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(500);
@@ -187,6 +211,7 @@ export class BrowserTool implements Tool {
             : clean;
           return { success: true, output: `${normalized}\n\n${output}` };
         } finally {
+          closeOnAbort?.();
           await page.close().catch(() => {});
         }
       }
@@ -195,6 +220,21 @@ export class BrowserTool implements Tool {
     } catch (error: any) {
       return { success: false, error: `browser ${action} failed: ${error.message}` };
     }
+  }
+
+  /**
+   * v3.0.16: tie a page's lifetime to the caller's AbortSignal — when the
+   * signal fires mid-navigation the page closes at once, which fails the
+   * pending page.goto immediately instead of leaving it running for up to
+   * GOTO_TIMEOUT_MS. Returns the detach function for the finally block.
+   */
+  private bindAbortToPage(signal: AbortSignal | undefined, page: any): (() => void) | undefined {
+    if (!signal) return undefined;
+    const onAbort = () => {
+      try { void page.close(); } catch { /* page already dead */ }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    return () => signal.removeEventListener('abort', onAbort);
   }
 
   /** Shut the shared browser down (process exit / action=close). */
