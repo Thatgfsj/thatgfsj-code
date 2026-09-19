@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import chalk from 'chalk';
 import { Header } from './components/Header.js';
@@ -14,11 +14,13 @@ import { ConfirmPrompt } from './components/ConfirmPrompt.js';
 import { Splash } from './components/Splash.js';
 import { PlanPanel } from './components/PlanPanel.js';
 import { PlanApproval } from './components/PlanApproval.js';
+import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
+import { estimateTokens } from '../utils/tokens.js';
 import { theme } from './theme.js';
 import { getVersion } from '../version.js';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
@@ -322,6 +324,47 @@ export function TuiApp({ app }: Props) {
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
   const cfg = app.config.get();
+
+  // ── v3.2.0: right-side context panel (opencode 上下文容量 parity) ──
+  // estimateBreakdown reads instruction files + NWT history from disk, so it
+  // is memoized per message count / mode rather than run on every frame.
+  // Numbers mirror the screenshot the user asked for: total vs window, a
+  // share-of-used breakdown and the rolling cache hit rate.
+  const PANEL_WIDTH = 38;
+  const PANEL_RESERVE = PANEL_WIDTH + 2; // + gap
+  const showContextPanel = terminalWidth >= 100;
+  const contextBreakdown = useMemo(() => {
+    try {
+      const bd = app.prompts.estimateBreakdown();
+      let msgTokens = 0;
+      for (const m of app.session.getMessages()) {
+        const c = (m as { content?: unknown }).content;
+        msgTokens += estimateTokens(typeof c === 'string' ? c : JSON.stringify(c ?? '')) + 4;
+      }
+      return { ...bd, msgTokens };
+    } catch { return null; }
+  }, [app, allMessages.length, app.permissionMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  const contextPanel = showContextPanel && contextBreakdown ? (() => {
+    const estSum = contextBreakdown.systemPrompt + contextBreakdown.systemTools
+      + contextBreakdown.mcpTools + contextBreakdown.skills + contextBreakdown.msgTokens;
+    const used = app.sessionStats.promptTokens > 0 ? app.sessionStats.promptTokens : estSum + 64;
+    return (
+      <ContextPanel
+        used={used}
+        window={app.getContextWindow()}
+        hitRate={cacheSnapshot.totalRequests > 0 ? cacheSnapshot.hitRate : null}
+        width={PANEL_WIDTH}
+        categories={[
+          { label: '系统工具', tokens: contextBreakdown.systemTools },
+          { label: '消息', tokens: contextBreakdown.msgTokens },
+          { label: '技能', tokens: contextBreakdown.skills },
+          { label: '系统提示词', tokens: contextBreakdown.systemPrompt },
+          { label: 'MCP 工具', tokens: contextBreakdown.mcpTools },
+        ]}
+      />
+    );
+  })() : null;
+
   // v3.0.18: header is committed as a Static item by useChat (manual
   // stdout.write fought Ink's frame cursor and stamped header copies into
   // streamed text). No dynamic header/status live in the chat frame.
@@ -364,7 +407,7 @@ export function TuiApp({ app }: Props) {
       model={cfg.model}
       thinking={thinking}
       fullWidth={!splashMode}
-      width={splashMode ? Math.min(terminalWidth - 4, 64) : undefined}
+      width={splashMode ? Math.min(terminalWidth - 4 - (contextPanel ? PANEL_RESERVE : 0), 64) : undefined}
     />
   );
 
@@ -410,7 +453,12 @@ export function TuiApp({ app }: Props) {
         <>
           <Splash />
           {modeBadge}
-          <Box justifyContent="center">{inputArea}</Box>
+          {/* v3.2.0: input + context panel sit side by side (opencode
+              splash); the pair stays centered together. */}
+          <Box justifyContent="center" gap={2}>
+            {inputArea}
+            {contextPanel}
+          </Box>
           <Box justifyContent="center" paddingTop={1}>
             <Text color={theme.textFaint}>
               <Text color={theme.accent}>◆ Tip </Text>
@@ -435,18 +483,26 @@ export function TuiApp({ app }: Props) {
             mode="Build"
             model={cfg.model}
           />
-          {/* v3.0.20: live plan panel (Codex update_plan parity) — hidden
-              when the model has no active plan. */}
-          <PlanPanel width={terminalWidth - 4} />
-          <Thinking active={isThinking} />
-          {queuedMessage && (
-            <Box paddingLeft={1}>
-              <Text color={theme.warning}>📎 已排队: </Text>
-              <Text color={theme.textDim}>{queuedMessage}</Text>
+          {/* v3.2.0: the live bottom area becomes a two-column row — chat on
+              the left, the context panel pinned right (hidden on narrow
+              terminals). With no panel this degrades to the old layout. */}
+          <Box flexDirection="row" gap={2}>
+            <Box flexDirection="column" flexGrow={1} minWidth={0}>
+              {/* v3.0.20: live plan panel (Codex update_plan parity) — hidden
+                  when the model has no active plan. */}
+              <PlanPanel width={terminalWidth - 4 - (contextPanel ? PANEL_RESERVE : 0)} />
+              <Thinking active={isThinking} />
+              {queuedMessage && (
+                <Box paddingLeft={1}>
+                  <Text color={theme.warning}>📎 已排队: </Text>
+                  <Text color={theme.textDim}>{queuedMessage}</Text>
+                </Box>
+              )}
+              {modeBadge}
+              {inputArea}
             </Box>
-          )}
-          {modeBadge}
-          {inputArea}
+            {contextPanel}
+          </Box>
           {/* v3.0.16: StatusBar/version live only in the splash branch —
               during chat they would be re-stamped into the scrollback by
               the append-only writer on every frame. Chat prints a one-line

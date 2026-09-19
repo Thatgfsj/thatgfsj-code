@@ -47,6 +47,8 @@ npm install -g thatgfsj-code
 
 安装后四个命令等价：`gfcode`、`gfc`、`gfcgfc`、`thatgfsj`，任选顺手的用。
 
+输入区右侧有 **上下文容量面板**（宽 ≥ 100 列时显示）：已用/窗口 token、分类占比（系统工具 / 消息 / 技能 / 系统提示词 / MCP 工具 / 其他）和平均缓存命中率。界面渲染若出错，完整堆栈会写入 `~/.thatgfsj/last-error.log`，反馈问题时请附上。
+
 ### 配置
 
 ```bash

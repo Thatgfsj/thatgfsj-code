@@ -18,37 +18,15 @@
  */
 
 import { execSync } from 'child_process';
-import { appendFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
 import { program } from 'commander';
 import chalk from 'chalk';
 import { App } from '../app/index.js';
 import { WelcomeScreen } from '../tui/welcome.js';
 import { compressThinking, summarizeThinking, splitThinking } from '../utils/thinking.js';
+import { reportCrash } from '../utils/crash.js';
 import { getVersion } from '../version.js';
 import type { ConfirmRequest } from '../app/index.js';
 import type { ToolCallResult } from '../types.js';
-
-/**
- * v3.1.1: crash reports now carry the FULL stack (message-only reports like
- * "Cannot read properties of undefined (reading 'items')" are undiagnosable)
- * and persist to ~/.thatgfsj/last-error.log for post-mortem.
- */
-function reportCrash(kind: string, error: unknown): void {
-  const stack = error instanceof Error ? (error.stack || error.message) : String(error);
-  try {
-    const dir = join(homedir(), '.thatgfsj');
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const log = [
-      `--- ${new Date().toISOString()} · ${kind} · v${getVersion()} ---`,
-      stack,
-      '',
-    ].join('\n');
-    appendFileSync(join(dir, 'last-error.log'), log, 'utf-8');
-  } catch { /* best-effort — never let logging break exiting */ }
-  console.error(chalk.red(`\n  Error (${kind}):`), stack);
-}
 
 process.on('uncaughtException', (error) => {
   reportCrash('uncaughtException', error);
@@ -155,7 +133,12 @@ program
           out.write('\x1b[?1049h\x1b[2J\x1b[H');
         }
         try {
-          const instance = render(<TuiApp app={app} />);
+          const { TuiErrorBoundary } = await import('../tui/components/ErrorBoundary.js');
+          // v3.2.0: boundary catches React render errors (which never reach
+          // the process-level hooks) and writes last-error.log before exit.
+          const instance = render(
+            <TuiErrorBoundary><TuiApp app={app} /></TuiErrorBoundary>
+          );
           const restore = () => instance.unmount();
           process.once('exit', restore);
           await instance.waitUntilExit();

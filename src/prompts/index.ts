@@ -4,6 +4,7 @@
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join, dirname, resolve, parse } from 'path';
+import { estimateTokens } from '../utils/tokens.js';
 import type { Tool } from '../tools/types.js';
 
 export interface SystemPromptConfig {
@@ -336,4 +337,32 @@ export class SystemPromptBuilder {
   setTools(tools: Tool[]): this { this.config.tools = tools; return this; }
   setCwd(cwd: string): this { this.config.cwd = cwd; return this; }
   setPermissionMode(mode: 'accept' | 'deny' | 'ask' | 'plan'): this { this.config.permissionMode = mode; return this; }
+
+  /**
+   * v3.2.0: token breakdown for the TUI context panel (opencode-style
+   * 上下文容量 sidebar). Estimates, not exact counts — same CJK-aware
+   * heuristic as everywhere else. Categories mirror the request anatomy:
+   *   - systemPrompt: every prompt segment EXCEPT tool-instructions and
+   *     skills (identity, AGENTS.md chain, environment, mode, NWT, date)
+   *   - systemTools: JSON schemas of built-in tools (what actually rides
+   *     on the wire as the tools array, minus MCP tools)
+   *   - mcpTools: JSON schemas of mcp__-prefixed tools
+   *   - skills: the Active Skills segment
+   * Message tokens are added by the caller (session lives outside here).
+   */
+  estimateBreakdown(): { systemPrompt: number; systemTools: number; mcpTools: number; skills: number } {
+    let systemPrompt = 0;
+    let skills = 0;
+    for (const s of this.buildSegments()) {
+      const t = estimateTokens(s.content);
+      if (s.name === 'skills') skills += t;
+      else if (s.name !== 'tool-instructions') systemPrompt += t;
+    }
+    const schemaJson = (tools: Tool[]) => estimateTokens(JSON.stringify(
+      tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters }))
+    ));
+    const builtin = this.config.tools.filter(t => !t.name.startsWith('mcp__'));
+    const mcp = this.config.tools.filter(t => t.name.startsWith('mcp__'));
+    return { systemPrompt, systemTools: schemaJson(builtin), mcpTools: schemaJson(mcp), skills };
+  }
 }

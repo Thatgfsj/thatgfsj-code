@@ -88,3 +88,50 @@ describe('permission-mode prompt sections (v3.1.0 modes)', () => {
     expect(ask).toContain('Read-only commands');
   });
 });
+
+describe('estimateBreakdown (v3.2.0 context panel)', () => {
+  const tools = [
+    {
+      name: 'shell',
+      description: 'run a shell command with a very long documentation block so its schema clearly dominates',
+      parameters: [
+        { name: 'command', type: 'string' as const, description: 'the command line to execute', required: true },
+      ],
+    },
+    { name: 'mcp__srv__ping', description: 'p', parameters: [] },
+  ];
+
+  it('splits tools vs mcp tools vs skills; tool text stays out of the prompt bucket', async () => {
+    const cwd = join(root, 'repo', 'sub');
+    const { SystemPromptBuilder } = await import('../src/prompts/index.js');
+    const b = new SystemPromptBuilder({
+      cwd, tools, includeProjectMd: true, skillsPrompt: 'SKILL-TEXT '.repeat(40),
+    });
+    const bd = b.estimateBreakdown();
+    expect(bd.systemTools).toBeGreaterThan(0);
+    expect(bd.mcpTools).toBeGreaterThan(0);
+    expect(bd.systemTools).toBeGreaterThan(bd.mcpTools); // shell schema dominates
+    expect(bd.skills).toBeGreaterThan(0);
+    // Exclusion proof: tool-instructions live in the tool buckets, so adding
+    // a huge tool description must not move the prompt bucket at all.
+    const huge = [
+      { ...tools[0], description: 'A'.repeat(2000) },
+      { ...tools[1] },
+    ];
+    const withTools = new SystemPromptBuilder({ cwd, tools: huge, includeProjectMd: false }).estimateBreakdown();
+    const noTools = new SystemPromptBuilder({ cwd, tools: [], includeProjectMd: false }).estimateBreakdown();
+    expect(withTools.systemPrompt).toBe(noTools.systemPrompt);
+    expect(withTools.systemTools).toBeGreaterThan(noTools.systemTools);
+  });
+
+  it('counts zero for absent sections', async () => {
+    const cwd = join(root, 'repo', 'sub');
+    const { SystemPromptBuilder } = await import('../src/prompts/index.js');
+    const b = new SystemPromptBuilder({ cwd, tools: [], includeProjectMd: false, skillsPrompt: '' });
+    const bd = b.estimateBreakdown();
+    expect(bd.systemTools).toBeLessThanOrEqual(1); // empty [] still serializes to '[]' → estimate floor of 1
+    expect(bd.mcpTools).toBeLessThanOrEqual(1);
+    expect(bd.skills).toBe(0);
+    expect(bd.systemPrompt).toBeGreaterThan(0); // identity + env still present
+  });
+});
