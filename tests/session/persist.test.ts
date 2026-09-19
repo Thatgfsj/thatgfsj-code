@@ -131,4 +131,24 @@ describe('sanitizeLoadedMessages', () => {
     expect(out[0].tool_calls).toBeDefined();
     expect(out[1].role).toBe('tool');
   });
+
+  it('cascade-deletes the lone tool result of stripped multi-call tool_calls', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'user', content: 'run both' },
+      {
+        role: 'assistant', content: '',
+        tool_calls: [
+          { id: 'c1', type: 'function', function: { name: 'shell', arguments: '{}' } },
+          { id: 'c2', type: 'function', function: { name: 'file', arguments: '{}' } },
+        ],
+      },
+      // crash mid-loop: only the FIRST of two results arrived
+      { role: 'tool', content: 'partial', tool_call_id: 'c1', name: 'shell' },
+    ];
+    const out = sanitizeLoadedMessages(msgs);
+    expect(out).toHaveLength(2);
+    expect(out[1].role).toBe('assistant');
+    expect(out[1].tool_calls).toBeUndefined();
+    expect(out.some(m => m.role === 'tool')).toBe(false);
+  });
 });

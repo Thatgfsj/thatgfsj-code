@@ -21,11 +21,12 @@ echo -e "${YELLOW}[*] 检查 Node.js...${NC}"
 
 if command -v node &> /dev/null; then
     NODE_VERSION=$(node --version)
-    MAJOR_VERSION=$(echo $NODE_VERSION | cut -d'v' -f2 | cut -d'.' -f1)
-    if [ "$MAJOR_VERSION" -ge 18 ]; then
+    NODE_MAJOR=$(echo "$NODE_VERSION" | sed 's/^v//' | cut -d'.' -f1)
+    NODE_MINOR=$(echo "$NODE_VERSION" | sed 's/^v//' | cut -d'.' -f2)
+    if [ "$NODE_MAJOR" -gt 20 ] || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -ge 19 ]; }; then
         echo -e "${GREEN}[✓] Node.js $NODE_VERSION 已安装${NC}"
     else
-        echo -e "${RED}[✗] Node.js 版本过低，需要 v18+${NC}"
+        echo -e "${RED}[✗] Node.js 版本过低，需要 v20.19+（当前 $NODE_VERSION）${NC}"
         echo "    请访问 https://nodejs.org 升级"
         exit 1
     fi

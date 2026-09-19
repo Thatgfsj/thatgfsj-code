@@ -124,6 +124,7 @@ export const MODEL_CATALOGS: Record<ProviderName, ModelInfo[]> = {
     { id: 'Qwen/Qwen3.5-35B-A3B', name: 'Qwen3.5-35B-A3B', desc: '超低价 MoE 快档，日常编程首选' },
     { id: 'deepseek-ai/DeepSeek-V4-Pro', name: 'DeepSeek-V4-Pro', desc: 'DeepSeek 旗舰/思考档' },
     { id: 'deepseek-ai/DeepSeek-V4-Flash', name: 'DeepSeek-V4-Flash', desc: '便宜快档' },
+    { id: 'deepseek-ai/DeepSeek-V3.2', name: 'DeepSeek-V3.2', desc: '上一代稳定版' },
     { id: 'zai-org/GLM-5.3', name: 'GLM-5.3', desc: 'GLM 旗舰/思考档' },
     { id: 'zai-org/GLM-5.2', name: 'GLM-5.2', desc: 'GLM 稳定中档' },
     { id: 'moonshotai/Kimi-K2.7-Code', name: 'Kimi-K2.7-Code', desc: '编码特化' },

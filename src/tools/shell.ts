@@ -55,10 +55,20 @@ export class ShellTool implements Tool {
   ];
 
   /**
-   * Check if command matches dangerous patterns
+   * Check if command matches dangerous patterns.
+   * v3.0.19: split the command into segments on shell chaining operators
+   * (&&, ||, ;, |) and newlines, then check every trimmed segment — a bare
+   * whole-string match let `echo ok && rm -rf /` slip through because the
+   * pattern is anchored to the start of the full string.
+   *
+   * Known limitation (naive, quote-unaware split): `echo "a && b"` is split
+   * into `echo "a` / `b"` — harmless for the current pattern list (no false
+   * block), but a quoted string containing an anchored-dangerous segment,
+   * e.g. `echo "x && rm -rf /"`, WOULD be over-blocked.
    */
   private isDangerous(command: string): boolean {
-    return DANGEROUS_PATTERNS.some(pattern => pattern.test(command.trim()));
+    const segments = command.split(/(?:\s*(?:&&|\|\||;|\|)\s*|\r?\n)/);
+    return segments.some(segment => DANGEROUS_PATTERNS.some(pattern => pattern.test(segment.trim())));
   }
 
   async execute(params: Record<string, any>, ctx?: ToolContext): Promise<ToolResult> {

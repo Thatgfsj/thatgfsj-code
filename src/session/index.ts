@@ -13,7 +13,7 @@
  *     truncated every round. The TUI is notified via onAutoCompact.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { ChatMessage } from '../types.js';
@@ -82,10 +82,39 @@ export function sessionsDir(): string {
  * tool_calls block without its results, or the next provider request 400s:
  * - drop orphaned 'tool' messages (no preceding assistant tool_calls)
  * - strip tool_calls from an assistant message whose results were lost
+ * v3.0.18 fix: stripping the calls now ALSO cascade-deletes the tool results
+ * that belong to those dropped calls — leaving a tool message whose
+ * assistant tool_calls block is gone produces the same provider 400.
  */
 export function sanitizeLoadedMessages(messages: ChatMessage[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   let pendingCalls = 0;
+  /** Index in `out` of the assistant holding the pending tool_calls. */
+  let pendingIdx = -1;
+
+  /**
+   * Strip the pending assistant's tool_calls and cascade-delete every tool
+   * result recorded after it. Any tool message after pendingIdx was kept
+   * only as a result of THIS assistant's calls (later assistants would have
+   * reset pendingIdx), and the whole tool_calls array is being removed — so
+   * those results would be orphaned (and unmatched-id ones already were).
+   */
+  const stripPendingCalls = () => {
+    if (pendingIdx < 0) return;
+    for (let i = out.length - 1; i > pendingIdx; i--) {
+      if (out[i].role !== 'tool') continue;
+      // Keep nothing: results whose tool_call_id belongs to a dropped call,
+      // and any unmatched-id leftovers — both 400 without their assistant
+      // tool_calls block.
+      out.splice(i, 1);
+    }
+    const fixed: ChatMessage = { ...out[pendingIdx] };
+    delete fixed.tool_calls;
+    fixed.content = fixed.content || '(tool calls dropped: results missing)';
+    out[pendingIdx] = fixed;
+    pendingIdx = -1;
+  };
+
   for (const m of messages) {
     if (m.role === 'tool') {
       if (pendingCalls > 0) {
@@ -97,34 +126,21 @@ export function sanitizeLoadedMessages(messages: ChatMessage[]): ChatMessage[] {
     }
     if (pendingCalls > 0) {
       // A new non-tool message arrived before results completed: the
-      // previous assistant's tool_calls have no results — strip them.
-      for (let i = out.length - 1; i >= 0; i--) {
-        if (out[i].role === 'assistant' && out[i].tool_calls) {
-          const fixed: ChatMessage = { ...out[i] };
-          delete fixed.tool_calls;
-          fixed.content = fixed.content || '(tool calls dropped: results missing)';
-          out[i] = fixed;
-          break;
-        }
-      }
+      // previous assistant's tool_calls have no results — strip them
+      // (and their partial results) as a group.
+      stripPendingCalls();
       pendingCalls = 0;
     }
     if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
       pendingCalls = m.tool_calls.length;
+      pendingIdx = out.length;
     }
     out.push(m);
   }
-  // Trailing dangling calls (crash mid-loop) — strip them too.
+  // Trailing dangling calls (crash mid-loop) — strip them (and any partial
+  // results) too.
   if (pendingCalls > 0) {
-    for (let i = out.length - 1; i >= 0; i--) {
-      if (out[i].role === 'assistant' && out[i].tool_calls) {
-        const fixed: ChatMessage = { ...out[i] };
-        delete fixed.tool_calls;
-        fixed.content = fixed.content || '(tool calls dropped: results missing)';
-        out[i] = fixed;
-        break;
-      }
-    }
+    stripPendingCalls();
   }
   return out;
 }
@@ -320,7 +336,17 @@ export class SessionManager {
         model: this.meta?.model,
         messages: this.messages,
       };
-      writeFileSync(join(dir, `${this.sessionId}.json`), JSON.stringify(file, null, 2), 'utf-8');
+      // Atomic write: temp file in the same directory + renameSync. A crash
+      // mid-write previously truncated the session file in place, making it
+      // unrestorable via /resume; rename is atomic on the same volume.
+      const target = join(dir, `${this.sessionId}.json`);
+      const tmp = join(dir, `.${this.sessionId}.${Date.now()}.tmp`);
+      try {
+        writeFileSync(tmp, JSON.stringify(file, null, 2), 'utf-8');
+        renameSync(tmp, target);
+      } finally {
+        try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best-effort */ }
+      }
       pruneSessions(20);
     } catch {
       // best-effort

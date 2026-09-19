@@ -55,6 +55,14 @@ export function TuiApp({ app }: Props) {
   const { handleCommand } = useCommands(app);
   const [systemMessages, setSystemMessages] = useState<MessageData[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
+  /**
+   * Bumped on /new and /resume so <ChatList> gets a fresh key and Ink's
+   * <Static> remounts with its per-item counter back at 0. Without this,
+   * restoring a session onto a non-empty screen silently dropped the first
+   * min(N, M) restored messages (Static had already "rendered" those
+   * indices and never touches an item again).
+   */
+  const [listEpoch, setListEpoch] = useState(0);
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
   const terminalRows = (stdout as any)?.rows || 30;
@@ -154,6 +162,8 @@ export function TuiApp({ app }: Props) {
         // v3.0.16: /new resets the session — reset the visible list too
         // (useChat messages are display-only now).
         clearMessages();
+        // Remount <Static> so its item counter restarts at 0.
+        setListEpoch(e => e + 1);
       }
 
       if (result.action === 'reinit') {
@@ -211,6 +221,10 @@ export function TuiApp({ app }: Props) {
           .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }));
         setSystemMessages([]);
         hydrateMessages(visible);
+        // Remount <Static> — restoring onto a non-empty screen otherwise
+        // loses the first min(N, M) restored messages (already-rendered
+        // indices are never re-rendered by Static).
+        setListEpoch(e => e + 1);
         const model = file.model ? `（模型: ${file.model}）` : '';
         addMsg(`✓ 已恢复会话 ${summary.id.slice(0, 24)}…，共 ${visible.length} 条可见消息${model}。输入 /模型 <名称> 可切换模型。`);
       }
@@ -274,6 +288,17 @@ export function TuiApp({ app }: Props) {
   // The dialog floats in the middle of the terminal with blank space around
   // it (opencode centers horizontally + offsets vertically from the top).
   if (viewMode === 'model_settings') {
+    // A pending permission confirm must win over the settings dialog —
+    // rendering ModelSettings here would swallow the prompt (the tool call
+    // would hang until the 60s timeout with nothing on screen). Same
+    // full-screen centered container as the dialog itself.
+    if (confirmReq) {
+      return (
+        <Box flexDirection="column" height={terminalRows} width={terminalWidth} justifyContent="center" alignItems="center">
+          <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
+        </Box>
+      );
+    }
     return (
       <Box flexDirection="column" height={terminalRows} width={terminalWidth} justifyContent="center" alignItems="center">
         <ModelSettings app={app} onClose={() => setViewMode('chat')} width={Math.min(terminalWidth - 2, 72)} />
@@ -297,6 +322,7 @@ export function TuiApp({ app }: Props) {
       ) : (
         <>
           <ChatList
+            key={`list-${listEpoch}`}
             messages={allMessages}
             width={terminalWidth - 4}
             mode="Build"

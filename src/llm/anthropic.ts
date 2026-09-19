@@ -18,8 +18,16 @@
  *     last block carries cache_control: { type: 'ephemeral', ttl: '5m' }
  *     by default, so Anthropic caches the entire system prefix across rounds.
  *     The previous buildRequest silently dropped any system messages after
- *     the first (`find` + `system` string) — that bug is fixed here: we
- *     forward every system message and let the provider concatenate.
+ *     the first (`find` + `system` string) — that bug was fixed in v3.0.0
+ *     by forwarding every system message.
+ * v3.0.18: mid-stream system inlining
+ *   - Only the FIRST system message stays top-level; every LATER system
+ *     message ([TOOL_REPAIR] notes appended round over round) is inlined
+ *     in place as a user turn tagged '[system note] '. Accumulating those
+ *     notes at the tail of the top-level system array used to shift the
+ *     cache prefix every round and re-bill the whole system + tools.
+ *   - When the resolved TTL is '1h', doRequest opts into the
+ *     extended-cache-ttl-2025-04-11 beta so 1h breakpoints are honored.
  *   - The last tool definition gets a cache_control marker too, so tool
  *     schemas are cached on subsequent rounds (Anthropic charges full price
  *     for uncached tool descriptions, which can be the largest single block
@@ -285,12 +293,27 @@ export class AnthropicProvider implements LLMProvider {
    *   6. JSON.parse on tool arguments is wrapped in try/catch — interrupted
    *      streams can leave a half-parsed JSON string that previously
    *      crashed the entire buildRequest.
+   *
+   * v3.0.18 change (mid-stream system inlining):
+   *   Only the FIRST system message becomes the top-level `system` field
+   *   (still a block array, cache_control breakpoint on the last/only block
+   *   — unchanged). Every LATER system message — e.g. `[TOOL_REPAIR]` notes
+   *   that the agent loop APPENDS each round — is inlined at its original
+   *   position as a `role: 'user'` turn with a `[system note] ` text block.
+   *   Rationale: appending to the top-level system array changed the tail of
+   *   the cacheable prefix every round, so Anthropic re-billed the whole
+   *   system + tools as cache_creation_input_tokens every round. Inlining
+   *   keeps the top-level prefix byte-stable across the whole session
+   *   (same convention as the OpenAI provider's mid-conversation system
+   *   downgrade).
    */
   protected buildRequest(messages: ChatMessage[], stream: boolean, options?: ChatOptions, tools?: Tool[]) {
-    // 1) Collect ALL system messages, in order, as content blocks. The
-    //    final block (and only the final block, per Anthropic convention)
-    //    carries the cache_control marker.
-    const systemMessages = messages.filter(m => m.role === 'system');
+    /** Extract message text whether content is a string or ContentBlock[]. */
+    const textOf = (m: ChatMessage): string =>
+      typeof m.content === 'string'
+        ? m.content
+        : m.content.filter(b => b.type === 'text').map(b => (b as any).text).join('');
+
     // v3.0.3: TTL is sticky per session. The provider's resolvedTtl is
     // set once by LLMService after decideTTL() and never changed within
     // a session (changing it would invalidate the Anthropic cache
@@ -299,37 +322,48 @@ export class AnthropicProvider implements LLMProvider {
     const cacheTtl = this.resolvedTtl;
     const cacheEnabled = this.config.cache?.enabled !== false; // default on for Anthropic
 
-    const systemBlocks = systemMessages.length === 0 ? undefined : systemMessages.map((m, i, arr) => {
-      const isLast = i === arr.length - 1;
-      // ChatMessage.content may be string | ContentBlock[] (the latter used
-      // for multimodal user messages). System messages are always plain
-      // strings in our codebase, but be defensive and handle both shapes.
-      const text = typeof m.content === 'string'
-        ? m.content
-        : m.content
-            .filter(b => b.type === 'text')
-            .map(b => (b as any).text)
-            .join('');
-      const block: any = { type: 'text', text };
-      if (isLast && cacheEnabled) {
-        block.cache_control = { type: 'ephemeral', ttl: cacheTtl };
-      }
-      return block;
-    });
+    // 1) FIRST system message only -> top-level `system` block array.
+    //    The breakpoint sits on the last (only) block, per Anthropic
+    //    convention — the cacheable prefix now ends here and never grows.
+    const firstSystem = messages.find(m => m.role === 'system');
+    const systemBlocks: any[] | undefined = firstSystem
+      ? (() => {
+          const block: any = { type: 'text', text: textOf(firstSystem) };
+          if (cacheEnabled) {
+            block.cache_control = { type: 'ephemeral', ttl: cacheTtl };
+          }
+          return [block];
+        })()
+      : undefined;
 
-    // 2) Convert non-system messages to Anthropic wire format.
-    const nonSystemMsgs = messages.filter(m => m.role !== 'system');
-    const anthropicMessages = nonSystemMsgs.map(m => {
+    // 2) Convert the remaining messages IN ORDER. System messages after the
+    //    first are downgraded to user turns tagged with '[system note] ' so
+    //    their content still reaches the model at the original position.
+    const anthropicMessages: any[] = [];
+    let seenFirstSystem = false;
+    for (const m of messages) {
+      if (m.role === 'system') {
+        if (!seenFirstSystem) {
+          seenFirstSystem = true;
+          continue;
+        }
+        anthropicMessages.push({
+          role: 'user',
+          content: [{ type: 'text', text: '[system note] ' + textOf(m) }],
+        });
+        continue;
+      }
       if (m.role === 'tool') {
         // Tool result message
-        return {
+        anthropicMessages.push({
           role: 'user',
           content: [{
             type: 'tool_result',
             tool_use_id: m.tool_call_id,
             content: m.content,
           }],
-        };
+        });
+        continue;
       }
       if (m.tool_calls && m.tool_calls.length > 0) {
         // Assistant message with tool calls
@@ -350,26 +384,25 @@ export class AnthropicProvider implements LLMProvider {
             input: parsedArgs,
           });
         }
-        return { role: 'assistant', content: blocks };
+        anthropicMessages.push({ role: 'assistant', content: blocks });
+        continue;
       }
       // Forward per-message cache_control if the caller attached one.
       // v3.0.5: cache_control is only legal on CONTENT BLOCKS, not on the
       // message object — the previous code attached it at the top level,
       // which the API rejects with 400. Convert string content to a block.
       if (m.cache_control) {
-        const text = typeof m.content === 'string'
-          ? m.content
-          : m.content.filter(b => b.type === 'text').map(b => (b as any).text).join('');
-        return {
+        anthropicMessages.push({
           role: m.role === 'assistant' ? 'assistant' : 'user',
-          content: [{ type: 'text', text, cache_control: m.cache_control }],
-        };
+          content: [{ type: 'text', text: textOf(m), cache_control: m.cache_control }],
+        });
+        continue;
       }
-      return {
+      anthropicMessages.push({
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: m.content,
-      };
-    });
+      });
+    }
 
     const body: any = {
       model: this.config.model,
@@ -401,12 +434,20 @@ export class AnthropicProvider implements LLMProvider {
    * cache_read_input_tokens / cache_creation_input_tokens in the streaming
    * usage fields. Some relay stations do not forward this header — that is
    * fine, the rest of the provider still works (just without cache stats).
+   *
+   * v3.0.18: when the resolved TTL is '1h', opt into the extended cache TTL
+   * beta ('extended-cache-ttl-2025-04-11') — without it the API clamps every
+   * cache_control ttl:'1h' breakpoint back down to 5 minutes and long
+   * sessions silently lose their cache after the first few minutes.
    */
   protected async doRequest(body: any, external?: AbortSignal): Promise<Response> {
     const url = `${this.config.baseUrl}/messages`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000); // 60s connect
     const signal = external ? AbortSignal.any([controller.signal, external]) : controller.signal;
+    const betaHeader = this.resolvedTtl === '1h'
+      ? 'prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11'
+      : 'prompt-caching-2024-07-31';
 
     try {
       return await fetch(url, {
@@ -415,7 +456,7 @@ export class AnthropicProvider implements LLMProvider {
           'Content-Type': 'application/json',
           'x-api-key': this.config.apiKey,
           'anthropic-version': '2023-06-01',
-          'anthropic-beta': 'prompt-caching-2024-07-31',
+          'anthropic-beta': betaHeader,
         },
         body: stableStringify(body),
         signal,

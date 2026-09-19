@@ -8,7 +8,7 @@
  * Design notes:
  *   - Uses `playwright-core` (≈3MB, no browser downloads) with the BUNDLED
  *     Chromium only (installed via `npx playwright install chromium` on
- *     first run) — the user's own Edge/Chrome is never launched.
+ *     first run) — the user's own browser is never launched.
  *   - The browser launches lazily on first use and is reused across calls;
  *     it is killed on process exit.
  *   - `search`  : engine search (bing | baidu), returns title/url/snippet
@@ -19,6 +19,7 @@
  */
 
 import type { Tool, ToolContext, ToolResult } from './types.js';
+import { URL } from 'node:url';
 
 const GOTO_TIMEOUT_MS = 25000;
 const MAX_PAGE_TEXT = 6000;
@@ -44,10 +45,66 @@ const ENGINES: Record<string, { url: (q: string) => string; results: () => { ite
   },
 };
 
+/**
+ * SSRF guard (pure functions, exported for tests).
+ *
+ * `action=open` must never be turned into a probe of the user's intranet or
+ * loopback services: block localhost (incl. *.localhost), bare machine names
+ * (no dot in the hostname), loopback/private/link-local IPv4 ranges and
+ * IPv6 loopback / ULA (fc00::/7). Only http/https are allowed.
+ */
+
+/** True when the hostname must NOT be fetched (loopback / intranet / malformed). */
+export function isBlockedHost(hostname: string): boolean {
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+
+  // IPv6 (contains ':') — loopback, unspecified and ULA fc00::/7.
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::' || host === '0:0:0:0:0:0:0:1') return true;
+    if (host.startsWith('fc') || host.startsWith('fd')) return true; // fc00::/7 unique local
+    // IPv4-mapped (::ffff:127.0.0.1) — fall through to the embedded v4 check.
+    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host);
+    if (mapped) return isBlockedHost(mapped[1]);
+    return false;
+  }
+
+  // localhost and *.localhost always resolve to the local machine.
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+
+  // No dot => intranet machine name (e.g. "mypc", "nas") — refuse.
+  if (!host.includes('.')) return true;
+
+  // Dotted-quad IPv4 checks.
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (a === 0 || a === 10 || a === 127) return true; // 0.0.0.0/8, 10/8, 127/8
+    if (a === 172 && b >= 16 && b <= 31) return true;  // 172.16/12
+    if (a === 192 && b === 168) return true;           // 192.168/16
+    if (a === 169 && b === 254) return true;           // 169.254/16 link-local
+  }
+  return false;
+}
+
+/** True when the URL is fetchable: parses, is http/https and the host is not blocked. */
+export function isAllowedUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const proto = parsed.protocol.toLowerCase();
+  if (proto !== 'http:' && proto !== 'https:') return false;
+  return !isBlockedHost(parsed.hostname);
+}
+
 export class BrowserTool implements Tool {
   name = 'browser';
   description =
-    'Drive a local browser (headless Edge/Chrome via Playwright) to search ' +
+    'Drive a local browser (headless built-in Chromium 内置 Chromium via Playwright) to search ' +
     'the web or read pages. Actions: search (query via bing/baidu), open ' +
     '(read a URL as text), close. Use for anything beyond your training ' +
     'data: current events, docs, prices, error messages.';
@@ -106,14 +163,14 @@ export class BrowserTool implements Tool {
       }
     }
 
-    // v3.0.14: bundled Chromium ONLY — the user's own Edge/Chrome is never
+    // v3.0.14: bundled Chromium ONLY — the user's own browser is never
     // launched (their explicit preference). Chromium is installed via
     // `npx playwright install chromium` in the first-run setup.
     try {
       BrowserTool.browser = await BrowserTool.pw.chromium.launch({ headless: true });
     } catch {
       BrowserTool.launchError =
-        'Playwright Chromium is not installed yet. Run `gfcode` once and choose ' +
+        'Built-in Chromium (内置 Chromium) is not installed yet. Run `gfcode` once and choose ' +
         'to install it (≈130MB), or run manually: npx playwright install chromium';
       throw new Error(BrowserTool.launchError);
     }
@@ -190,6 +247,9 @@ export class BrowserTool implements Tool {
         if (!url) return { success: false, error: 'url is required for action=open' };
         let normalized = url;
         if (!/^https?:\/\//i.test(normalized)) normalized = 'https://' + normalized;
+        if (!isAllowedUrl(normalized)) {
+          return { success: false, error: 'blocked: 不允许访问内网/环回地址' };
+        }
         const browser = await this.launch();
         const page = await browser.newPage();
         const closeOnAbort = this.bindAbortToPage(ctx?.signal, page);

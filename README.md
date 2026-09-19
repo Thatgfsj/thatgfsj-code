@@ -8,7 +8,7 @@ AI 编程助手 — 终端里的 AI 编程伙伴
 
 - **Ink TUI** — React 驱动的终端 UI，流式输出、Markdown 渲染
 - **Agent 工具调用** — AI 可以读写文件、执行命令、搜索代码、操作 Git，写/删文件前展示 diff 并请求确认
-- **本机浏览器（Playwright）** — 首次运行可选择安装内置 Chromium（约 130MB，独立运行，不影响你的浏览器），AI 用它搜索网页、读取页面，零 API key
+- **内置浏览器（Playwright）** — 首次运行可选择安装内置 Chromium（约 200MB，独立运行，不影响你的浏览器），AI 用它搜索网页、读取页面，零 API key
 - **MCP 支持** — 接入 Model Context Protocol 服务器（stdio），工具动态注册进对话，`~/.thatgfsj/mcp.json` 配置
 - **会话持久化** — 每轮自动保存到 `~/.thatgfsj/sessions/`，`/resume` 随时恢复历史会话
 - **Headless 模式** — `gfcode "任务" --json` 输出行分隔 JSON 事件流，可脚本化 / 接 CI
@@ -69,6 +69,9 @@ gfcode --yolo
 
 # 指定模型
 gfcode -m gpt-4o "你的任务"
+
+# 思考强度 off|low|medium|high（需模型支持）
+gfcode -t low "任务"
 ```
 
 ### 权限确认
@@ -145,7 +148,7 @@ AI 工作时可以继续输入，消息会排队等待：
 | Baichuan | OpenAI | Baichuan4 |
 | Stepfun | OpenAI | step-1-flash |
 | Doubao | OpenAI | doubao-1.5-pro-32k |
-| Anthropic | Anthropic | claude-sonnet-4 |
+| Anthropic | Anthropic | claude-sonnet-5 |
 | Gemini | Gemini | gemini-2.0-flash |
 | ERNIE | OpenAI | ernie-4.5-8k |
 | Ollama | OpenAI | llama3.1 |
@@ -163,7 +166,7 @@ AI 工作时可以继续输入，消息会排队等待：
 | `git` | Git 操作（写操作确认；参数以数组传递，无 shell 注入） |
 | `search` | 代码搜索（纯 JS grep，Windows 原生可用） |
 | `nwt` | 项目演进记忆（见下方说明） |
-| `browser` | 本机浏览器：搜索网页（bing/baidu）、打开 URL 读正文（Playwright 驱动本机 Edge/Chrome） |
+| `browser` | 内置浏览器：搜索网页（bing/baidu）、打开 URL 读正文，驱动内置 Chromium（独立运行，不影响你的浏览器） |
 | `mcp__*` | 来自 MCP 服务器的动态工具 |
 
 **会话统计**：底部状态栏实时显示 `ctx 已用/窗口 (占比) · ↑输入 ↓输出 tokens · 缓存节省`，上下文达到模型窗口 **85%** 时自动压缩历史（阈值可按模型在 `/models` → `w` 中设置，默认 128k）。

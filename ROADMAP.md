@@ -5,7 +5,9 @@
 
 ---
 
-## ✅ v3.0.5 - 对齐主流 CLI (当前版本, 2026-09)
+## ✅ v3.0.18 - 对齐主流 CLI (当前版本, 2026-09)
+
+> **3.0.13 - 3.0.18 摘要**：浏览器工具（内置 Chromium）/ 85% 阈值自动压缩 / token 用量统计 / 滚动修复 / 模型设置面板
 
 ### 核心架构
 - [x] Ink (React) TUI 框架
@@ -28,7 +30,7 @@
 - [x] git/search 注入修复（execFile 参数数组 / 纯 JS grep）
 - [x] AbortSignal 全链路贯通（取消即中止 HTTP）
 - [x] 流式空闲看门狗（120s）
-- [x] 71 个 vitest 单测（cache / mcp / session / tools）
+- [x] 103+ 个 vitest 单测（cache / mcp / session / tools）
 - [x] npm 发布就绪（files/prepublishOnly/engines/repository）
 
 ---
@@ -59,6 +61,9 @@
 ---
 
 ## 历史版本
+
+### ✅ v3.0.5 - 对齐主流 CLI（2026-09）
+- Ink TUI / Provider 抽象 / Prompt Caching / MCP / 权限管线落地
 
 ### ✅ v3.0.0 - Reasonix Prompt Caching（2026-08）
 - 结构化 StreamChunk 流协议 / Anthropic cache 断点 / 缓存统计

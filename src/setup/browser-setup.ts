@@ -42,11 +42,15 @@ export async function ensureBrowserSetup(config: ConfigManager): Promise<void> {
           await config.save({ browserSetup: { done: true, mode } });
           console.log(chalk.green('  ✓ Chromium 安装完成，浏览器工具已就绪。'));
         } else {
-          await config.save({ browserSetup: { done: true, mode: 'declined' } });
+          // v3.0.19: launch still failing after install — do NOT persist
+          // done:true, so the question is asked again on the next run
+          // (matches the "稍后可重试" message).
+          await config.save({ browserSetup: { done: false } });
           console.log(chalk.yellow('  ⚠ 安装完成但浏览器无法启动，稍后可重试。'));
         }
       } catch {
-        await config.save({ browserSetup: { done: true, mode: 'declined' } });
+        // v3.0.19: download failed — keep done:false so the next run asks again.
+        await config.save({ browserSetup: { done: false } });
         console.log(chalk.yellow('  ⚠ 下载失败。浏览器工具暂不可用，重新运行 gfcode 可再试。'));
       }
     } else {

@@ -131,6 +131,12 @@ export class MCPClient {
       }
       this.process = child;
 
+      // v3.0.19: when the server dies its stdio pipe breaks and stdin emits
+      // EPIPE. Without a listener that 'error' event is unhandled and can
+      // crash the whole CLI process; swallow it (the 'close' handler below
+      // already rejects in-flight requests).
+      child.stdin?.on('error', () => {});
+
       let buffer = '';
 
       child.stdout?.on('data', (data: Buffer) => {

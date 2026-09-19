@@ -268,11 +268,17 @@ export class LLMService {
             // silently create an EMPTY file and report success — the model
             // got no signal to correct itself and re-issued the same broken
             // call. Fail fast with a repair message instead.
-            const required = (tool.parameters || []).filter(p => p.required);
-            const missing = required
-              .filter(p => parsed?.[p.name] === undefined || parsed?.[p.name] === null || parsed?.[p.name] === '')
-              .map(p => p.name);
-            if (required.length > 0 && missing.length > 0) {
+            // v3.0.18: schema-only tools (e.g. MCP tools) may leave
+            // `parameters` empty and declare requirements purely in
+            // `inputSchema.required` — fall back to that name list when
+            // tool.parameters yields no required names.
+            let requiredNames: string[] = (tool.parameters || []).filter(p => p.required).map(p => p.name);
+            if (requiredNames.length === 0 && tool.inputSchema?.required?.length) {
+              requiredNames = tool.inputSchema.required;
+            }
+            const missing = requiredNames
+              .filter(name => parsed?.[name] === undefined || parsed?.[name] === null || parsed?.[name] === '');
+            if (requiredNames.length > 0 && missing.length > 0) {
               const errMsg = `[PARAM_ERROR] Missing required parameter(s): ${missing.join(', ')}. Retry the call with all required parameters filled.`;
               currentMessages.push({
                 role: 'tool',

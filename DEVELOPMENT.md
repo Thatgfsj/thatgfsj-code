@@ -1,6 +1,6 @@
 # Development Guide
 
-> 本文档对应 v3.0.5 的实际代码结构。旧版（v0.x–v2.x，`src/core/ai-engine` /
+> 本文档对应 v3.0.18 的实际代码结构。旧版（v0.x–v2.x，`src/core/ai-engine` /
 > `src/repl` 架构）的开发文档已废弃。
 
 ## 环境要求
@@ -32,10 +32,11 @@ src/
 ├── llm/            # LLMService（agent loop）+ openai/anthropic/gemini 三协议
 ├── cache/          # Prompt caching：stableStringify、断点、smartModel TTL、统计
 ├── session/        # SessionManager（持久化/restore/自动压缩）+ compactor（原子组）
-├── tools/          # Tool 接口 + file/shell/git/search/nwt 实现
+├── tools/          # Tool 接口 + file/shell/git/search/browser/nwt 实现
 ├── skills/         # 16 个内置 Skills（ts 提示词）
 ├── tui/            # Ink 组件（app.tsx 组合 useChat/useCommands）
 ├── mcp/client.ts   # MCP stdio 客户端 + MCPServerManager
+├── setup/          # browser-setup.ts：首次运行浏览器引导
 ├── hooks/          # HookManager（事件点尚未接入主流程）
 ├── prompts/        # 系统提示分段构建（immutable prefix + volatile tail）
 └── utils/          # diff、thinking 压缩、stableStringify、project context

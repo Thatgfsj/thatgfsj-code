@@ -58,7 +58,9 @@ export function useChat(app: App) {
     lastUsage: null,
   });
   const processingRef = useRef(false);
-  const queuedRef = useRef<string | null>(null);
+  /** v3.0.18 fix: FIFO queue — an array, so a second queued input can no
+   * longer overwrite (and silently drop) the first one. */
+  const queuedRef = useRef<string[]>([]);
   const abortRef = useRef(false);
   // v3.0.5: real AbortController — cancel aborts the provider fetch.
   const abortCtrlRef = useRef<AbortController | null>(null);
@@ -78,7 +80,12 @@ export function useChat(app: App) {
     const ctrl = new AbortController();
     abortCtrlRef.current = ctrl;
     commit({ role: 'user', content: input } as any);
-    setState(prev => ({ ...prev, isThinking: true, queuedMessage: null }));
+    // Show whatever is still waiting behind this message (empty → clear).
+    setState(prev => ({
+      ...prev,
+      isThinking: true,
+      queuedMessage: queuedRef.current.length > 0 ? queuedRef.current.join(' │ ') : null,
+    }));
 
     app.session.addMessage('user', input);
 
@@ -226,7 +233,7 @@ export function useChat(app: App) {
     } catch (error: any) {
       flushText();
       if (abortRef.current) {
-        commit({ content: '[已中断]' });
+        commit({ content: '[已中断]', plain: true });
         setState(prev => ({ ...prev, isThinking: false }));
       } else {
         const msg = error.message || String(error);
@@ -247,20 +254,21 @@ export function useChat(app: App) {
       }
     }
 
-    // Process queued message
-    if (!abortRef.current && queuedRef.current) {
-      const next = queuedRef.current;
-      queuedRef.current = null;
+    // Process queued messages: consume EVERYTHING that piled up during the
+    // turn, in order (previously only the last input survived an overwrite).
+    if (!abortRef.current && queuedRef.current.length > 0) {
+      const next = queuedRef.current.shift()!;
       await processStream(next);
     } else {
+      queuedRef.current = [];
       processingRef.current = false;
     }
   };
 
   const sendMessage = useCallback((input: string) => {
     if (processingRef.current) {
-      queuedRef.current = input;
-      setState(prev => ({ ...prev, queuedMessage: input }));
+      queuedRef.current.push(input);
+      setState(prev => ({ ...prev, queuedMessage: queuedRef.current.join(' │ ') }));
       return;
     }
 
@@ -272,7 +280,7 @@ export function useChat(app: App) {
     abortRef.current = true;
     // v3.0.5: abort the actual HTTP request, not just the render loop.
     abortCtrlRef.current?.abort();
-    queuedRef.current = null;
+    queuedRef.current = [];
     setState(prev => ({ ...prev, queuedMessage: null, isThinking: false }));
   }, []);
 

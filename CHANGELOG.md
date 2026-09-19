@@ -4,6 +4,17 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.19] - 2026-09-20  - 五域审查修复：安全/网络/缓存/稳定性
+
+### Fixed
+
+- **fetch failed 诊断与网络加固**（用户报告 DeepSeek 持续 fetch failed）：根因为本地代理 TUN 隧道间歇抖动，Node fetch 不走系统代理且真因藏在 error.cause。现在：错误信息透出底层原因码（如 fetch failed (ECONNRESET)）；网络层错误自动重试（2 次指数退避，4xx/5xx 不重试）；支持 HTTPS_PROXY/HTTP_PROXY 环境变量走代理（THATGFSJ_NO_PROXY=1 强制直连）。
+- **browser SSRF 防护**（安全审查）：open 动作拦截环回/私网/链路本地/ULA 地址与内网机器名，协议白名单 http/https。
+- **Anthropic 缓存前缀修复**：[TOOL_REPAIR] 不再上提到顶层 system（此前导致缓存每轮全失效），改在原位置内联 [system note]；1h TTL 补 extended-cache-ttl beta header。Gemini 同步内联。
+- **/resume 前缀丢失**：非空屏恢复会话时前 min(N,M) 条历史静默丢失（Static 计数不归零），改用 listEpoch 强制重建。
+- shell 危险命令黑名单支持 &&/||/;/| /换行切段检测；配置与会话文件原子写（防写一半损坏）；config 嵌套键深合并；sanitize 悬空调用级联删除；MCP stdin error 防崩；排队消息不再互相覆盖；模型设置面板不再吞权限确认框；必填参数校验 fallback 到 inputSchema；安装失败可重跑再问。
+- SiliconFlow 目录补 DeepSeek-V3.2；文档口径全面对齐（README/ROADMAP/DEVELOPMENT/install 脚本 Node≥20.19 校验）。
+
 ## [3.0.18] - 2026-09-19  - 彻底修复流式文本被输入框盖章污染
 
 ### Fixed

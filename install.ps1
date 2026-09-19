@@ -42,19 +42,20 @@ Write-Step "检查 Node.js..."
 function Test-NodeInstalled {
     try {
         $nodeVersion = node --version 2>$null
-        if ($nodeVersion) {
-            $version = [int]($nodeVersion -replace 'v(\d+)\..*', '$1')
-            return @{ installed = $true; version = $nodeVersion; major = $version }
+        if ($nodeVersion -match '^v?(\d+)\.(\d+)(?:\.(\d+))?') {
+            $patch = if ($Matches[3]) { $Matches[3] } else { "0" }
+            $ver = [version]"$($Matches[1]).$($Matches[2]).$patch"
+            return @{ installed = $true; version = $nodeVersion; ver = $ver }
         }
     } catch {}
-    return @{ installed = $false; version = $null; major = 0 }
+    return @{ installed = $false; version = $null; ver = $null }
 }
 
 $nodeStatus = Test-NodeInstalled
-if ($nodeStatus.installed -and $nodeStatus.major -ge 18) {
+if ($nodeStatus.installed -and $nodeStatus.ver -ge [version]"20.19") {
     Write-Success "Node.js $($nodeStatus.version) 已安装"
 } else {
-    Write-Host "    未检测到 Node.js 18+，开始安装..." -ForegroundColor Gray
+    Write-Host "    未检测到 Node.js 20.19+，开始安装..." -ForegroundColor Gray
     
     # Try winget first
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -210,7 +211,7 @@ if ($NoOpen) {
                     "1" { $config.provider = "siliconflow"; $config.model = "Qwen/Qwen2.5-7B-Instruct" }
                     "2" { $config.provider = "minimax"; $config.model = "MiniMax-M2.5" }
                     "3" { $config.provider = "openai"; $config.model = "gpt-4o-mini" }
-                    "4" { $config.provider = "anthropic"; $config.model = "claude-3-haiku-20240307" }
+                    "4" { $config.provider = "anthropic"; $config.model = "claude-sonnet-5" }
                     "5" { $config.provider = "gemini"; $config.model = "gemini-1.5-flash-8b" }
                 }
                 

@@ -3,7 +3,7 @@
  * Supports custom providers (relay stations / 中转站)
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import type { Config, AIConfig, ProviderName } from './types.js';
@@ -25,6 +25,23 @@ const DEFAULT_CONFIG: Config = {
     strategy: 'auto',
   },
 };
+
+/**
+ * Nested-object defaults for the three nested config keys. On load they are
+ * merged two levels deep ({ ...default, ...fileValue }) so a config.json
+ * that is missing a sub-key (e.g. cache.ttl after a hand edit) keeps the
+ * built-in default for that sub-key instead of wiping it to undefined.
+ */
+const DEFAULT_MODEL_SETTINGS: NonNullable<Config['modelSettings']> = {};
+const DEFAULT_BROWSER_SETUP: NonNullable<Config['browserSetup']> = { done: false };
+
+/** Spread `override` over `base`, tolerating null / non-object values. */
+function mergeObject<T extends object>(base: T, override: unknown): T {
+  const extra = override && typeof override === 'object' && !Array.isArray(override)
+    ? override as Partial<T>
+    : {};
+  return { ...base, ...extra };
+}
 
 export class ConfigManager {
   private configPath: string;
@@ -48,10 +65,23 @@ export class ConfigManager {
     try {
       if (existsSync(configPath)) {
         const data = readFileSync(configPath, 'utf-8');
-        config = { ...config, ...JSON.parse(data) };
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          config = {
+            ...config,
+            ...parsed,
+            // Nested keys merge two levels deep: a file missing a sub-key
+            // keeps the built-in default for that sub-key.
+            cache: mergeObject(DEFAULT_CONFIG.cache ?? {}, parsed.cache),
+            modelSettings: mergeObject(DEFAULT_MODEL_SETTINGS, parsed.modelSettings),
+            browserSetup: mergeObject(DEFAULT_BROWSER_SETUP, parsed.browserSetup),
+          } as Config;
+        }
       }
     } catch {
-      // Use defaults if file is corrupted
+      // Corrupted file — fall back to defaults, but say why (a silent
+      // fallback here made "my settings reset themselves" undebuggable).
+      console.warn('[config] config.json 解析失败，已回退到默认配置');
     }
 
     // Resolve provider
@@ -142,7 +172,15 @@ export class ConfigManager {
       mkdirSync(dir, { recursive: true });
     }
 
-    writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+    // Atomic write: temp file in the same directory + renameSync, so a
+    // crash mid-write can never leave a truncated config.json behind.
+    const tmp = `${this.configPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(this.config, null, 2), 'utf-8');
+      renameSync(tmp, this.configPath);
+    } finally {
+      try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best-effort */ }
+    }
   }
 
   /**

@@ -18,6 +18,7 @@ import type { ChatMessage, ChatResponse, ChatOptions, ToolCall, StreamChunk } fr
 import type { Tool } from '../tools/types.js';
 import type { LLMProvider, ProviderConfig } from './provider.js';
 import { stableStringify } from '../utils/stableStringify.js';
+import { fetchWithRetry } from '../utils/net.js';
 
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai';
@@ -268,27 +269,28 @@ export class OpenAIProvider implements LLMProvider {
    * v3.0.5: accepts an external AbortSignal (combined with the 60s connect
    * timeout via AbortSignal.any) so caller-side cancellation and the
    * streaming idle watchdog can kill the request.
+   *
+   * v3.0.19: goes through fetchWithRetry (see utils/net.ts) which
+   *   - surfaces the real failure reason instead of bare "fetch failed"
+   *     (e.g. "fetch failed (ECONNRESET)"), and
+   *   - automatically retries transient network-layer errors (500ms/1500ms
+   *     backoff, 2 extra attempts). HTTP 4xx/5xx are returned untouched for
+   *     the caller to handle; external aborts are never retried.
    */
   protected async doRequest(body: any, external?: AbortSignal): Promise<Response> {
     const url = `${this.config.baseUrl}/chat/completions`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000); // 60s connect timeout
-    const signal = external ? AbortSignal.any([controller.signal, external]) : controller.signal;
-
-    try {
-      const response = await fetch(url, {
+    return fetchWithRetry(
+      url,
+      {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.config.apiKey}`,
         },
         body: stableStringify(body),
-        signal,
-      });
-      return response;
-    } finally {
-      clearTimeout(timeout);
-    }
+      },
+      { retries: 2, timeoutMs: 60000, signal: external }, // 60s connect timeout per attempt
+    );
   }
 
   /**
