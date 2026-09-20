@@ -95,8 +95,9 @@ export function ModelSettings({ app, onClose, width }: Props) {
       flash(`${target} 已是当前模型`);
       return;
     }
-    await app.config.save({ model: target });
-    await app.reloadModel();
+    // v3.4.2: through App.switchModel — records provider-tagged history
+    // and hot-reloads; the direct config.save skipped both.
+    await app.switchModel(target);
     rerender();
     flash(`已切换使用 ${target}`);
   };

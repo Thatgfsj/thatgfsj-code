@@ -22,6 +22,9 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ConfigManager } from '../config/index.js';
+import { recordModelUse } from '../config/modelHistory.js';
+import { PROVIDERS, MODEL_CATALOGS, getApiKeyFromEnv, isCustomProvider } from '../config/providers.js';
+import type { Config, ProviderName } from '../config/types.js';
 import { LLMService } from '../llm/index.js';
 import { SessionManager, sanitizeLoadedMessages } from '../session/index.js';
 import { ToolRegistry } from '../tools/index.js';
@@ -138,7 +141,11 @@ export class App {
 
     const llm = LLMService.fromConfig(aiConfig);
     const cacheStats = new CacheStatsStore();
-    const session = new SessionManager(config.get().contextLength || 50);
+    // v3.4.2: startup must honor the per-model contextLength written by the
+    // /models dialog (modelSettings[model].contextLength). It used to be
+    // saved but never consumed — the session window stayed at the global
+    // default while the dialog displayed the new value.
+    const session = new SessionManager(effectiveContextLength(config.get()));
     // Default toast goes to stderr so it can not corrupt the Ink frame;
     // the TUI replaces this with a proper in-app message.
     session.onAutoCompact = (info) => {
@@ -303,8 +310,76 @@ export class App {
     llm.registerTools(this.tools.list());
     this.llm = llm;
     this.resolvedTtl = null;
+    // v3.4.2: refresh the built-in fallback flag — configuring a key used
+    // to leave the stale "未配置 API Key" splash banner on screen.
+    this.usingBuiltinModel = !!aiConfig.usingBuiltinKey;
+    // v3.4.2: live-apply the new model's per-model contextLength, mirroring
+    // the startup path (setModelContextLength only handled the same-model case).
+    const c = this.config.get();
+    this.session.setMaxMessages(effectiveContextLength(c));
     this.applyToolContext();
     this.rebuildSystemPrompt();
+  }
+
+  /**
+   * v3.4.2: single entry for switching models (the /model picker, /model <id>,
+   * and the /models dialog all funnel here). Saves provider+model+key
+   * together, records provider-tagged history and hot-reloads.
+   */
+  async switchModel(model: string, opts?: { provider?: ProviderName; apiKey?: string }): Promise<void> {
+    const updates: Partial<Config> = { model };
+    if (opts?.provider) updates.provider = opts.provider;
+    if (opts?.apiKey !== undefined) updates.apiKey = opts.apiKey;
+    await this.config.save(updates);
+    recordModelUse(model, this.config.get().provider);
+    await this.reloadModel();
+  }
+
+  /**
+   * v3.4.2: resolve which provider a model id belongs to across all known
+   * catalogs. Returns [] when unknown (custom relay models, free text).
+   */
+  findModelOwners(modelId: string): ProviderName[] {
+    const owners: ProviderName[] = [];
+    for (const [name, catalog] of Object.entries(MODEL_CATALOGS)) {
+      if (catalog.some(m => m.id === modelId)) owners.push(name as ProviderName);
+    }
+    return owners;
+  }
+
+  /**
+   * v3.4.2: /model <id> with ownership validation. Returns an error notice
+   * instead of silently mis-routing when the id clearly belongs to another
+   * provider whose key we don't have.
+   */
+  async switchModelChecked(modelId: string): Promise<string> {
+    const c = this.config.get();
+    const knownHere = MODEL_CATALOGS[c.provider]?.some(m => m.id === modelId)
+      || (c.customModels || []).includes(modelId)
+      || modelId === c.model
+      || !!process.env.MODEL;
+    if (knownHere || isCustomProvider(c.provider)) {
+      await this.switchModel(modelId);
+      return `模型 → ${modelId}（立即生效）`;
+    }
+    const owners = this.findModelOwners(modelId).filter(p => p !== c.provider);
+    const candidate = owners[0];
+    if (candidate) {
+      const pc = PROVIDERS[candidate];
+      const envKey = getApiKeyFromEnv(candidate);
+      if (pc.keyless || envKey) {
+        await this.switchModel(modelId, { provider: candidate, ...(envKey ? { apiKey: envKey } : {}) });
+        return `模型 → ${candidate} / ${modelId}（已自动切换服务商，立即生效）`;
+      }
+      return [
+        `✗ ${modelId} 属于 ${pc.name}，但当前服务商是 ${c.provider}，且没有该服务商的 API Key。`,
+        `  请先 /服务商 重新配置，或设置环境变量 ${pc.envKeys[0]}。`,
+      ].join('\n');
+    }
+    // Unknown id — user manages a relay catalog or a brand-new model; trust
+    // them but keep it under the current provider.
+    await this.switchModel(modelId);
+    return `模型 → ${modelId}（未知模型，已按当前服务商 ${c.provider} 设置）`;
   }
 
   /**
@@ -586,4 +661,14 @@ function appLog(msg: string): void {
 function firstLine(s: string): string {
   const line = s.split('\n').find(l => l.trim()) || s;
   return line.length > 120 ? line.slice(0, 120) + '…' : line;
+}
+
+/**
+ * v3.4.2: effective session window for a config — per-model
+ * modelSettings[model].contextLength wins, then the global contextLength,
+ * then 50. Single source so startup, hot-reload and live edits agree.
+ */
+export function effectiveContextLength(c: Config): number {
+  const perModel = c.modelSettings?.[c.model]?.contextLength;
+  return perModel ?? c.contextLength ?? 50;
 }

@@ -25,6 +25,8 @@ export interface ProviderConfig {
   defaultModel: string;
   envKeys: string[];
   format: 'openai' | 'anthropic' | 'gemini';
+  /** v3.4.2: providers that need no API key (local runtimes like Ollama). */
+  keyless?: boolean;
 }
 
 export interface Config {
@@ -35,6 +37,13 @@ export interface Config {
   contextLength: number;
   provider: ProviderName;
   baseUrl?: string;
+  /**
+   * v3.4.2: API keys per provider. The legacy top-level `apiKey` only ever
+   * described the provider it was saved with; reusing it after a provider
+   * switch sent the old key to the new endpoint. On load, a legacy key is
+   * migrated to apiKeys[savedProvider]. Env vars still override.
+   */
+  apiKeys?: Record<string, string>;
   /**
    * v3.0.0: prompt-cache policy. Default = Anthropic-style explicit
    * cache_control on (ttl 5m), all other providers fall through to their

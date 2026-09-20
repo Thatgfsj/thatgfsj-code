@@ -27,13 +27,6 @@ const DEFAULT_CONFIG: Config = {
   },
 };
 
-/**
- * Nested-object defaults for the three nested config keys. On load they are
- * merged two levels deep ({ ...default, ...fileValue }) so a config.json
- * that is missing a sub-key (e.g. cache.ttl after a hand edit) keeps the
- * built-in default for that sub-key instead of wiping it to undefined.
- */
-const DEFAULT_MODEL_SETTINGS: NonNullable<Config['modelSettings']> = {};
 const DEFAULT_BROWSER_SETUP: NonNullable<Config['browserSetup']> = { done: false };
 
 /** Spread `override` over `base`, tolerating null / non-object values. */
@@ -42,6 +35,53 @@ function mergeObject<T extends object>(base: T, override: unknown): T {
     ? override as Partial<T>
     : {};
   return { ...base, ...extra };
+}
+
+const VALID_TTL = new Set(['5m', '1h', 'auto']);
+
+/**
+ * v3.4.2: hand-edited config.json must never corrupt state silently OR be
+ * written back to disk in broken form. Everything here sanitizes on LOAD
+ * (with a console.warn), so the in-memory config is always well-typed and
+ * the next save() persists clean data.
+ */
+function sanitizeCustomModels(raw: unknown): string[] {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) {
+    const clean = raw.filter((m): m is string => typeof m === 'string' && !!m.trim());
+    if (clean.length !== raw.length) {
+      console.warn('[config] customModels 含非字符串项，已忽略非法项');
+    }
+    return clean;
+  }
+  // A bare string used to be spread into single characters and written back
+  // (['g','l','m',…]) — treat it as one model id instead.
+  console.warn('[config] customModels 应为数组，已按单个模型 id 处理');
+  return typeof raw === 'string' && raw.trim() ? [raw.trim()] : [];
+}
+
+function sanitizeModelSettings(raw: unknown): NonNullable<Config['modelSettings']> {
+  if (raw == null) return {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as NonNullable<Config['modelSettings']>;
+  }
+  console.warn('[config] modelSettings 应为对象，已忽略并回退默认');
+  return {};
+}
+
+function sanitizeCache(raw: unknown): Config['cache'] {
+  const base = { ...DEFAULT_CONFIG.cache! };
+  if (raw == null) return base;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] cache 应为对象，已回退默认缓存策略');
+    return base;
+  }
+  const merged = { ...base, ...(raw as Config['cache']) };
+  if (merged.ttl != null && !VALID_TTL.has(merged.ttl)) {
+    console.warn(`[config] cache.ttl "${String(merged.ttl)}" 非法（应为 5m/1h/auto），已回退 1h`);
+    merged.ttl = '1h';
+  }
+  return merged;
 }
 
 export class ConfigManager {
@@ -68,14 +108,24 @@ export class ConfigManager {
         const data = readFileSync(configPath, 'utf-8');
         const parsed = JSON.parse(data) as Record<string, unknown>;
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // v3.4.2: per-provider key migration. The top-level apiKey used to
+          // be resolved for whatever provider was current, so switching
+          // provider in a hand edit sent the OLD provider's key to the NEW
+          // one. Attribute the legacy key to the provider it was saved with,
+          // then resolve strictly from apiKeys/env.
+          const apiKeys = sanitizeApiKeys(parsed.apiKeys);
+          if (!apiKeys && typeof parsed.apiKey === 'string' && parsed.apiKey) {
+            parsed.apiKeys = { [String(parsed.provider || 'siliconflow')]: parsed.apiKey };
+          }
           config = {
             ...config,
             ...parsed,
             // Nested keys merge two levels deep: a file missing a sub-key
             // keeps the built-in default for that sub-key.
-            cache: mergeObject(DEFAULT_CONFIG.cache ?? {}, parsed.cache),
-            modelSettings: mergeObject(DEFAULT_MODEL_SETTINGS, parsed.modelSettings),
+            cache: sanitizeCache(parsed.cache),
+            modelSettings: sanitizeModelSettings(parsed.modelSettings),
             browserSetup: mergeObject(DEFAULT_BROWSER_SETUP, parsed.browserSetup),
+            customModels: sanitizeCustomModels(parsed.customModels),
           } as Config;
         }
       }
@@ -93,6 +143,11 @@ export class ConfigManager {
 
   /**
    * Resolve provider settings: API key from env, base URL, model
+   *
+   * v3.4.2 key resolution (was the "old provider's key sent to the new
+   * provider" bug): keys live in config.apiKeys[provider]; env overrides.
+   * A key belonging to another provider is NEVER reused. Keyless providers
+   * (ollama) always resolve to ''.
    */
   private static resolveProvider(config: Config): Config {
     const provider = config.provider || 'siliconflow';
@@ -105,21 +160,18 @@ export class ConfigManager {
     // Model: env MODEL > config > provider default
     const model = process.env.MODEL || config.model || providerConfig.defaultModel;
 
-    // API key: env > config
-    let apiKey = config.apiKey;
-    if (provider === 'ollama') {
-      apiKey = '';
-    } else if (!apiKey) {
-      apiKey = getApiKeyFromEnv(provider);
+    // API key: env > per-provider store. Keyless providers need none.
+    let apiKey = '';
+    if (!providerConfig.keyless) {
+      apiKey = getApiKeyFromEnv(provider)
+        || config.apiKeys?.[provider]
+        || '';
     }
 
     // Base URL: config > env > provider default
     let baseUrl = config.baseUrl;
     if (!baseUrl) {
-      // Check env for custom base URL
-      if (provider === 'custom_openai') {
-        baseUrl = process.env.CUSTOM_BASE_URL || '';
-      } else if (provider === 'custom_anthropic') {
+      if (isCustomProvider(provider)) {
         baseUrl = process.env.CUSTOM_BASE_URL || '';
       } else {
         baseUrl = providerConfig.baseUrl;
@@ -154,7 +206,10 @@ export class ConfigManager {
     // env), fall back to the built-in shared SiliconFlow model so a fresh
     // install works immediately. The shared key is reassembled in memory —
     // it is NEVER written into config.json.
-    if (!this.config.apiKey) {
+    // v3.4.2: keyless providers (ollama) must NOT trigger this fallback —
+    // it used to hijack a fully valid local setup to the shared cloud model.
+    const providerConfig = PROVIDERS[this.config.provider];
+    if (!this.config.apiKey && !providerConfig?.keyless) {
       return {
         ...base,
         provider: BUILTIN_PROVIDER,
@@ -183,9 +238,26 @@ export class ConfigManager {
 
   /**
    * Update config and save to file
+   *
+   * v3.4.2: saving an apiKey now ALSO records it under apiKeys[provider]
+   * (legacy top-level field kept in sync for downgrade compatibility), so
+   * keys stay attached to the provider they belong to.
    */
   async save(updates: Partial<Config>): Promise<void> {
     this.config = { ...this.config, ...updates };
+
+    if (typeof updates.apiKey === 'string') {
+      const keys = { ...(this.config.apiKeys || {}) };
+      if (updates.apiKey) keys[this.config.provider] = updates.apiKey;
+      else delete keys[this.config.provider];
+      this.config.apiKeys = keys;
+    }
+
+    // v3.4.2: re-resolve after every save. A bare save({provider}) used to
+    // leave the OLD provider's apiKey in memory (resolution only ran at
+    // load), so the rest of the session kept using a key that no longer
+    // belonged to the active provider.
+    this.config = ConfigManager.resolveProvider(this.config);
 
     const dir = dirname(this.configPath);
     if (!existsSync(dir)) {
@@ -207,6 +279,8 @@ export class ConfigManager {
    * Check if an API key is configured
    */
   hasApiKey(): boolean {
+    const pc = PROVIDERS[this.config.provider];
+    if (pc?.keyless) return true;
     return !!this.config.apiKey;
   }
 
@@ -216,4 +290,17 @@ export class ConfigManager {
   isCustomProvider(): boolean {
     return isCustomProvider(this.config.provider);
   }
+}
+
+function sanitizeApiKeys(raw: unknown): Record<string, string> | null {
+  if (raw == null) return null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] apiKeys 应为对象，已忽略');
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string' && v) out[k] = v;
+  }
+  return out;
 }

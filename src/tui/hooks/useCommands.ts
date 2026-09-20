@@ -14,7 +14,7 @@ interface CommandResult {
    * so it must run async in app.tsx (handleCommand stays sync).
    * v3.0.20: 'init_agents' — /init generates AGENTS.md via the LLM.
    */
-  action?: 'clear' | 'reinit' | 'reload_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check' | 'init_agents';
+  action?: 'clear' | 'reinit' | 'model_select' | 'switch_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check' | 'init_agents';
   payload?: any;
 }
 
@@ -26,16 +26,13 @@ const CMD_ALIASES: Record<string, string> = {
   '/压缩': '/compact',
   '/技能': '/skills',
   '/技能管理': '/skills',
-  '/mcp': '/mcp',
   '/帮助': '/help',
   '/服务商': '/provider',
   '/思考': '/thinking',
   '/缓存': '/cache',
-  '/ttl': '/ttl',
   '/TTL': '/ttl',
   '/恢复': '/resume',
   '/继续': '/resume',
-  '/yolo': '/yolo',
   '/YOLO': '/yolo',
   '/模型设置': '/models',
   '/模型管理': '/models',
@@ -87,27 +84,17 @@ export function useCommands(app: App) {
     }
 
     // ── /model [name] ───────────────────────────────────
+    // v3.4.2: one behavior, one route. Bare /model opens the full-screen
+    // picker (action consumed by app.tsx — the old string-compare branch
+    // lived there); /model <id> goes through App.switchModelChecked which
+    // validates provider ownership instead of blindly saving the id.
     if (name === '/model') {
       if (!arg) {
-        const c = app.config.get();
-        return {
-          handled: true,
-          output: [
-            `当前: ${c.provider} / ${c.model}`,
-            '',
-            '用法: /模型 <名称>',
-            '  /模型 deepseek-chat',
-            '  /模型 gpt-4o',
-            '  /模型 claude-sonnet-4-20250514',
-            '',
-            '或: /服务商 更换服务商',
-          ].join('\n'),
-        };
+        return { handled: true, action: 'model_select' };
       }
-      app.config.save({ model: arg });
-      // v3.0.5: app.tsx performs `await app.reloadModel()` so the switch is
-      // immediate. It used to require a restart to take effect.
-      return { handled: true, output: `模型 → ${arg}（切换中…）`, action: 'reload_model' };
+      // Notice (switch result / ownership error) is posted by app.tsx
+      // after App.switchModelChecked resolves.
+      return { handled: true, action: 'switch_model', payload: arg };
     }
 
     // ── /provider ───────────────────────────────────────

@@ -6,7 +6,6 @@ import chalk from 'chalk';
 // v3.0.5: `readline` (bare) resolves to a deprecated placeholder package on
 // npm that shadows Node's builtin — use the explicit node: builtin.
 import readline from 'node:readline';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { PROVIDERS, getModelsForProvider, listProviders, isCustomProvider } from '../config/providers.js';
@@ -131,7 +130,19 @@ export class WelcomeScreen {
       const contextLength = ctxMap[ctxChoice] || 50;
 
       // ── Save ────────────────────────────────────────────
-      this.saveConfig(providerName, model, apiKey, baseUrl, contextLength);
+      // v3.4.2: through ConfigManager — the old private saveConfig() wrote
+      // a bare 5-field object (no cache key, non-atomic, wiping any
+      // modelSettings/customModels the file already had). A load+save round
+      // keeps the merge/atomic-write semantics of every other writer.
+      const { ConfigManager } = await import('../config/index.js');
+      const cm = await ConfigManager.load();
+      await cm.save({
+        provider: providerName,
+        model,
+        apiKey,
+        baseUrl,
+        contextLength,
+      });
 
       // ── Done ────────────────────────────────────────────
       console.log();
@@ -145,35 +156,6 @@ export class WelcomeScreen {
 
     } finally {
       rl.close();
-    }
-  }
-
-  private static saveConfig(provider: ProviderName, model: string, apiKey: string, baseUrl?: string, contextLength = 50): void {
-    const configDir = join(homedir(), '.thatgfsj');
-    const configPath = join(configDir, 'config.json');
-
-    if (!existsSync(configDir)) {
-      mkdirSync(configDir, { recursive: true });
-    }
-
-    const config: Record<string, any> = {
-      provider,
-      model,
-      apiKey,
-      temperature: 0.7,
-      maxTokens: 4096,
-      contextLength,
-    };
-
-    if (baseUrl) config.baseUrl = baseUrl;
-
-    writeFileSync(configPath, JSON.stringify(config, null, 2));
-
-    console.log();
-    console.log(chalk.gray('    Provider: ') + chalk.white(provider));
-    console.log(chalk.gray('    Model:    ') + chalk.white(model));
-    if (baseUrl) {
-      console.log(chalk.gray('    URL:      ') + chalk.white(baseUrl));
     }
   }
 }

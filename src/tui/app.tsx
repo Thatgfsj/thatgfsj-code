@@ -24,26 +24,11 @@ import type { MessageData } from './components/ChatMessage.js';
 import { estimateTokens } from '../utils/tokens.js';
 import { theme } from './theme.js';
 import { getVersion } from '../version.js';
-import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 
 interface Props {
   app: App;
-}
-
-function saveModelToHistory(model: string) {
-  const dir = join(homedir(), '.thatgfsj');
-  const path = join(dir, 'models.json');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  let history: string[] = [];
-  if (existsSync(path)) {
-    try { history = JSON.parse(readFileSync(path, 'utf-8')); } catch {}
-  }
-  if (!history.includes(model)) {
-    history.push(model);
-    writeFileSync(path, JSON.stringify(history, null, 2));
-  }
 }
 
 type ViewMode = 'chat' | 'model_select' | 'init_wizard' | 'model_settings';
@@ -127,16 +112,24 @@ export function TuiApp({ app }: Props) {
   // ── v3.0.5: permission prompt wiring ──────────────────────
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
   const confirmResolveRef = useRef<((v: { allowed: boolean; always: boolean }) => void) | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     app.confirmHandler = (req) => new Promise<boolean>((resolve) => {
       setConfirmReq(req);
+      // v3.4.2: the timer is per-request. A shared timer used to survive
+      // its own request being answered and later deny the NEXT prompt at
+      // the OLD deadline (ask A at :00, answer at :10, prompt B at :10 →
+      // B denied at :60 without its own 60s).
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
       const timer = setTimeout(() => {
         confirmResolveRef.current?.({ allowed: false, always: false });
       }, 60000);
       timer.unref?.();
+      confirmTimerRef.current = timer;
       confirmResolveRef.current = (v) => {
         clearTimeout(timer);
+        confirmTimerRef.current = null;
         setConfirmReq(null);
         confirmResolveRef.current = null;
         if (v.always && app.permissionMode !== 'accept') {
@@ -192,7 +185,7 @@ export function TuiApp({ app }: Props) {
     const result = handleCommand(input);
 
     if (result.handled) {
-      if (input.trim() === '/模型' || input.trim() === '/model') {
+      if (result.action === 'model_select') {
         setViewMode('model_select');
         return;
       }
@@ -305,8 +298,10 @@ export function TuiApp({ app }: Props) {
         return;
       }
 
-      if (result.action === 'reload_model') {
-        await app.reloadModel();
+      if (result.action === 'switch_model' && result.payload) {
+        // v3.4.2: ownership-checked switch (may auto-change provider).
+        const notice = await app.switchModelChecked(result.payload);
+        setSystemMessages(prev => [...prev, { role: 'assistant', content: notice }]);
         setResolvedTtl(null);
       }
 
@@ -440,30 +435,10 @@ export function TuiApp({ app }: Props) {
     <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
   ) : planApproval ? (
     <PlanApproval onAnswer={onPlanApproval} />
-  ) : viewMode === 'model_select' ? (
-    <ModelSelector
-      currentModel={cfg.model}
-      currentProvider={cfg.provider}
-      onSelect={(model) => {
-        app.config.save({ model });
-        saveModelToHistory(model);
-        void app.reloadModel().then(() => setResolvedTtl(null));
-        setViewMode('chat');
-        addMsg(`模型已切换: ${model}`);
-      }}
-      onAddNew={() => setViewMode('init_wizard')}
-    />
-  ) : viewMode === 'init_wizard' ? (
-    <InitWizard
-      onComplete={(provider, model, apiKey, baseUrl) => {
-        app.config.save({ provider, model, apiKey, baseUrl });
-        saveModelToHistory(model);
-        setViewMode('chat');
-        addMsg(`配置完成: ${provider} / ${model}`);
-      }}
-      onCancel={() => setViewMode('chat')}
-    />
   ) : (
+    // v3.4.2: the model_select / init_wizard branches here were dead code —
+    // both modes early-return the full-screen dialog below and never reach
+    // the input slot. Only the real input renders here now.
     <UserInput
       onSubmit={onSubmit}
       // v3.2.2: UserInput only routes esc here when the input is EMPTY and
@@ -523,14 +498,17 @@ export function TuiApp({ app }: Props) {
           <ModelSelector
             currentModel={cfg.model}
             currentProvider={cfg.provider}
+            customModels={cfg.customModels}
             onSelect={(model) => {
-              app.config.save({ model });
-              saveModelToHistory(model);
-              void app.reloadModel().then(() => setResolvedTtl(null));
-              setViewMode('chat');
-              addMsg(`模型已切换: ${model}`);
+              // switchModel saves, records provider-tagged history and hot-reloads.
+              void app.switchModel(model).then(() => {
+                setViewMode('chat');
+                addMsg(`模型已切换: ${model}`);
+                setResolvedTtl(null);
+              });
             }}
             onAddNew={() => setViewMode('init_wizard')}
+            onCancel={() => setViewMode('chat')}
           />
         </Box>
       );
@@ -539,11 +517,21 @@ export function TuiApp({ app }: Props) {
       return (
         <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
           <InitWizard
-            onComplete={(provider, model, apiKey, baseUrl) => {
-              app.config.save({ provider, model, apiKey, baseUrl });
-              saveModelToHistory(model);
-              setViewMode('chat');
-              addMsg(`配置完成: ${provider} / ${model}`);
+            onComplete={({ provider, model, apiKey, baseUrl, cache }) => {
+              // v3.4.2: ONE write through ConfigManager (merge-preserving,
+              // atomic) — the wizard no longer writes config.json itself, so
+              // the cache choice can no longer be rolled back by a second
+              // save nor wipe modelSettings/customModels/browserSetup.
+              void (async () => {
+                await app.config.save({
+                  provider, model, apiKey, baseUrl,
+                  cache: { ...cache, strategy: 'auto' },
+                });
+                await app.reloadModel();
+                setResolvedTtl(null);
+                setViewMode('chat');
+                addMsg(`配置完成: ${provider} / ${model}${app.usingBuiltinModel ? '（内置共享模型）' : ''}`);
+              })();
             }}
             onCancel={() => setViewMode('chat')}
           />

@@ -91,6 +91,7 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
     defaultModel: 'qwen3.6',
     envKeys: [],
     format: 'openai',
+    keyless: true,
   },
   ernie: {
     name: 'ERNIE (百度文心)',

@@ -285,7 +285,9 @@ export class OpenAIProvider implements LLMProvider {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.apiKey}`,
+          // v3.4.2: keyless providers (Ollama) get NO auth header — an empty
+          // "Bearer " is noise some local servers reject.
+          ...(this.config.apiKey ? { 'Authorization': `Bearer ${this.config.apiKey}` } : {}),
         },
         body: stableStringify(body),
       },
