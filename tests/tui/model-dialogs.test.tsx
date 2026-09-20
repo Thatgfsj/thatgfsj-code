@@ -1,87 +1,110 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { render } from 'ink-testing-library';
-import { ModelSelector } from '../../src/tui/components/ModelSelector.js';
-import { InitWizard } from '../../src/tui/components/InitWizard.js';
+import { ModelSettings, resolveActivation } from '../../src/tui/components/ModelSettings.js';
+import { BUILTIN_MODEL_ID } from '../../src/config/builtin.js';
+import type { App } from '../../src/app/index.js';
 
 /**
- * v3.4.2 dialog contracts:
- *  - ModelSelector: list only contains models of the current provider
- *    (no cross-provider history mixing) and ESC cancels — previously there
- *    was NO way out of the picker without picking a model.
- *  - InitWizard: ESC cancels from the very first (select) step, and a
- *    keyless provider (Ollama) skips the API-key step.
+ * v3.4.4: /model /服务商 /models all open THIS single dialog. Contracts:
+ *  - the list contains every provider's models + the builtin shared entry
+ *  - ESC closes
+ *  - a foreign-provider model without a key opens the inline key input
+ *    (no separate wizard exists anymore)
  */
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function press(stdin: { write: (s: string) => void }, s: string) {
-  stdin.write(s);
-  await sleep(60);
-}
-
-describe('ModelSelector', () => {
-  it('ESC cancels without forcing a selection', async () => {
-    const onCancel = vi.fn();
-    const onSelect = vi.fn();
-    const ui = render(
-      <ModelSelector
-        currentModel="glm-5.2"
-        currentProvider="zhipu"
-        onSelect={onSelect}
-        onAddNew={() => {}}
-        onCancel={onCancel}
-      />,
-    );
-    await press(ui.stdin, '\x1B');
-    expect(onCancel).toHaveBeenCalledTimes(1);
-    expect(onSelect).not.toHaveBeenCalled();
-    ui.unmount();
-  });
-
-  it('list is provider-scoped: no foreign history entries', async () => {
-    const ui = render(
-      <ModelSelector
-        currentModel="glm-5.2"
-        currentProvider="zhipu"
-        customModels={['my-relay-model']}
-        onSelect={() => {}}
-        onAddNew={() => {}}
-        onCancel={() => {}}
-      />,
-    );
-    await sleep(50);
-    const frame = ui.lastFrame() || '';
-    // zhipu catalog is present…
-    expect(frame).toContain('glm-5.3');
-    // …builtin shared model (siliconflow-only) and other providers are not.
-    expect(frame).not.toContain('内置共享');
-    expect(frame).not.toContain('kimi-k2.6');
-    expect(frame).not.toContain('gpt-5.4-mini');
-    ui.unmount();
-  });
+// isolate ~/.thatgfsj so models.json history can't shift the list indexes
+let root: string;
+let savedEnv: Record<string, string | undefined>;
+beforeAll(() => {
+  root = mkdtempSync(join(tmpdir(), 'gfcode-dialogs-'));
+  savedEnv = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  process.env.USERPROFILE = root;
+  process.env.HOME = root;
+});
+afterAll(() => {
+  for (const [k, v] of Object.entries(savedEnv)) {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-describe('InitWizard', () => {
-  it('ESC cancels from the first (provider select) step', async () => {
+async function press(stdin: { write: (s: string) => void }, s: string) {
+  stdin.write(s);
+  await sleep(100);
+}
+
+/** Poll until the frame contains `text` (Ink renders async under load). */
+async function waitFor(ui: { lastFrame: () => string | undefined }, text: string, ms = 3000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if ((ui.lastFrame() || '').includes(text)) return true;
+    await sleep(50);
+  }
+  return false;
+}
+
+function stubApp(config: Record<string, unknown>): App {
+  const state = { modelSettings: {}, customModels: [], apiKeys: {}, model: 'GLM-5.3-Flash', provider: 'zhipu', contextLength: 50, ...config };
+  return {
+    config: {
+      get: () => ({ ...state }),
+      save: async (u: Record<string, unknown>) => { Object.assign(state, u); },
+    },
+    listConfiguredModels: () => [state.model, ...(state.customModels as string[])],
+    getContextWindow: () => 128000,
+    getThinking: () => 'off',
+    session: { getMaxMessages: () => 50 },
+    switchModel: async () => {},
+  } as unknown as App;
+}
+
+/** Poll until `fn` returns true (Ink stdin processing is async under load). */
+async function until(fn: () => boolean, ms = 4000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (fn()) return true;
+    await sleep(50);
+  }
+  return fn();
+}
+
+describe('ModelSettings (unified dialog)', () => {
+  it('ESC closes the dialog', async () => {
     const onCancel = vi.fn();
-    const ui = render(<InitWizard onComplete={() => {}} onCancel={onCancel} />);
+    const ui = render(<ModelSettings app={stubApp({})} onClose={onCancel} />);
     await press(ui.stdin, '\x1B');
-    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(await until(() => onCancel.mock.calls.length >= 1)).toBe(true);
     ui.unmount();
   });
 
-  it('ollama skips the API-key step', async () => {
-    const onComplete = vi.fn();
-    const ui = render(<InitWizard onComplete={onComplete} onCancel={() => {}} />);
-    await sleep(50);
-    // navigate to Ollama and confirm
-    for (let i = 0; i < 11; i++) await press(ui.stdin, '\x1b[B'); // ↓ through the list
-    await press(ui.stdin, '\r');
-    await sleep(50);
-    // should now be on the model step, NOT the key step
-    expect(ui.lastFrame() || '').toContain('选择模型');
+  it('lists current-provider, builtin-shared and foreign-provider models', async () => {
+    const ui = render(<ModelSettings app={stubApp({ customModels: ['my-relay'] })} onClose={() => {}} maxRows={60} />);
+    expect(await waitFor(ui, '内置共享')).toBe(true);
+    const frame = ui.lastFrame() || '';
+    expect(frame).toContain('GLM-5.3-Flash');      // current model
+    expect(frame).toContain('deepseek/');          // foreign catalog, provider-prefixed
+    expect(frame).toContain('my-relay');           // custom id
     ui.unmount();
+  });
+
+  it('activation decisions are pure and correct (cross-provider key handling)', () => {
+    // zhipu current, no keys anywhere: foreign model without key → inline prompt
+    expect(resolveActivation({ provider: 'zhipu' }, false, { key: 'x', id: 'deepseek-flash', provider: 'deepseek' })).toBe('need-key');
+    // …but with a stored/env key it switches straight away
+    expect(resolveActivation({ provider: 'zhipu', apiKeys: { deepseek: 'k' } }, false, { key: 'x', id: 'deepseek-flash', provider: 'deepseek' })).toBe('switch-ready');
+    expect(resolveActivation({ provider: 'zhipu' }, true, { key: 'x', id: 'deepseek-flash', provider: 'deepseek' })).toBe('switch-ready');
+    // keyless provider is always ready
+    expect(resolveActivation({ provider: 'zhipu' }, false, { key: 'x', id: 'qwen3.6', provider: 'ollama' })).toBe('switch-ready');
+    // same provider / builtin / separators
+    expect(resolveActivation({ provider: 'zhipu' }, false, { key: 'x', id: 'glm-5.2', provider: 'zhipu' })).toBe('same-provider');
+    expect(resolveActivation({ provider: 'zhipu' }, false, { key: 'x', id: BUILTIN_MODEL_ID, provider: 'siliconflow', builtin: true })).toBe('builtin');
+    expect(resolveActivation({ provider: 'zhipu' }, false, { key: 'x', sep: '── x ──' })).toBe('noop');
   });
 });

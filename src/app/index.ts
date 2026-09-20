@@ -326,10 +326,11 @@ export class App {
    * and the /models dialog all funnel here). Saves provider+model+key
    * together, records provider-tagged history and hot-reloads.
    */
-  async switchModel(model: string, opts?: { provider?: ProviderName; apiKey?: string }): Promise<void> {
+  async switchModel(model: string, opts?: { provider?: ProviderName; apiKey?: string; useBuiltin?: boolean }): Promise<void> {
     const updates: Partial<Config> = { model };
     if (opts?.provider) updates.provider = opts.provider;
     if (opts?.apiKey !== undefined) updates.apiKey = opts.apiKey;
+    if (opts?.useBuiltin !== undefined) updates.useBuiltin = opts.useBuiltin;
     await this.config.save(updates);
     recordModelUse(model, this.config.get().provider);
     await this.reloadModel();

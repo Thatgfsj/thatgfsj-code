@@ -45,6 +45,12 @@ export interface Config {
    */
   apiKeys?: Record<string, string>;
   /**
+   * v3.4.3: explicit opt-in to the built-in shared model (set when the user
+   * picks the 内置共享 entry). Explicit setup would otherwise block the
+   * out-of-box fallback forever.
+   */
+  useBuiltin?: boolean;
+  /**
    * v3.0.0: prompt-cache policy. Default = Anthropic-style explicit
    * cache_control on (ttl 5m), all other providers fall through to their
    * built-in automatic caching.

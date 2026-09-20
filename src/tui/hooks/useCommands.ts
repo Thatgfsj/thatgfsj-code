@@ -14,7 +14,7 @@ interface CommandResult {
    * so it must run async in app.tsx (handleCommand stays sync).
    * v3.0.20: 'init_agents' — /init generates AGENTS.md via the LLM.
    */
-  action?: 'clear' | 'reinit' | 'model_select' | 'switch_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check' | 'init_agents';
+  action?: 'clear' | 'switch_model' | 'apply_ttl' | 'resume' | 'model_settings' | 'browser_check' | 'init_agents';
   payload?: any;
 }
 
@@ -50,9 +50,9 @@ const CMD_ALIASES: Record<string, string> = {
 
 export const COMMAND_LIST = [
   { name: '/help', desc: '查看帮助' },
-  { name: '/模型', desc: '切换模型' },
-  { name: '/models', desc: '模型设置（添加/上下文/思考）' },
-  { name: '/服务商', desc: '更换服务商' },
+  { name: '/模型', desc: '模型设置（切换/服务商/Key/上下文/思考）' },
+  { name: '/models', desc: '同 /模型：统一模型设置' },
+  { name: '/服务商', desc: '同 /模型：统一模型设置' },
   { name: '/新建', desc: '新建会话' },
   { name: '/resume', desc: '恢复历史会话' },
   { name: '/压缩', desc: '压缩上下文' },
@@ -84,22 +84,20 @@ export function useCommands(app: App) {
     }
 
     // ── /model [name] ───────────────────────────────────
-    // v3.4.2: one behavior, one route. Bare /model opens the full-screen
-    // picker (action consumed by app.tsx — the old string-compare branch
-    // lived there); /model <id> goes through App.switchModelChecked which
-    // validates provider ownership instead of blindly saving the id.
+    // v3.4.4: bare /model opens THE model-settings dialog (single surface,
+    // no separate picker). /model <id> goes through App.switchModelChecked.
     if (name === '/model') {
       if (!arg) {
-        return { handled: true, action: 'model_select' };
+        return { handled: true, action: 'model_settings' };
       }
-      // Notice (switch result / ownership error) is posted by app.tsx
-      // after App.switchModelChecked resolves.
       return { handled: true, action: 'switch_model', payload: arg };
     }
 
     // ── /provider ───────────────────────────────────────
+    // v3.4.4: provider switching lives INSIDE the unified model-settings
+    // dialog (pick any provider's model; k sets the key). No second wizard.
     if (name === '/provider') {
-      return { handled: true, action: 'reinit' };
+      return { handled: true, output: '在模型设置里选择任意服务商的模型即可切换（k 键设置 Key）。', action: 'model_settings' };
     }
 
     // ── /new, /clear ────────────────────────────────────
@@ -395,9 +393,9 @@ export function useCommands(app: App) {
         handled: true,
         output: [
           '命令列表:',
-          '  /模型 <名称>    切换模型（立即生效）',
-          '  /models         模型设置：添加模型/上下文长度/思考强度',
-          '  /服务商          更换服务商',
+          '  /模型            模型设置：切换模型/服务商/Key/上下文/思考（统一入口）',
+          '  /models          同 /模型',
+          '  /服务商          同 /模型',
           '  /新建            新建会话（保留系统提示）',
           '  /resume [序号]   恢复历史会话',
           '  /压缩            压缩上下文（保留工具调用完整性）',

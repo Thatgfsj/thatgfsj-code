@@ -7,8 +7,6 @@ import { Markdown } from './components/Markdown.js';
 import { Thinking } from './components/Thinking.js';
 import { UserInput } from './components/UserInput.js';
 import { StatusBar } from './components/StatusBar.js';
-import { ModelSelector } from './components/ModelSelector.js';
-import { InitWizard } from './components/InitWizard.js';
 import { ModelSettings } from './components/ModelSettings.js';
 import { ConfirmPrompt } from './components/ConfirmPrompt.js';
 import { Splash } from './components/Splash.js';
@@ -17,7 +15,6 @@ import { PlanApproval } from './components/PlanApproval.js';
 import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
-import { PROVIDERS } from '../config/providers.js';
 import { buildWindow, estimateMsgLines, clipContentToRows, maxUsefulScroll } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
@@ -32,7 +29,7 @@ interface Props {
   app: App;
 }
 
-type ViewMode = 'chat' | 'model_select' | 'init_wizard' | 'model_settings';
+type ViewMode = 'chat' | 'model_settings';
 
 /**
  * v3.0.8 (opencode-style full-screen layout): the app owns the whole
@@ -180,17 +177,9 @@ export function TuiApp({ app }: Props) {
   }, [app, addMsg, sendMessage]);
 
   const onSubmit = useCallback(async (input: string) => {
-    // Model selector - ignore text input
-    if (viewMode === 'model_select') return;
-
     const result = handleCommand(input);
 
     if (result.handled) {
-      if (result.action === 'model_select') {
-        setViewMode('model_select');
-        return;
-      }
-
       if (result.action === 'model_settings') {
         setViewMode('model_settings');
         return;
@@ -210,10 +199,6 @@ export function TuiApp({ app }: Props) {
         // (useChat messages are display-only now).
         clearMessages();
         setScroll(null);
-      }
-
-      if (result.action === 'reinit') {
-        setViewMode('init_wizard');
       }
 
       // v3.0.16: /browser — verifyLaunch is async (spawns Chromium), so
@@ -482,7 +467,7 @@ export function TuiApp({ app }: Props) {
   // v3.2.2: model_select and init_wizard join this full-screen treatment —
   // ModelSelector (13+ rows) and the wizard blew the fixed bottom reserve
   // and pushed the frame past the viewport.
-  if (viewMode === 'model_settings' || viewMode === 'model_select' || viewMode === 'init_wizard') {
+  if (viewMode === 'model_settings') {
     // A pending permission confirm must win over any dialog — rendering it
     // here would swallow the prompt (the tool call would hang until the 60s
     // timeout with nothing on screen). Same full-screen centered container.
@@ -493,60 +478,14 @@ export function TuiApp({ app }: Props) {
         </Box>
       );
     }
-    if (viewMode === 'model_select') {
-      return (
-        <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
-          <ModelSelector
-            currentModel={cfg.model}
-            currentProvider={cfg.provider}
-            customModels={cfg.customModels}
-            onSelect={(model) => {
-              // switchModel saves, records provider-tagged history and hot-reloads.
-              void app.switchModel(model).then(() => {
-                setViewMode('chat');
-                const after = app.config.get();
-                const noKey = !after.apiKey && !PROVIDERS[after.provider]?.keyless;
-                addMsg(
-                  `模型已切换: ${model}` +
-                  (noKey ? '\n⚠ 该服务商尚未配置 API Key，请求会失败。/服务商 配置 Key，或选内置共享模型。' : ''),
-                );
-                setResolvedTtl(null);
-              });
-            }}
-            onAddNew={() => setViewMode('init_wizard')}
-            onCancel={() => setViewMode('chat')}
-          />
-        </Box>
-      );
-    }
-    if (viewMode === 'init_wizard') {
-      return (
-        <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
-          <InitWizard
-            onComplete={({ provider, model, apiKey, baseUrl, cache }) => {
-              // v3.4.2: ONE write through ConfigManager (merge-preserving,
-              // atomic) — the wizard no longer writes config.json itself, so
-              // the cache choice can no longer be rolled back by a second
-              // save nor wipe modelSettings/customModels/browserSetup.
-              void (async () => {
-                await app.config.save({
-                  provider, model, apiKey, baseUrl,
-                  cache: { ...cache, strategy: 'auto' },
-                });
-                await app.reloadModel();
-                setResolvedTtl(null);
-                setViewMode('chat');
-                addMsg(`配置完成: ${provider} / ${model}${app.usingBuiltinModel ? '（内置共享模型）' : ''}`);
-              })();
-            }}
-            onCancel={() => setViewMode('chat')}
-          />
-        </Box>
-      );
-    }
     return (
       <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
-        <ModelSettings app={app} onClose={() => setViewMode('chat')} width={Math.min(terminalWidth - 2, 72)} />
+        <ModelSettings
+          app={app}
+          onClose={() => setViewMode('chat')}
+          width={Math.min(terminalWidth - 2, 72)}
+          maxRows={Math.max(4, terminalRows - 12)}
+        />
       </Box>
     );
   }

@@ -212,6 +212,17 @@ export class ConfigManager {
     // setups: config.json said "zhipu / GLM-5.3-Flash" while every request
     // silently went to the shared cloud model — "written but unusable".
     const providerConfig = PROVIDERS[this.config.provider];
+    // v3.4.3: explicit 内置共享 selection wins over everything.
+    if (this.config.useBuiltin) {
+      return {
+        ...base,
+        provider: BUILTIN_PROVIDER,
+        model: BUILTIN_MODEL_ID,
+        apiKey: revealBuiltinKey(),
+        baseUrl: PROVIDERS.siliconflow.baseUrl,
+        usingBuiltinKey: true,
+      };
+    }
     const explicitSetup =
       Object.keys(this.config.apiKeys || {}).length > 0
       || (!!this.config.model && this.config.model !== DEFAULT_CONFIG.model)
@@ -260,11 +271,16 @@ export class ConfigManager {
       this.config.apiKeys = keys;
     }
 
-    // v3.4.2: re-resolve after every save. A bare save({provider}) used to
+    // v3.4.3: re-resolve after every save. A bare save({provider}) used to
     // leave the OLD provider's apiKey in memory (resolution only ran at
     // load), so the rest of the session kept using a key that no longer
     // belonged to the active provider.
     this.config = ConfigManager.resolveProvider(this.config);
+
+    // useBuiltin is an explicit mode: set only by picking the 内置共享
+    // entry; any other model choice leaves shared-model mode.
+    if (updates.useBuiltin !== undefined) this.config.useBuiltin = updates.useBuiltin;
+    else if (updates.model !== undefined) this.config.useBuiltin = false;
 
     const dir = dirname(this.configPath);
     if (!existsSync(dir)) {

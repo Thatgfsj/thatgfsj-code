@@ -168,11 +168,11 @@ describe('TUI components (v3.0.6 opencode-style render)', () => {
   });
 });
 
-describe('ModelSettings dialog (v3.0.15 opencode-style centered modal)', () => {
+describe('ModelSettings dialog (v3.4.4 unified model dialog)', () => {
   const frameLines = (frame: string) => frame.replace(/\n+$/, '').split('\n');
 
-  it('renders a rounded full dialog with title, model rows and chips at 64 columns', () => {
-    const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} />);
+  it('renders a rounded dialog with title, sectioned model rows and chips at 64 columns', () => {
+    const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} maxRows={60} />);
     const frame = lastFrame() || '';
     const lines = frameLines(frame);
     // rounded-border modal box (top and bottom corners present = intact box)
@@ -187,17 +187,17 @@ describe('ModelSettings dialog (v3.0.15 opencode-style centered modal)', () => {
     expect(frame).toContain('● 当前');
     expect(frame).toContain('ctx 40');
     expect(frame).toContain('131k');
-    // 2 border + header + 2 rules + 2 model rows + 2 hint lines = exactly 9
-    // (a wrapped line would push this count up)
-    expect(lines.length).toBe(9);
+    // unified registry shows the builtin entry and foreign sections
+    expect(frame).toContain('内置共享');
+    expect(frame).toContain('──');
+    for (const l of lines) expect(stringWidth(l)).toBeLessThanOrEqual(64);
   });
 
-  it('separator stays single-piece with a safety margin (dialogWidth-6)', () => {
-    const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} />);
+  it('inner rules stay single-piece with a safety margin (dialogWidth-6)', () => {
+    const { lastFrame } = render(<ModelSettings app={fakeSettingsApp()} onClose={() => {}} width={64} maxRows={60} />);
     const lines = frameLines(lastFrame() || '');
-    // inner rules sit between the │ borders; the ╭─╮ / ╰─╯ box border lines
-    // are excluded (they start with a corner, not │)
-    const rules = lines.filter(l => l.trim().startsWith('│') && l.includes('─'));
+    // pure-dash rule lines only (section separators carry text and are excluded)
+    const rules = lines.filter(l => /^│\s*─+\s*│$/.test(l.trim()));
     expect(rules.length).toBe(2);
     for (const r of rules) {
       const run = r.match(/─+/)![0];
@@ -209,18 +209,18 @@ describe('ModelSettings dialog (v3.0.15 opencode-style centered modal)', () => {
   it('key hints stay on two compact unwrapped lines and no line exceeds 64 columns', () => {
     const longId = 'qwen/qwen3.5-max-ultra-long-organization-finetuned-2026-preview-model-id';
     const { lastFrame } = render(
-      <ModelSettings app={fakeSettingsApp({ current: longId })} onClose={() => {}} width={64} />,
+      <ModelSettings app={fakeSettingsApp({ current: longId })} onClose={() => {}} width={64} maxRows={60} />,
     );
     const frame = lastFrame() || '';
     const lines = frameLines(frame);
-    // line 1 intact: ↑↓ 选择 … d 删除 … esc 关闭
+    // line 1 intact: ↑↓ 选择 … enter 切换 … k Key
     const hint1 = lines.find(l => l.includes('选择'));
     expect(hint1).toBeDefined();
-    expect(hint1).toContain('关闭');
-    // line 2 intact: c 上下文长度 · w 上下文窗口 · t 思考强度
+    expect(hint1).toContain('Key');
+    // line 2 intact: b 上下文长度 · w 上下文窗口 · c 思考强度 · esc 关闭
     const hint2 = lines.find(l => l.includes('上下文长度'));
     expect(hint2).toBeDefined();
-    expect(hint2).toContain('思考强度');
+    expect(hint2).toContain('关闭');
     // over-long model id is truncated, every line fits the 64-col dialog
     expect(frame).not.toContain(longId);
     for (const l of lines) expect(stringWidth(l)).toBeLessThanOrEqual(64);
