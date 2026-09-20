@@ -206,10 +206,17 @@ export class ConfigManager {
     // env), fall back to the built-in shared SiliconFlow model so a fresh
     // install works immediately. The shared key is reassembled in memory —
     // it is NEVER written into config.json.
-    // v3.4.2: keyless providers (ollama) must NOT trigger this fallback —
-    // it used to hijack a fully valid local setup to the shared cloud model.
+    // v3.4.2: keyless providers (ollama) never trigger it, and NEITHER does
+    // any explicit user configuration (any stored key, a non-default model
+    // or custom models). The blanket fallback used to hijack exactly those
+    // setups: config.json said "zhipu / GLM-5.3-Flash" while every request
+    // silently went to the shared cloud model — "written but unusable".
     const providerConfig = PROVIDERS[this.config.provider];
-    if (!this.config.apiKey && !providerConfig?.keyless) {
+    const explicitSetup =
+      Object.keys(this.config.apiKeys || {}).length > 0
+      || (!!this.config.model && this.config.model !== DEFAULT_CONFIG.model)
+      || (this.config.customModels?.length ?? 0) > 0;
+    if (!this.config.apiKey && !providerConfig?.keyless && !explicitSetup) {
       return {
         ...base,
         provider: BUILTIN_PROVIDER,

@@ -73,7 +73,10 @@ describe('per-provider API keys', () => {
     // resolveProvider sent sk-sf-key to DeepSeek; now it resolves to ''.
     await cm.save({ provider: 'deepseek', model: 'deepseek-flash' });
     expect(cm.get().apiKey).toBe('');
-    expect(cm.getAIConfig().usingBuiltinKey).toBeTruthy(); // deepseek is not keyless → builtin fallback
+    // apiKeys is non-empty → explicit setup → NO silent builtin hijack; the
+    // request really goes to deepseek (and fails with an honest 401).
+    expect(cm.getAIConfig().usingBuiltinKey).toBeFalsy();
+    expect(cm.getAIConfig().provider).toBe('deepseek');
     // Switching back re-finds the siliconflow key.
     await cm.save({ provider: 'siliconflow', model: 'Qwen/Qwen3.5-4B' });
     expect(cm.get().apiKey).toBe('sk-sf-key');
@@ -128,6 +131,33 @@ describe('hand-edited config sanitization', () => {
   it('an invalid cache.ttl falls back to 1h instead of silently disabling TTL', async () => {
     const cm = await loadWith({ provider: 'siliconflow', apiKey: 'k', cache: { enabled: true, ttl: 12345 } });
     expect(cm.get().cache?.ttl).toBe('1h');
+  });
+});
+
+describe('builtin fallback scoping', () => {
+  it('a truly fresh config still falls back to the builtin shared model', async () => {
+    const cm = await loadWith({});
+    expect(cm.getAIConfig().usingBuiltinKey).toBeTruthy();
+    expect(cm.getAIConfig().provider).toBe('siliconflow');
+  });
+
+  it('explicit setup (custom model / customModels / any stored key) is NEVER hijacked', async () => {
+    // the user-reported state: zhipu + GLM-5.3-Flash, no zhipu key, but an
+    // apiKeys entry and a custom model exist — requests must really go to zhipu
+    const cm = await loadWith({
+      provider: 'zhipu',
+      model: 'GLM-5.3-Flash',
+      apiKey: '',
+      apiKeys: { deepseek: 'k' },
+      customModels: ['GLM-5.3-Flash'],
+    });
+    const ai = cm.getAIConfig();
+    expect(ai.usingBuiltinKey).toBeFalsy();
+    expect(ai.provider).toBe('zhipu');
+    expect(ai.model).toBe('GLM-5.3-Flash');
+
+    const cm2 = await loadWith({ provider: 'zhipu', model: 'glm-5.2', apiKey: '' });
+    expect(cm2.getAIConfig().usingBuiltinKey).toBeFalsy(); // non-default model = explicit choice
   });
 });
 

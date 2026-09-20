@@ -17,6 +17,7 @@ import { PlanApproval } from './components/PlanApproval.js';
 import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
+import { PROVIDERS } from '../config/providers.js';
 import { buildWindow, estimateMsgLines, clipContentToRows, maxUsefulScroll } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
@@ -503,7 +504,12 @@ export function TuiApp({ app }: Props) {
               // switchModel saves, records provider-tagged history and hot-reloads.
               void app.switchModel(model).then(() => {
                 setViewMode('chat');
-                addMsg(`模型已切换: ${model}`);
+                const after = app.config.get();
+                const noKey = !after.apiKey && !PROVIDERS[after.provider]?.keyless;
+                addMsg(
+                  `模型已切换: ${model}` +
+                  (noKey ? '\n⚠ 该服务商尚未配置 API Key，请求会失败。/服务商 配置 Key，或选内置共享模型。' : ''),
+                );
                 setResolvedTtl(null);
               });
             }}

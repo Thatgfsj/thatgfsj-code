@@ -358,28 +358,41 @@ export class App {
       || (c.customModels || []).includes(modelId)
       || modelId === c.model
       || !!process.env.MODEL;
+    let notice: string;
     if (knownHere || isCustomProvider(c.provider)) {
       await this.switchModel(modelId);
-      return `模型 → ${modelId}（立即生效）`;
-    }
-    const owners = this.findModelOwners(modelId).filter(p => p !== c.provider);
-    const candidate = owners[0];
-    if (candidate) {
-      const pc = PROVIDERS[candidate];
-      const envKey = getApiKeyFromEnv(candidate);
-      if (pc.keyless || envKey) {
-        await this.switchModel(modelId, { provider: candidate, ...(envKey ? { apiKey: envKey } : {}) });
-        return `模型 → ${candidate} / ${modelId}（已自动切换服务商，立即生效）`;
+      notice = `模型 → ${modelId}（立即生效）`;
+      if (!knownHere && !isCustomProvider(c.provider)) {
+        notice += `（未知模型，已按当前服务商 ${c.provider} 设置）`;
       }
-      return [
-        `✗ ${modelId} 属于 ${pc.name}，但当前服务商是 ${c.provider}，且没有该服务商的 API Key。`,
-        `  请先 /服务商 重新配置，或设置环境变量 ${pc.envKeys[0]}。`,
-      ].join('\n');
+    } else {
+      const owners = this.findModelOwners(modelId).filter(p => p !== c.provider);
+      const candidate = owners[0];
+      if (candidate) {
+        const pc = PROVIDERS[candidate];
+        const envKey = getApiKeyFromEnv(candidate);
+        if (pc.keyless || envKey) {
+          await this.switchModel(modelId, { provider: candidate, ...(envKey ? { apiKey: envKey } : {}) });
+          return `模型 → ${candidate} / ${modelId}（已自动切换服务商，立即生效）`;
+        }
+        return [
+          `✗ ${modelId} 属于 ${pc.name}，但当前服务商是 ${c.provider}，且没有该服务商的 API Key。`,
+          `  请先 /服务商 重新配置，或设置环境变量 ${pc.envKeys[0]}。`,
+        ].join('\n');
+      }
+      // Unknown id — user manages a relay catalog or a brand-new model; trust
+      // them but keep it under the current provider.
+      await this.switchModel(modelId);
+      notice = `模型 → ${modelId}（未知模型，已按当前服务商 ${c.provider} 设置）`;
     }
-    // Unknown id — user manages a relay catalog or a brand-new model; trust
-    // them but keep it under the current provider.
-    await this.switchModel(modelId);
-    return `模型 → ${modelId}（未知模型，已按当前服务商 ${c.provider} 设置）`;
+    // v3.4.2: switching to a provider we hold no key for used to silently
+    // fall back to the builtin shared model — say it out loud instead.
+    const after = this.config.get();
+    if (!after.apiKey && !PROVIDERS[after.provider]?.keyless) {
+      const hasOtherKey = Object.keys(after.apiKeys || {}).length > 0;
+      notice += `\n⚠ 该服务商尚未配置 API Key，请求会失败。/服务商 配置 Key${hasOtherKey ? '，或 /模型 Qwen/Qwen3.5-4B 暂用内置共享模型' : ''}。`;
+    }
+    return notice;
   }
 
   /**
