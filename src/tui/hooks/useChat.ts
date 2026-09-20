@@ -3,6 +3,7 @@ import type { MessageData } from '../components/ChatMessage.js';
 import { formatToolLabel, formatToolResultLine } from '../components/ToolCall.js';
 import type { App } from '../../app/index.js';
 import { compressThinking } from '../../utils/thinking.js';
+import { extractUpstreamMessage } from '../../utils/upstream.js';
 import { formatTokens } from '../../utils/tokens.js';
 import { getVersion } from '../../version.js';
 import type { StreamChunk, ToolCall, ToolCallResult, Usage } from '../../types.js';
@@ -240,12 +241,17 @@ export function useChat(app: App) {
         const msg = error.message || String(error);
         let errorMsg = `Error: ${msg}`;
 
+        // v3.4.7: surface the provider's own message. zhipu answers 429 with
+        // "1113 余额不足或无可用资源包，请充值" — telling users to "switch
+        // provider" while hiding that was actively misleading.
         if (msg.includes('401') || msg.includes('403') || msg.includes('Unauthorized')) {
-          errorMsg = `❌ API key invalid. Run \`gfcode init\` to reconfigure.`;
+          const detail = extractUpstreamMessage(msg);
+          errorMsg = `❌ API key 无效或无权限${detail ? `：${detail}` : '。请重新配置 Key。'}`;
         } else if (msg.includes('429') || msg.includes('rate limit') || msg.includes('quota')) {
-          errorMsg = `❌ Rate limit exceeded. Wait or run \`gfcode init\` to switch provider.`;
+          const detail = extractUpstreamMessage(msg);
+          errorMsg = `❌ 上游限流/配额不足${detail ? `：${detail}` : '。请稍后再试，或检查账户余额/配额。'}`;
         } else if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND')) {
-          errorMsg = `❌ Cannot connect. Check network or run \`gfcode init\`.`;
+          errorMsg = `❌ 无法连接服务商。请检查网络或 baseUrl 配置。`;
         } else if (msg.includes('abort') || msg.includes('AbortError')) {
           errorMsg = `[已中断]`;
         }
