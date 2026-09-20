@@ -71,16 +71,19 @@ const ENGINES: Record<string, { url: (q: string) => string; results: () => { ite
 
 /** True when the hostname must NOT be fetched (loopback / intranet / malformed). */
 export function isBlockedHost(hostname: string): boolean {
-  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  // v3.2.2: strip trailing FQDN dots — "127.0.0.1." resolves to 127.0.0.1
+  // but evaded every pattern below (SSRF bypass, adversarial audit S1).
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   if (!host) return true;
 
   // IPv6 (contains ':') — loopback, unspecified and ULA fc00::/7.
   if (host.includes(':')) {
     if (host === '::1' || host === '::' || host === '0:0:0:0:0:0:0:1') return true;
     if (host.startsWith('fc') || host.startsWith('fd')) return true; // fc00::/7 unique local
-    // IPv4-mapped (::ffff:127.0.0.1) — fall through to the embedded v4 check.
-    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host);
-    if (mapped) return isBlockedHost(mapped[1]);
+    // v3.2.2: IPv4-mapped in ANY serialization is loopback-only (audit S2) —
+    // Node serializes ::ffff:127.0.0.1 as ::ffff:7f00:1 (hex), which the
+    // dotted pattern below never matched.
+    if (host.startsWith('::ffff:')) return true;
     return false;
   }
 
@@ -177,6 +180,10 @@ export class BrowserTool implements Tool {
       BrowserTool.browser = null;
     }
     if (BrowserTool.launchError) throw new Error(BrowserTool.launchError);
+    // v3.2.2: clear stale failure state BEFORE trying — a transient error
+    // (dead proxy process, brief OOM) used to poison the tool until the
+    // process restarted even after the user fixed the cause.
+    BrowserTool.launchError = null;
 
     if (!BrowserTool.pw) {
       try {
@@ -196,9 +203,15 @@ export class BrowserTool implements Tool {
         headless: true,
         ...(proxy ? { proxy: { server: proxy } } : {}),
       });
-    } catch {
+    } catch (err: any) {
+      // v3.2.2: keep the ORIGINAL reason — a bad HTTPS_PROXY value launches
+      // with the same failure signature as a missing Chromium, and the old
+      // "run npx playwright install chromium" advice sent users to reinstall
+      // 130MB for nothing.
+      const reason = err?.message ? ` (${err.message})` : '';
       BrowserTool.launchError =
-        'Built-in Chromium (内置 Chromium) is not installed yet. Run `gfcode` once and choose ' +
+        'Built-in Chromium (内置 Chromium) failed to launch' + reason +
+        '. Check HTTPS_PROXY/HTTP_PROXY if set, or run `gfcode` once and choose ' +
         'to install it (≈130MB), or run manually: npx playwright install chromium';
       throw new Error(BrowserTool.launchError);
     }
@@ -218,16 +231,24 @@ export class BrowserTool implements Tool {
    * flaky network can wedge the page; the retry gets a fresh service every
    * time instead of surfacing a bare 25s timeout.
    */
-  private async gotoWithRetry(browser: any, makePage: () => Promise<any>, url: string, signal: AbortSignal | undefined): Promise<{ page: any; closeOnAbort: (() => void) | undefined }> {
-    let page = await makePage();
+  private async gotoWithRetry(browser: any, makePage: (b: any) => Promise<any>, url: string, signal: AbortSignal | undefined): Promise<{ page: any; closeOnAbort: (() => void) | undefined }> {
+    let page = await makePage(browser);
     let closeOnAbort = this.bindAbortToPage(signal, page);
     try {
       await page.goto(url, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
       return { page, closeOnAbort };
     } catch (err: any) {
       const msg = String(err?.message || err);
-      const stale = /Timeout .*exceeded|ECONNRESET|ECONNREFUSED|ERR_|Target closed|Session closed|Browser has been closed/i.test(msg);
-      if (!stale) throw err;
+      // v3.2.2: widened — "browserContext.newPage: Target page, browser or
+      // context has been closed" and node-level EHOSTUNREACH/ETIMEDOUT/
+      // EPIPE/EPROTO/socket hang up never matched the old pattern and
+      // surfaced raw instead of retrying.
+      const stale = /Timeout \d+ms exceeded|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT|EPIPE|EPROTO|hang up|has been closed|Target closed|Session closed|ERR_/i.test(msg);
+      if (!stale) {
+        closeOnAbort?.();
+        await page.close().catch(() => {});
+        throw err;
+      }
       // Fresh service: same browser when alive, otherwise a full relaunch.
       closeOnAbort?.();
       await page.close().catch(() => {});
@@ -235,9 +256,24 @@ export class BrowserTool implements Tool {
         await this.dispose();
         browser = await this.launch();
       }
-      page = await makePage();
+      // v3.2.2 (audit S4): makePage receives the CURRENT browser — the old
+      // closure captured the dead one, so a relaunch still called
+      // newPage() on the disposed browser and failed identically.
+      page = await makePage(browser);
       closeOnAbort = this.bindAbortToPage(signal, page);
-      await page.goto(url, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+      try {
+        await page.goto(url, { timeout: GOTO_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+      } catch (retryErr: any) {
+        await page.close().catch(() => {});
+        closeOnAbort?.();
+        // v3.2.2 (audit M2): tell the user WHAT to do — Chromium ignores
+        // system proxy settings, so an unproxied terminal needs HTTPS_PROXY.
+        const proxy = proxyFromEnv();
+        const hint = proxy
+          ? `已使用代理 ${proxy} — 请确认代理进程存活且支持 https 流量。`
+          : '终端未设置 HTTPS_PROXY — Chromium 不读系统代理，访问 GitHub 等外站请先在终端设置 HTTPS_PROXY。';
+        throw new Error(`${String(retryErr?.message || retryErr)}（已自动重试一次仍失败。${hint}）`);
+      }
       return { page, closeOnAbort };
     }
   }
@@ -269,7 +305,7 @@ export class BrowserTool implements Tool {
         const browser = await this.launch();
         const { page, closeOnAbort } = await this.gotoWithRetry(
           browser,
-          () => browser.newPage(),
+          (b) => b.newPage(),
           ENGINES[engine].url(query),
           ctx?.signal,
         );
@@ -314,7 +350,7 @@ export class BrowserTool implements Tool {
         const browser = await this.launch();
         const { page, closeOnAbort } = await this.gotoWithRetry(
           browser,
-          () => browser.newPage(),
+          (b) => b.newPage(),
           normalized,
           ctx?.signal,
         );
@@ -355,7 +391,7 @@ export class BrowserTool implements Tool {
   private bindAbortToPage(signal: AbortSignal | undefined, page: any): (() => void) | undefined {
     if (!signal) return undefined;
     const onAbort = () => {
-      try { void page.close(); } catch { /* page already dead */ }
+      try { page.close().catch(() => {}); } catch { /* page already dead */ }
     };
     signal.addEventListener('abort', onAbort, { once: true });
     return () => signal.removeEventListener('abort', onAbort);

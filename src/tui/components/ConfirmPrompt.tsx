@@ -43,6 +43,12 @@ export function ConfirmPrompt({ message, onAnswer }: Props) {
     }
   });
 
+  // v3.2.2: 12 lines max (adversarial-audit fix). The dialog renders in
+  // the fixed alt-screen frame; 40 lines of diff preview pushed the frame
+  // past the viewport and Ink full-cleared (黑屏). Long diffs truncate.
+  // 12 + title + truncation + footer + border = the 17 rows app.tsx
+  // reserves for this state.
+  const MAX_LINES = 12;
   const lines = message.split('\n');
 
   return (
@@ -55,7 +61,7 @@ export function ConfirmPrompt({ message, onAnswer }: Props) {
       marginBottom={0}
     >
       <Text color={theme.warning} bold>◆ 权限确认</Text>
-      {lines.slice(0, 40).map((line, i) => {
+      {lines.slice(0, MAX_LINES).map((line, i) => {
         const isAdd = line.startsWith('+');
         const isDel = line.startsWith('-');
         return (
@@ -64,7 +70,7 @@ export function ConfirmPrompt({ message, onAnswer }: Props) {
           </Text>
         );
       })}
-      {lines.length > 40 && <Text color={theme.textDim}>…（内容过长，已截断）</Text>}
+      {lines.length > MAX_LINES && <Text color={theme.textDim}>…（内容过长，已截断 {lines.length - MAX_LINES} 行）</Text>}
       <Box marginTop={0}>
         <Text color={theme.success} bold>[y] 允许</Text>
         <Text color={theme.textFaint}> · </Text>

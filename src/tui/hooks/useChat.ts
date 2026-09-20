@@ -93,22 +93,34 @@ export function useChat(app: App) {
     let pendingText = '';
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     /**
-     * final=true flushes everything (round end). Otherwise the trailing
-     * partial word stays buffered: every Static item prints on its own
-     * line, so flushing at an arbitrary character would split words
-     * across lines ("Thatg / fsj" — user-visible mid-word breaks).
+     * final=true flushes everything (round end AND every tool-line
+     * commit — held text must land BEFORE the ⎿ line or the tool output
+     * splits the sentence and the halves fuse back in the wrong order,
+     * the "alphabeta" ghost the adversarial audit demonstrated).
+     * Otherwise the trailing partial word stays buffered: every Static
+     * item prints on its own line, so flushing at an arbitrary character
+     * would split words across lines ("Thatg / fsj"). CJK counts as a
+     * cut point — CJK words are 1-3 chars, and holding 500 chars of
+     * Chinese made streams jump in slabs.
      */
+    const isWideChar = (code: number): boolean =>
+      (code >= 0x2e80 && code <= 0xd7ff) || (code >= 0xf900 && code <= 0xff60) || code >= 0xffe0;
     const flushText = (final = false) => {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (!pendingText) return;
       let chunk = pendingText;
-      if (!final && !/\s$/.test(chunk)) {
-        const cut = Math.max(chunk.lastIndexOf(' '), chunk.lastIndexOf('\n')) + 1;
+      if (!final && !/[\s。！？，、；：…）】」』"']$/.test(chunk)) {
+        let cut = Math.max(chunk.lastIndexOf(' '), chunk.lastIndexOf('\n')) + 1;
+        if (cut === 0) {
+          for (let i = chunk.length - 1; i >= 0; i--) {
+            if (isWideChar(chunk.charCodeAt(i))) { cut = i + 1; break; }
+          }
+        }
         if (cut > 0) {
           pendingText = chunk.slice(cut);
           chunk = chunk.slice(0, cut);
-        } else if (chunk.length < 500) {
-          return; // one long partial word — keep buffering
+        } else if (chunk.length < 120) {
+          return; // short ASCII partial word — keep buffering
         } else {
           pendingText = '';
         }
@@ -125,8 +137,9 @@ export function useChat(app: App) {
     const writeText = (s: string) => { pendingText += s; scheduleFlush(); };
 
     const cfgModel = app.config.get().model || '';
-    /** Dim plain line (tool calls, chips, stats). */
-    const commitDim = (line: string) => { flushText(); commit({ content: line, plain: true, dim: true }); };
+    /** Dim plain line (tool calls, chips, stats). Final-flushes held text
+     * first so streamed text stays BEFORE the ⎿ line it preceded. */
+    const commitDim = (line: string) => { flushText(true); commit({ content: line, plain: true, dim: true }); };
 
     // First turn in this session: brand header as Static items.
     if (!headerCommittedRef.current) {

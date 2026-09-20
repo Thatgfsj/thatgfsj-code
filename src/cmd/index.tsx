@@ -118,33 +118,30 @@ program
           console.error(chalk.gray('  脚本化调用请使用: gfcode "任务" --json\n'));
           process.exit(1);
         }
-        // Interactive mode - Ink TUI, full-screen via the alternate screen
-        // buffer (opencode-style: owns the whole viewport, terminal is
-        // restored on exit). Ink v7 has no fullscreen option, so we drive
-        // the alt screen manually.
+        // Interactive mode - Ink TUI via Ink's NATIVE alternate screen
+        // (v3.2.2): the whole UI renders inside the fixed viewport, and
+        // signal-exit restores the main buffer on EVERY exit path —
+        // including process.exit(1) from the error boundary, which the
+        // old hand-rolled ?1049h/?1049l missed (left terminals garbled).
         const { render } = await import('ink');
         const { TuiApp } = await import('../tui/app.js');
-        const out = process.stdout;
-        const altScreen = !!out.isTTY;
-        if (altScreen) {
-          // v3.0.8: set the terminal window/tab title and enter the
-          // alternate screen buffer.
-          out.write('\x1b]2;Thatgfsj\x07');
-          out.write('\x1b[?1049h\x1b[2J\x1b[H');
+        if (process.stdout.isTTY) {
+          // Terminal window/tab title.
+          process.stdout.write('\x1b]2;Thatgfsj\x07');
         }
         try {
           const { TuiErrorBoundary } = await import('../tui/components/ErrorBoundary.js');
           // v3.2.0: boundary catches React render errors (which never reach
           // the process-level hooks) and writes last-error.log before exit.
           const instance = render(
-            <TuiErrorBoundary><TuiApp app={app} /></TuiErrorBoundary>
+            <TuiErrorBoundary><TuiApp app={app} /></TuiErrorBoundary>,
+            { alternateScreen: process.stdout.isTTY },
           );
-          const restore = () => instance.unmount();
-          process.once('exit', restore);
           await instance.waitUntilExit();
-          process.removeListener('exit', restore);
         } finally {
-          if (altScreen) out.write('\x1b[?1049l');
+          // Leave one blank line between the last frame and the next shell
+          // prompt (Ink has already restored the main buffer).
+          if (process.stdout.isTTY) process.stdout.write('\r\n');
         }
         return;
       }

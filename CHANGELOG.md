@@ -4,6 +4,54 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.2.2] - 2026-09-20  - 视口渲染重构：发送黑屏根治 + 8 路对抗审查修复
+
+### Fixed
+
+- **发送文本后黑屏（黑盒报告根因链）**：Ink 7.1 在 Windows 上当帧行数 == 终端行数时，每次帧内容变化都会整屏清除（\x1b[2J，含备用缓冲区重绘）；此前帧高恰好等于终端行数，流式期间 200ms 一次全屏闪黑。现在帧高恒为 rows-1，实测发送全程零整屏清除（ConPTY e2e 断言）。
+- **备用缓冲区恢复**：改用 Ink 原生 `render(..., { alternateScreen: true })`（signal-exit 兜底）——旧手写 `?1049h/1049l` 在渲染崩溃 `process.exit(1)` 路径下不执行，用户终端会被留在备用屏花屏。
+- **对话改为行数预算视口窗口**：备用缓冲区没有回滚区，历史必须渲染在帧内。`src/tui/window.ts` 从尾部按估算行高累加组窗，裁剪按回绕宽度迭代（长中文单行/超长回答实测不再撑爆）；流式新输出不再把用户的翻页位置拽回尾部（翻页可穿越流式存活）。
+- **底部区行数从猜测改为实测**：UserInput 上报真实行数（多行粘贴渲染窗口 5 行封顶、补全弹层 5 条封顶）；权限确认框 diff 预览 12 行封顶；模型选择/配置向导/模型设置全屏化——全部堵住"底部撑爆帧"的黑屏路径。
+- **markdown 渲染其实从未生效**：`marked.use({renderer: TerminalRenderer 实例})` 在 marked ≥5 必抛 `renderer 'o' does not exist`，旧代码 catch 后静默回退原始文本（用户看到的回答一直带 # 和 ```）。现在用方法 shim 桥接（只暴露 marked 认识的方法名，调用时同步 parser/options），标题/列表/表格/代码块按工作区宽度真渲染。
+- **快速打字乱序**（对抗实测：同 tick 两键 "abcd"→"dcba"）：value+cursor 合并为单 state 函数式更新，同一 stdin 块的多个键事件不再穿过过期闭包。
+- **emoji 劈裂**：←/→/退格/删除按码点步进（代理对不再被劈成孤立乱码发给模型）；粘贴 CRLF 归一为 \n。
+- **esc 语义拆分**：有输入内容时 esc 只清空（不再顺手中止正在进行的回复）；空输入 esc 才取消/退翻页。
+- **流式词边界冲刷的幽灵词融合**（对抗实测 "say alpha"+工具调用+"beta" → 显示 "alphabeta"）：提交工具行前强制排空扣留文本，时序恢复正确；CJK 增加切分点，中文流式不再 500 字一跳。
+- **浏览器工具**（v3.2.1 回归修复 + SSRF）：重启后 makePage 闭包捕获已死浏览器导致重试必败；launchError 一次失败永久投毒；launch 失败被误诊为"未安装 Chromium"；重试失败错误信息附带代理设置指引；SSRF 堵住尾点 FQDN（`127.0.0.1.`）与 `::ffff:` 十六进制序列化两条绕过。
+- 长会话内存：会话/流式列表不再无限增长（/new、压缩清理）。
+
+### Changed
+
+- 窄终端（<100 列）时计划面板回落到工作区下方，行数计入预算。
+- README/CHANGELOG 与实现对齐（移除已删除的"底部状态栏统计"描述）。
+
+## [3.2.1] - 2026-09-20  - 三区布局/翻页/光标输入/浏览器代理重试/全宽回答
+
+### Added
+
+- 三区布局：左侧工作区 + 右侧信息列（计划在上、上下文容量在下，1s 实时刷新）+ 底部全宽输入；首页不放面板。
+- 上下文容量面板：↑输入/↓输出（万格式）、分类占比、平均缓存命中率；无金额。
+- 键盘契约：空输入 ↑/↓ 翻页（滚轮等效），非空 ↑/↓ 移光标，←→ 移光标，ctrl+a/e/u 行首/行尾/清行，真实光标模型。
+- 会话级翻页模式（── 翻页 ── 头）。
+
+### Fixed
+
+- 回答挤成 80 列窄条（marked-terminal 默认 width）。
+- 流式按词边界冲刷（英文单词不再被劈开跨行）。
+- browser：代理透传（Chromium 不读系统代理）、实例存活校验、导航失败换新页重试。
+- 上下文估算：session 的 system 消息不再重复计入消息桶。
+- 删除每轮静态统计行（含"节省 ¥"金额线）。
+
+## [3.2.0] - 2026-09-20  - 右侧上下文面板 + 聊天视图 items 崩溃修复
+
+### Fixed
+
+- **聊天视图 "Cannot read properties of undefined (reading 'items')"**：PlanStore 原型方法被裸引用传入 useSyncExternalStore 导致 this 丢失（ESM 严格模式），箭头字段绑定修复；新增聊天分支挂载测试与 React ErrorBoundary（落盘 ~/.thatgfsj/last-error.log）。
+
+### Added
+
+- 右侧上下文容量面板（opencode 风格）：已用/窗口、分类占比、缓存命中率。
+
 ## [3.0.19] - 2026-09-20  - 五域审查修复：安全/网络/缓存/稳定性
 
 ### Fixed

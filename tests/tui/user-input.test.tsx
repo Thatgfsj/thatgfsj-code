@@ -82,13 +82,18 @@ describe('UserInput caret & arrow contract', () => {
     expect(ui.lastFrame() || '').toContain('X█abc');
   });
 
-  it('esc clears and calls onCancel', async () => {
+  it('esc with typed text clears WITHOUT cancelling; esc on empty cancels', async () => {
     const cancel = vi.fn();
     const ui = render(<UserInput onSubmit={() => {}} onCancel={cancel} />);
     await press(ui.stdin, 'a');
     await press(ui.stdin, 'b');
     await press(ui.stdin, '\x1B');
-    expect(cancel).toHaveBeenCalled();
+    // v3.2.2: clearing typed text must NOT abort a running turn.
+    expect(cancel).not.toHaveBeenCalled();
+    expect(ui.lastFrame() || '').toContain('随便问点什么');
+    await press(ui.stdin, '\x1B');
+    // empty input + esc = cancel / exit pager
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it('enter submits the trimmed value and clears the box', async () => {
