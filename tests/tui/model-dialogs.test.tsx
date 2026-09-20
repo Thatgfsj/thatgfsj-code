@@ -84,13 +84,21 @@ describe('ModelSettings (unified dialog)', () => {
     ui.unmount();
   });
 
-  it('lists current-provider, builtin-shared and foreign-provider models', async () => {
-    const ui = render(<ModelSettings app={stubApp({ customModels: ['my-relay'] })} onClose={() => {}} maxRows={60} />);
+  it('lists current-provider, builtin-shared, keyed foreign providers — and NO unkeyed ones', async () => {
+    const ui = render(
+      <ModelSettings app={stubApp({ customModels: ['my-relay'], apiKeys: { deepseek: 'k' } })} onClose={() => {}} maxRows={60} />,
+    );
     expect(await waitFor(ui, '内置共享')).toBe(true);
     const frame = ui.lastFrame() || '';
     expect(frame).toContain('GLM-5.3-Flash');      // current model
-    expect(frame).toContain('deepseek/');          // foreign catalog, provider-prefixed
+    expect(frame).toContain('deepseek/');          // keyed foreign catalog
     expect(frame).toContain('my-relay');           // custom id
+    expect(frame).toContain('配置新的服务商');       // explicit add-provider entry
+    // no key → provider is not listed at all (noise removal, v3.4.5);
+    // only the CURRENT provider may still show its 无 Key chip
+    expect(frame).not.toContain('kimi/');
+    expect(frame).not.toContain('anthropic/');
+    expect(frame).toContain('无 Key'); // current provider (zhipu) has no key yet
     ui.unmount();
   });
 

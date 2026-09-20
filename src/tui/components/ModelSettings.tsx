@@ -10,12 +10,14 @@ import type { ProviderName } from '../../config/types.js';
 import { theme } from '../theme.js';
 
 type Submode = null | {
-  type: 'add' | 'context' | 'window' | 'key';
+  type: 'add' | 'context' | 'window' | 'key' | 'provider';
   value: string;
   error?: string;
   /** key submode: which provider/model the key is for */
   provider?: ProviderName;
   model?: string;
+  /** provider submode: highlighted row in the provider list */
+  idx?: number;
 };
 
 interface Props {
@@ -73,6 +75,8 @@ interface Entry {
   builtin?: boolean;
   custom?: boolean;
   current?: boolean;
+  /** "＋ 配置新的服务商" row */
+  addProvider?: boolean;
 }
 
 function buildEntries(app: App): Entry[] {  const c = app.config.get();
@@ -105,11 +109,21 @@ function buildEntries(app: App): Entry[] {  const c = app.config.get();
   entries.push({ key: nextKey(), sep: '── 内置共享 ──' });
   entries.push({ key: nextKey(), id: BUILTIN_MODEL_ID, provider: 'siliconflow', builtin: true, label: `${BUILTIN_MODEL_ID} · 内置共享（无需 Key）` });
 
-  entries.push({ key: nextKey(), sep: '── 其他服务商 ──' });
-  for (const p of listProviders()) {
-    if (p.key === cur) continue;
-    for (const m of MODEL_CATALOGS[p.key]) push(m.id, p.key);
+  // v3.4.5: only providers we can actually use (stored key, env key or
+  // keyless) — a wall of "无 Key" rows nobody can activate is noise.
+  const usableOthers = listProviders().filter(p => {
+    if (p.key === cur) return false;
+    const pc = PROVIDERS[p.key];
+    return pc?.keyless || !!getApiKeyFromEnv(p.key) || !!(c.apiKeys?.[p.key]);
+  });
+  if (usableOthers.length > 0) {
+    entries.push({ key: nextKey(), sep: '── 其他服务商 ──' });
+    for (const p of usableOthers) {
+      for (const m of MODEL_CATALOGS[p.key]) push(m.id, p.key);
+    }
   }
+  entries.push({ key: nextKey(), sep: '── 添加 ──' });
+  entries.push({ key: nextKey(), addProvider: true, label: '＋ 配置新的服务商（选择并输入 Key）…' });
   return entries;
 }
 
@@ -168,6 +182,10 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
   /** Selecting any entry: same provider → plain switch; foreign → provider
    *  + key together, asking for the key inline when we don't hold one. */
   const activate = async (e: Entry) => {
+    if (e.addProvider) {
+      setSubmode({ type: 'provider', value: '', idx: 0 });
+      return;
+    }
     if (e.sep || !e.id || !e.provider) return;
     const c = app.config.get();
     const kind = resolveActivation(c, !!getApiKeyFromEnv(e.provider), e);
@@ -270,6 +288,28 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
   };
 
   useInput((input, key) => {
+    if (submode?.type === 'provider') {
+      const list = listProviders();
+      const pidx = Math.min(Math.max(0, submode.idx ?? 0), list.length - 1);
+      if (key.escape) { setSubmode(null); return; }
+      if (key.upArrow) { setSubmode({ ...submode, idx: Math.max(0, pidx - 1) }); return; }
+      if (key.downArrow) { setSubmode({ ...submode, idx: Math.min(list.length - 1, pidx + 1) }); return; }
+      if (key.return) {
+        const p = list[pidx];
+        const pc = PROVIDERS[p.key];
+        if (pc?.keyless) {
+          void app.switchModel(pc.defaultModel, { provider: p.key }).then(() => {
+            refresh();
+            setSubmode(null);
+            flash(`已切换: ${p.name} / ${pc.defaultModel}`);
+            rerender();
+          });
+        } else {
+          setSubmode({ type: 'key', value: '', provider: p.key, model: pc?.defaultModel });
+        }
+      }
+      return;
+    }
     if (submode) {
       if (key.escape) { setSubmode(null); return; }
       if (key.return) { void commitSubmode(); return; }
@@ -342,6 +382,15 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
         if (e.sep) {
           return <Text key={e.key} color={theme.textFaint} wrap="truncate-end">{truncateToWidth(e.sep, contentW)}</Text>;
         }
+        if (e.addProvider) {
+          const isSel = e.key === active?.key;
+          return (
+            <Box key={e.key}>
+              <Text color={isSel ? theme.accent : theme.textFaint}>{isSel ? '▸ ' : '  '}</Text>
+              <Text color={isSel ? theme.text : theme.textDim} bold={isSel} wrap="truncate-end">{truncateToWidth(e.label!, contentW - 2)}</Text>
+            </Box>
+          );
+        }
         const isSel = e.key === active?.key;
         const id = e.id!;
         const st = settings[id] || {};
@@ -372,7 +421,30 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
 
       <Text color={theme.border} wrap="truncate-end">{truncateToWidth(rule, contentW)}</Text>
 
-      {submode ? (
+      {submode?.type === 'provider' ? (
+        (() => {
+          const list = listProviders();
+          const pidx = Math.min(Math.max(0, submode.idx ?? 0), list.length - 1);
+          const win = 8;
+          const s = list.length > win ? Math.min(Math.max(0, pidx - Math.floor(win / 2)), list.length - win) : 0;
+          return (
+            <Box flexDirection="column" width={contentW}>
+              <Text color={theme.accent} wrap="truncate-end">{truncateToWidth('选择服务商 (↑↓ 回车，esc 取消):', contentW)}</Text>
+              {list.slice(s, s + win).map((p, i) => {
+                const abs = s + i;
+                const mark = abs === pidx ? '▸ ' : '  ';
+                const keyNote = PROVIDERS[p.key].keyless || PROVIDERS[p.key].envKeys.length === 0
+                  ? '（免 Key）' : (app.config.get().apiKeys?.[p.key] ? '（已配置）' : '');
+                return (
+                  <Text key={p.key} color={abs === pidx ? theme.accent : theme.textDim} wrap="truncate-end">
+                    {truncateToWidth(`${mark}${p.name}${keyNote}`, contentW)}
+                  </Text>
+                );
+              })}
+            </Box>
+          );
+        })()
+      ) : submode ? (
         <Box flexDirection="column" width={contentW}>
           <Box>
             <Text color={theme.accent}>{truncateToWidth(submodeLabel, Math.max(4, contentW - stringWidth(submode.value) - 1))}</Text>
