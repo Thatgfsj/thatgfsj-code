@@ -265,6 +265,12 @@ export class ConfigManager {
   async save(updates: Partial<Config>): Promise<void> {
     this.config = { ...this.config, ...updates };
 
+    // v3.4.10: switching providers without an explicit baseUrl must not
+    // carry the previous provider's endpoint into the new one.
+    if (updates.provider !== undefined && updates.baseUrl === undefined) {
+      delete this.config.baseUrl;
+    }
+
     if (typeof updates.apiKey === 'string') {
       const keys = { ...(this.config.apiKeys || {}) };
       if (updates.apiKey) keys[this.config.provider] = updates.apiKey;

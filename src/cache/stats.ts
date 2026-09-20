@@ -107,23 +107,21 @@ export class CacheStatsStore {
   }
 
   /**
-   * Record a single round's usage. Provider-agnostic: accepts both Anthropic
-   * (cache_creation_input_tokens / cache_read_input_tokens) and DeepSeek
-   * (prompt_cache_hit_tokens / prompt_cache_miss_tokens) shapes. If a
-   * provider returned neither (e.g. OpenAI), the call is a no-op apart
-   * from updating totalRequest count.
+   * Record a single round's usage. Provider-agnostic: accepts Anthropic
+   * (cache_read_input_tokens), DeepSeek (prompt_cache_hit_tokens) and the
+   * OpenAI-compatible automatic-prefix-caching shape
+   * (cached_tokens — zhipu / SiliconFlow / OpenAI / vLLM). A provider that
+   * reports none of them still updates the request counter.
    */
   record(usage: Usage): void {
-    const read = usage.cache_read_input_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
+    const read = usage.cache_read_input_tokens
+      ?? usage.prompt_cache_hit_tokens
+      ?? usage.cached_tokens
+      ?? 0;
     const creation = usage.cache_creation_input_tokens
       ?? (usage.prompt_cache_miss_tokens ?? 0);
     const input = usage.prompt_tokens ?? 0;
     const output = usage.completion_tokens ?? 0;
-
-    // Avoid double-counting: if the provider reported both cache_creation
-    // and prompt_cache_miss_tokens we'd otherwise sum them. The ?? in the
-    // chain above only uses prompt_cache_miss_tokens when
-    // cache_creation_input_tokens is undefined, which is what we want.
 
     this.stats.totalReadTokens += read;
     this.stats.totalCreationTokens += creation;
@@ -132,8 +130,7 @@ export class CacheStatsStore {
     this.stats.totalRequests += 1;
 
     // Per-round snapshot (for /cache command history view).
-    const total = read + (input - read);
-    const hitRate = total > 0 ? read / total : 0;
+    const hitRate = input > 0 ? read / input : 0;
     this.stats.history.push({ ts: Date.now(), read, creation, input, output, hitRate });
     if (this.stats.history.length > HISTORY_LIMIT) {
       this.stats.history.splice(0, this.stats.history.length - HISTORY_LIMIT);

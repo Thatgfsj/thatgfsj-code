@@ -212,11 +212,12 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
       }
       if (kind === 'switch-ready') {
         const pc = PROVIDERS[e.provider];
-        // v3.4.8: a custom relay without a Base URL cannot be activated —
-        // collect the URL (and env-less key) instead of saving a dead config.
-        if (isCustomProvider(e.provider) && !c.baseUrl) {
+        // v3.4.10: a relay MUST be asked for its URL — the resolved
+        // config.baseUrl belongs to the CURRENT provider and is always
+        // non-empty, so it must not stand in for the relay's URL.
+        if (isCustomProvider(e.provider)) {
           pendingKeyRef.current = getApiKeyFromEnv(e.provider) || null;
-          setSubmode({ type: 'url', value: c.baseUrl || '', provider: e.provider, model: e.id });
+          setSubmode({ type: 'url', value: '', provider: e.provider, model: e.id });
           return;
         }
         await commitActivation({ provider: e.provider, model: e.id }, `已切换: ${pc?.name || e.provider} / ${e.id}`);
@@ -260,11 +261,14 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
     } else if (submode.type === 'key') {
       const key = submode.value.trim();
       if (!key) { setSubmode({ ...submode, error: 'Key 不能为空' }); return; }
-      // v3.4.8: custom relays need a Base URL too — chain into the URL step
-      // (prefilled with the saved URL) unless one is already configured.
-      if (submode.provider && isCustomProvider(submode.provider) && !app.config.get().baseUrl) {
+      // v3.4.10: custom relays ALWAYS continue to the URL step. The old
+      // condition (!config.baseUrl) never fired — the in-memory baseUrl is
+      // the CURRENT provider's resolved endpoint, always non-empty — so the
+      // relay was saved against the wrong host and the user never got asked.
+      if (submode.provider && isCustomProvider(submode.provider)) {
         pendingKeyRef.current = key;
-        setSubmode({ type: 'url', value: '', provider: submode.provider, model: submode.model });
+        const onThisRelay = app.config.get().provider === submode.provider;
+        setSubmode({ type: 'url', value: onThisRelay ? (app.config.get().baseUrl || '') : '', provider: submode.provider, model: submode.model });
         return;
       }
       await commitActivation(

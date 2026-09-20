@@ -70,6 +70,8 @@ export interface Usage {
   // DeepSeek prompt cache fields
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
+  /** OpenAI-compatible automatic prefix caching (zhipu / SiliconFlow / OpenAI / vLLM). */
+  cached_tokens?: number;
 }
 
 export interface ChatResponse {

@@ -311,6 +311,13 @@ export class OpenAIProvider implements LLMProvider {
       // Anthropic prompt cache fields (passed through if relay forwards them)
       cache_creation_input_tokens: raw.cache_creation_input_tokens,
       cache_read_input_tokens: raw.cache_read_input_tokens,
+      // v3.4.10: OpenAI-compatible automatic prefix caching. zhipu,
+      // SiliconFlow, OpenAI and vLLM all report hits here — dropping this
+      // field recorded every hit as 0 and made the hit-rate read ~3%.
+      cached_tokens:
+        raw.prompt_tokens_details?.cached_tokens ??
+        raw.cached_tokens ??
+        undefined,
     };
   }
 }

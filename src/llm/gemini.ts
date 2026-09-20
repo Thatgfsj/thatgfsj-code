@@ -162,6 +162,8 @@ export class GeminiProvider implements LLMProvider {
       prompt_tokens: raw.promptTokenCount || 0,
       completion_tokens: raw.candidatesTokenCount || 0,
       total_tokens: raw.totalTokenCount || 0,
+      // v3.4.10: Gemini's explicit cached-content reporting was dropped.
+      cached_tokens: raw.cachedContentTokenCount ?? undefined,
     };
   }
 

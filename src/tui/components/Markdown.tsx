@@ -51,6 +51,10 @@ export function Markdown({ content, width }: Props) {
     try {
       const marked = new Marked();
       marked.use({
+        // v3.4.10: single newlines must survive. CommonMark folds them into
+        // spaces, which flattened every command output (/help became one
+        // paragraph — user report). Terminal readers expect literal lines.
+        breaks: true,
         renderer: makeTerminalRendererPack(Math.max(20, (width ?? 80) - 2)) as any,
       });
       const result = marked.parse(content, { async: false });
