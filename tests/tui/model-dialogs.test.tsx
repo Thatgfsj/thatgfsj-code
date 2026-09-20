@@ -84,7 +84,7 @@ describe('ModelSettings (unified dialog)', () => {
     ui.unmount();
   });
 
-  it('lists current-provider, builtin-shared, keyed foreign providers — and NO unkeyed ones', async () => {
+  it('lists ONLY the builtin model + user-added models (no provider catalogs)', async () => {
     const ui = render(
       <ModelSettings
         app={stubApp({ model: 'GLM-5.3-Flash', customModels: ['my-relay', 'GLM-5.3-Flash'], apiKeys: { deepseek: 'k' } })}
@@ -95,17 +95,16 @@ describe('ModelSettings (unified dialog)', () => {
     expect(await waitFor(ui, '内置共享')).toBe(true);
     const frame = ui.lastFrame() || '';
     expect(frame).toContain('GLM-5.3-Flash');      // current model
-    expect(frame).toContain('deepseek/');          // keyed foreign catalog
-    expect(frame).toContain('my-relay');           // custom id
-    expect(frame).toContain('配置新的服务商');       // explicit add-provider entry
-    // the current model must appear EXACTLY once (v3.4.5 duplicate-row bug:
-    // custom + history + catalog entries were not deduped against it)
-    expect(frame.split('● 当前').length - 1).toBe(1);
-    // no key → provider is not listed at all (noise removal, v3.4.5);
-    // only the CURRENT provider may still show its 无 Key chip
+    expect(frame).toContain('my-relay');           // user-added id
+    expect(frame).toContain('配置自己的服务商');     // add-provider entry
+    // v3.4.9 mandate: NO provider catalogs at all — even providers with a
+    // stored key must not flood the list
+    expect(frame).not.toContain('deepseek/');
     expect(frame).not.toContain('kimi/');
     expect(frame).not.toContain('anthropic/');
-    expect(frame).toContain('无 Key'); // current provider (zhipu) has no key yet
+    expect(frame).not.toContain('ollama/');
+    // exactly one current marker (v3.4.6 duplicate-row regression)
+    expect(frame.split('● 当前').length - 1).toBe(1);
     ui.unmount();
   });
 

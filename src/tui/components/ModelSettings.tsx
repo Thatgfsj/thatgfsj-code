@@ -3,9 +3,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import stringWidth from 'string-width';
 import type { App } from '../../app/index.js';
-import { PROVIDERS, MODEL_CATALOGS, getApiKeyFromEnv, listProviders, isCustomProvider } from '../../config/providers.js';
+import { PROVIDERS, getApiKeyFromEnv, listProviders, isCustomProvider } from '../../config/providers.js';
 import { BUILTIN_MODEL_ID } from '../../config/builtin.js';
-import { historyForProvider } from '../../config/modelHistory.js';
 import type { ProviderName } from '../../config/types.js';
 import { theme } from '../theme.js';
 
@@ -30,16 +29,14 @@ interface Props {
 }
 
 /**
- * v3.4.4: THE single model/provider dialog. /model, /服务商 and /models all
- * open it. One list contains every provider's catalog plus the builtin
- * shared model and the user's custom ids; selecting a foreign model that we
- * hold no key for asks for the key INLINE (the separate full-screen wizard
- * is gone). k sets/updates the current provider's key without switching.
+ * v3.4.9: THE single model/provider dialog. /model, /服务商 and /models all
+ * open it. The list holds exactly: the ONE builtin free model, the models
+ * the user added themselves, and an add-provider entry (inline key / relay
+ * URL prompts). No provider catalogs — users add what they use.
  *
  * Keys:
- *   ↑/↓ 选择   enter 切换（跨服务商自动带 provider+key）
- *   a 添加模型  d 删除自定义  b 上下文长度  w 上下文窗口  c 思考强度
- *   k 当前服务商 API Key   esc 关闭
+ *   ↑/↓ 选择   enter 切换   a 添加模型   d 删除自定义
+ *   b 上下文长度  w 上下文窗口  c 思考强度  k 当前服务商 API Key   esc 关闭
  */
 
 /** CJK-aware truncation: never exceed `max` display columns. */
@@ -79,52 +76,32 @@ interface Entry {
   addProvider?: boolean;
 }
 
-function buildEntries(app: App): Entry[] {  const c = app.config.get();
+function buildEntries(app: App): Entry[] {
+  const c = app.config.get();
   const cur: ProviderName = c.provider;
   const entries: Entry[] = [];
   let n = 0;
   const nextKey = () => `e${n++}`;
 
-  entries.push({ key: nextKey(), sep: `── ${PROVIDERS[cur]?.name || cur} ──` });
-  // current model first — dedupe key MUST match push()'s `${provider}::${id}`
-  // (a bare id here let the current model appear twice: v3.4.5 user report)
+  // v3.4.9: user mandate — ONE builtin free model plus what the user added
+  // themselves. Provider catalogs (a wall of rows nobody can activate) and
+  // cross-provider history are gone; switching providers happens through
+  // the 配置服务商 flow below.
+  entries.push({ key: nextKey(), sep: '── 内置共享 ──' });
+  entries.push({ key: nextKey(), id: BUILTIN_MODEL_ID, provider: 'siliconflow', builtin: true, label: `${BUILTIN_MODEL_ID} · 免费稳定（推荐）` });
+
+  entries.push({ key: nextKey(), sep: '── 我的模型 ──' });
   entries.push({ key: nextKey(), id: c.model, provider: cur, current: true, label: `${c.model} ● 当前` });
   const seen = new Set<string>([`${cur}::${c.model}`]);
-  const push = (id: string, provider: ProviderName, opts?: { custom?: boolean; builtin?: boolean }) => {
+  const push = (id: string, provider: ProviderName) => {
     if (!id || seen.has(`${provider}::${id}`)) return;
     seen.add(`${provider}::${id}`);
-    entries.push({
-      key: nextKey(),
-      id,
-      provider,
-      custom: opts?.custom,
-      builtin: opts?.builtin,
-      label: provider === cur ? id : `${PROVIDERS[provider]?.name || provider} · ${id}`,
-    });
+    entries.push({ key: nextKey(), id, provider });
   };
+  for (const m of c.customModels || []) push(m, cur);
 
-  for (const m of c.customModels || []) push(m, cur, { custom: true });
-  for (const e of historyForProvider(cur)) push(e.id, cur);
-  for (const m of MODEL_CATALOGS[cur] || []) push(m.id, cur);
-
-  entries.push({ key: nextKey(), sep: '── 内置共享 ──' });
-  entries.push({ key: nextKey(), id: BUILTIN_MODEL_ID, provider: 'siliconflow', builtin: true, label: `${BUILTIN_MODEL_ID} · 内置共享（无需 Key）` });
-
-  // v3.4.5: only providers we can actually use (stored key, env key or
-  // keyless) — a wall of "无 Key" rows nobody can activate is noise.
-  const usableOthers = listProviders().filter(p => {
-    if (p.key === cur) return false;
-    const pc = PROVIDERS[p.key];
-    return pc?.keyless || !!getApiKeyFromEnv(p.key) || !!(c.apiKeys?.[p.key]);
-  });
-  if (usableOthers.length > 0) {
-    entries.push({ key: nextKey(), sep: '── 其他服务商 ──' });
-    for (const p of usableOthers) {
-      for (const m of MODEL_CATALOGS[p.key]) push(m.id, p.key);
-    }
-  }
   entries.push({ key: nextKey(), sep: '── 添加 ──' });
-  entries.push({ key: nextKey(), addProvider: true, label: '＋ 配置新的服务商（选择并输入 Key）…' });
+  entries.push({ key: nextKey(), addProvider: true, label: '＋ 配置自己的服务商（Key / 中转站）…' });
   return entries;
 }
 
