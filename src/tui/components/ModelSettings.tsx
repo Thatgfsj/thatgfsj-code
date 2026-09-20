@@ -86,9 +86,10 @@ function buildEntries(app: App): Entry[] {  const c = app.config.get();
   const nextKey = () => `e${n++}`;
 
   entries.push({ key: nextKey(), sep: `── ${PROVIDERS[cur]?.name || cur} ──` });
-  // current model first
+  // current model first — dedupe key MUST match push()'s `${provider}::${id}`
+  // (a bare id here let the current model appear twice: v3.4.5 user report)
   entries.push({ key: nextKey(), id: c.model, provider: cur, current: true, label: `${c.model} ● 当前` });
-  const seen = new Set<string>([c.model]);
+  const seen = new Set<string>([`${cur}::${c.model}`]);
   const push = (id: string, provider: ProviderName, opts?: { custom?: boolean; builtin?: boolean }) => {
     if (!id || seen.has(`${provider}::${id}`)) return;
     seen.add(`${provider}::${id}`);
@@ -461,16 +462,16 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
         <Box flexDirection="column" width={contentW}>
           <Box>
             <KeyHint keys="↑↓" desc="选择" />
-            <KeyHint keys="enter" desc="切换(跨服务商自动带Key)" />
+            <KeyHint keys="enter" desc="切换" />
             <KeyHint keys="a" desc="添加" />
             <KeyHint keys="d" desc="删除" />
-            <KeyHint keys="k" desc="当前服务商Key" last />
+            <KeyHint keys="esc" desc="关闭" last />
           </Box>
           <Box>
+            <KeyHint keys="k" desc="服务商Key" />
             <KeyHint keys="b" desc="上下文长度" />
-            <KeyHint keys="w" desc="上下文窗口" />
-            <KeyHint keys="c" desc="思考强度" />
-            <KeyHint keys="esc" desc="关闭" last />
+            <KeyHint keys="w" desc="窗口" />
+            <KeyHint keys="c" desc="思考强度" last />
           </Box>
         </Box>
       )}

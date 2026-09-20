@@ -213,14 +213,14 @@ describe('ModelSettings dialog (v3.4.4 unified model dialog)', () => {
     );
     const frame = lastFrame() || '';
     const lines = frameLines(frame);
-    // line 1 intact: ↑↓ 选择 … enter 切换 … k Key
-    const hint1 = lines.find(l => l.includes('选择'));
+    // line 1 intact: ↑↓ 选择 … enter 切换 … esc 关闭
+    const hint1 = lines.find(l => l.includes('↑↓'));
     expect(hint1).toBeDefined();
-    expect(hint1).toContain('Key');
-    // line 2 intact: b 上下文长度 · w 上下文窗口 · c 思考强度 · esc 关闭
-    const hint2 = lines.find(l => l.includes('上下文长度'));
+    expect(hint1).toContain('关闭');
+    // line 2 intact: k 服务商Key · b 上下文长度 · w 窗口 · c 思考强度
+    const hint2 = lines.find(l => l.includes('服务商Key'));
     expect(hint2).toBeDefined();
-    expect(hint2).toContain('关闭');
+    expect(hint2).toContain('上下文长度');
     // over-long model id is truncated, every line fits the 64-col dialog
     expect(frame).not.toContain(longId);
     for (const l of lines) expect(stringWidth(l)).toBeLessThanOrEqual(64);
