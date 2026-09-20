@@ -10,6 +10,8 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 
 ### Added
 
+- **流式回答改为"整段实时渲染"**（mcode 稳定尾块思想的 React 化）：正在生成的回答作为一整块 Markdown 在工作区实时重渲染（200ms 节流 + 尾部裁剪），按工作区宽度折行；此前每个 200ms 批量是独立一行，中文流被糊成左侧一条窄窄的碎行（用户黑盒报告：输出只在左侧）。回合结束才固化为完整消息，工具行前后文本保持时序。
+- **/help 直达**：`/help` 此前不在命令表、也无别名映射，回车后被当聊天发给模型（用户感知为"没反应"）。已入命令表（输入即弹补全）；未知 `/xxx` 命令现在提示"未知命令"，不再静默发给模型。
 - **工具调用完整入会话**（此前最大结构性缺口：agent 循环的工具消息只活在局部变量里，跨 turn 模型完全失忆上一轮读过/改过什么，重复劳动 + token 翻倍）：`chatStream` 新增 `onMessage` 镜像，assistant tool_calls 与每个 tool result 同步写入 session；`/resume` 恢复时以 `⎿ name: 摘要` 行呈现工具维度；既有压缩器的"工具组原子性"从此有真实对象。
 - **调用前上下文检查**（mcode beforeLlmCall 的落点思想）：`beforeRound` 钩子在**每轮** provider 调用前估算（系统装配 + 全历史），超过 `窗口 − max(16k 预留, maxTokens+2k)` 即先行压缩——旧逻辑只在 turn 末用上一轮 usage 判断，单个工具密集 turn 中途撞窗会硬 400。
 - **runaway-guard 软提醒**（思想采纳自 mcode runaway-guard）：同一工具调用（含参数指纹）一轮内重复达 3 次即注入 `[SYSTEM REMINDER]` 要求换方法/换工具/问用户——软纠正不硬停，合法重试不受影响。

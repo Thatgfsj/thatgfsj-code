@@ -4,6 +4,7 @@ import { Box, Text, useStdout } from 'ink';
 import chalk from 'chalk';
 import { Header } from './components/Header.js';
 import { ChatMessage } from './components/ChatMessage.js';
+import { Markdown } from './components/Markdown.js';
 import { Thinking } from './components/Thinking.js';
 import { UserInput } from './components/UserInput.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -17,7 +18,7 @@ import { PlanApproval } from './components/PlanApproval.js';
 import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
-import { buildWindow } from './window.js';
+import { buildWindow, estimateMsgLines, clipContentToRows } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
@@ -56,7 +57,7 @@ type ViewMode = 'chat' | 'model_select' | 'init_wizard' | 'model_settings';
  * sits in the bottom-right corner at all times.
  */
 export function TuiApp({ app }: Props) {
-  const { messages, isThinking, queuedMessage, sendMessage, cancel, hydrateMessages, clearMessages } = useChat(app);
+  const { messages, isThinking, queuedMessage, streamingView, sendMessage, cancel, hydrateMessages, clearMessages } = useChat(app);
   const { handleCommand } = useCommands(app);
   const [systemMessages, setSystemMessages] = useState<MessageData[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
@@ -377,9 +378,17 @@ export function TuiApp({ app }: Props) {
       + (app.permissionMode !== 'ask' ? 1 : 0) // mode badge line
       + (showContextPanel ? 0 : 10);           // PlanPanel fallback below the row
   const workspaceRows = Math.max(3, terminalRows - 1 - bottomReserve);
-  const windowHeaderRows = scroll !== null ? 1 : 0;
   const chatWidth = terminalWidth - 4 - (showContextPanel ? PANEL_RESERVE : 0);
-  const win = buildWindow(allMessages, scroll, chatWidth, workspaceRows - windowHeaderRows - 1);
+  // v3.3.0: the live streaming block shares the workspace budget — it is
+  // capped (tail-clipped) so a long answer can never push the frame past
+  // the viewport.
+  const STREAM_CAP = Math.min(14, Math.max(4, workspaceRows - 3));
+  const streamView = streamingView
+    ? clipContentToRows(streamingView, chatWidth, STREAM_CAP)
+    : null;
+  const streamEst = streamView ? estimateMsgLines({ role: 'assistant', content: streamView }, chatWidth) : 0;
+  const windowHeaderRows = scroll !== null ? 1 : 0;
+  const win = buildWindow(allMessages, scroll, chatWidth, workspaceRows - windowHeaderRows - 1 - streamEst);
   const contextBreakdown = useMemo(() => {
     try {
       const bd = app.prompts.estimateBreakdown();
@@ -580,6 +589,14 @@ export function TuiApp({ app }: Props) {
               {win.messages.map((m, i) => (
                 <ChatMessage key={`${win.start + i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
               ))}
+              {streamView && (
+                <Box flexDirection="column" marginBottom={1}>
+                  <Text color={theme.textFaint}>
+                    ▪ {app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}{cfg.model ? ` · ${cfg.model}` : ''}
+                  </Text>
+                  <Markdown content={streamView} width={chatWidth} />
+                </Box>
+              )}
             </Box>
             {contextPanel && (
               <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} paddingLeft={2}>

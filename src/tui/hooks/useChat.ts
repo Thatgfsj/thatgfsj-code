@@ -16,6 +16,14 @@ interface ChatState {
    * which is what keeps the mouse wheel usable while streaming.
    */
   messages: MessageData[];
+  /**
+   * v3.3.0: the CURRENT text run, re-rendered as one growing markdown
+   * block in the live frame (null when no text is streaming). Committed
+   * as a real message at every boundary — a 200ms batch of Chinese is a
+   * handful of chars, so per-batch lines wrapped into a narrow ragged
+   * column (user report: 输出只在左侧).
+   */
+  streamingView: string | null;
   isThinking: boolean;
   queuedMessage: string | null;
   /** Latest usage from the provider (cache chips / auto-compact checks). */
@@ -53,6 +61,7 @@ const FLUSH_MS = 200;
 export function useChat(app: App) {
   const [state, setState] = useState<ChatState>({
     messages: [],
+    streamingView: null,
     isThinking: false,
     queuedMessage: null,
     lastUsage: null,
@@ -89,57 +98,40 @@ export function useChat(app: App) {
 
     app.session.addMessage('user', input);
 
-    // ── streamed-text batching ──
-    let pendingText = '';
+    // ── streamed-text LIVE rendering (v3.3.0, mcode stable-tail idea) ──
+    // The current text run accumulates in viewRef and re-renders as ONE
+    // growing markdown block in the live frame every FLUSH_MS. Committing
+    // each batch as its own Static line (the old design) wrapped Chinese
+    // streams into a narrow ragged column — a 200ms batch of Chinese is
+    // only a handful of chars. The block is committed as a real assistant
+    // message at every boundary (tool line, round end), so history keeps
+    // the model's paragraph structure.
+    let viewText = '';
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    /**
-     * final=true flushes everything (round end AND every tool-line
-     * commit — held text must land BEFORE the ⎿ line or the tool output
-     * splits the sentence and the halves fuse back in the wrong order,
-     * the "alphabeta" ghost the adversarial audit demonstrated).
-     * Otherwise the trailing partial word stays buffered: every Static
-     * item prints on its own line, so flushing at an arbitrary character
-     * would split words across lines ("Thatg / fsj"). CJK counts as a
-     * cut point — CJK words are 1-3 chars, and holding 500 chars of
-     * Chinese made streams jump in slabs.
-     */
-    const isWideChar = (code: number): boolean =>
-      (code >= 0x2e80 && code <= 0xd7ff) || (code >= 0xf900 && code <= 0xff60) || code >= 0xffe0;
-    const flushText = (final = false) => {
+    const flushText = () => {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (!pendingText) return;
-      let chunk = pendingText;
-      if (!final && !/[\s。！？，、；：…）】」』"']$/.test(chunk)) {
-        let cut = Math.max(chunk.lastIndexOf(' '), chunk.lastIndexOf('\n')) + 1;
-        if (cut === 0) {
-          for (let i = chunk.length - 1; i >= 0; i--) {
-            if (isWideChar(chunk.charCodeAt(i))) { cut = i + 1; break; }
-          }
-        }
-        if (cut > 0) {
-          pendingText = chunk.slice(cut);
-          chunk = chunk.slice(0, cut);
-        } else if (chunk.length < 120) {
-          return; // short ASCII partial word — keep buffering
-        } else {
-          pendingText = '';
-        }
-      } else {
-        pendingText = '';
-      }
-      commit({ content: chunk, plain: true });
+      setState(prev => ({ ...prev, streamingView: viewText || null }));
     };
     const scheduleFlush = () => {
       if (flushTimer) return;
       flushTimer = setTimeout(() => { flushTimer = null; flushText(); }, FLUSH_MS);
       flushTimer.unref?.();
     };
-    const writeText = (s: string) => { pendingText += s; scheduleFlush(); };
+    const writeText = (s: string) => { viewText += s; scheduleFlush(); };
+    /** Commit the accumulated live block as ONE markdown message. */
+    const commitStreamedView = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (!viewText) { setState(prev => ({ ...prev, streamingView: null })); return; }
+      const content = viewText;
+      viewText = '';
+      commit({ role: 'assistant', content });
+      setState(prev => ({ ...prev, streamingView: null }));
+    };
 
     const cfgModel = app.config.get().model || '';
-    /** Dim plain line (tool calls, chips, stats). Final-flushes held text
-     * first so streamed text stays BEFORE the ⎿ line it preceded. */
-    const commitDim = (line: string) => { flushText(true); commit({ content: line, plain: true, dim: true }); };
+    /** Dim plain line (tool calls, chips, stats). The live block lands
+     * BEFORE the ⎿ line it preceded (chronological order). */
+    const commitDim = (line: string) => { commitStreamedView(); commit({ content: line, plain: true, dim: true }); };
 
     // First turn in this session: brand header as Static items.
     if (!headerCommittedRef.current) {
@@ -148,13 +140,9 @@ export function useChat(app: App) {
       commit({ content: `◆ THATGFSJ v${getVersion()}`, plain: true, dim: true });
       commit({ content: '─'.repeat(Math.max(20, cols - 2)), plain: true, dim: true });
     }
-    // Assistant label line (once per turn, before the first streamed char).
-    let labelWritten = false;
-    const writeLabelOnce = () => {
-      if (labelWritten) return;
-      labelWritten = true;
-      commitDim(`▪ Build${cfgModel ? ` · ${cfgModel}` : ''}`);
-    };
+    // v3.3.0: the per-message label now lives with the message itself —
+    // the committed assistant message and the live block each render their
+    // own ▪ line (the old separate label Static line duplicated them).
 
     /** Pending `⎿ name(args) ⟳` line. */
     const writePendingLine = (tc: ToolCall) => {
@@ -184,7 +172,7 @@ export function useChat(app: App) {
           case 'text':
             if (chunk.content) {
               fullContent += chunk.content;
-              if (!sawOutput) { sawOutput = true; writeLabelOnce(); setState(prev => ({ ...prev, isThinking: false })); }
+              if (!sawOutput) { sawOutput = true; setState(prev => ({ ...prev, isThinking: false })); }
               writeText(chunk.content);
             }
             break;
@@ -192,7 +180,7 @@ export function useChat(app: App) {
           case 'thinking':
             // Reasoning text: not part of fullContent unless showThinking.
             if (app.showThinking && chunk.content) {
-              if (!sawOutput) { sawOutput = true; writeLabelOnce(); setState(prev => ({ ...prev, isThinking: false })); }
+              if (!sawOutput) { sawOutput = true; setState(prev => ({ ...prev, isThinking: false })); }
               writeText(chunk.content);
             }
             break;
@@ -216,7 +204,7 @@ export function useChat(app: App) {
             break;
         }
       }
-      flushText(true);
+      commitStreamedView();
 
       // v2.2.4: never persist aborted/truncated assistant messages (the
       // [已中断] hallucination loop — see SessionManager.addMessageSafe).
@@ -252,7 +240,7 @@ export function useChat(app: App) {
       // Plan mode's approval dialog triggers from here.
       if (!wasAborted) app.onTurnComplete?.();
     } catch (error: any) {
-      flushText(true);
+      commitStreamedView();
       if (abortRef.current) {
         commit({ content: '[已中断]', plain: true });
         setState(prev => ({ ...prev, isThinking: false }));

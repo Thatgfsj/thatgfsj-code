@@ -69,6 +69,31 @@ export interface WindowResult {
 }
 
 /**
+ * v3.3.0: trim `content` to its TAIL so it renders within `rows` wrapped
+ * lines (for the live streaming block). Wrap-aware like buildWindow; the
+ * head is replaced by an ellipsis marker.
+ */
+export function clipContentToRows(content: string, width: number, rows: number): string {
+  const budget = Math.max(1, rows);
+  if (wrappedLines(content, width) <= budget) return content;
+  const lines = content.split('\n');
+  let kept: string[] = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const candidate = lines[i] + (kept.length ? '\n' + kept.join('\n') : '');
+    if (wrappedLines(candidate, width) > budget) break;
+    kept = [lines[i], ...kept];
+  }
+  if (kept.length === 0) {
+    // First line alone overflows: cut the line by characters to fit.
+    const first = lines[lines.length - 1] ?? '';
+    let s = first;
+    while (s.length > 1 && wrappedLines(s, width) > budget) s = s.slice(Math.floor(s.length / 4));
+    return '…' + s;
+  }
+  return '…' + kept.join('\n');
+}
+
+/**
  * Build the visible window ending at `end` (exclusive). `scroll` > 0 moves
  * the end backwards (pager); null = live tail. Clipping is WRAP-aware and
  * iterative: cutting by source-line count alone is a no-op for messages

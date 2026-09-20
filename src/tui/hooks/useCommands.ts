@@ -52,6 +52,7 @@ const CMD_ALIASES: Record<string, string> = {
 };
 
 export const COMMAND_LIST = [
+  { name: '/help', desc: '查看帮助' },
   { name: '/模型', desc: '切换模型' },
   { name: '/models', desc: '模型设置（添加/上下文/思考）' },
   { name: '/服务商', desc: '更换服务商' },
@@ -438,6 +439,16 @@ export function useCommands(app: App) {
       };
     }
 
+    // v3.3.0: an unknown /-command must NEVER fall through to the LLM as a
+    // chat prompt — the user's "/help" (not in COMMAND_LIST, no alias entry)
+    // silently became a chat message and looked like a dead key (user bug
+    // report). Tell the user it is unknown instead.
+    if (name.startsWith('/')) {
+      return {
+        handled: true,
+        output: `未知命令: ${name}（输入 /help 查看全部命令）`,
+      };
+    }
     return { handled: false };
   }, [app]);
 

@@ -83,7 +83,10 @@ describe('SessionManager persistence', () => {
     }
   });
 
-  it('pruneSessions keeps the newest 20 files', () => {
+  // 30s: this test writes to the REAL ~/.thatgfsj/sessions directory and
+  // contends with any live gfcode instance's own persists (Windows file
+  // locking) — 5s flaked under load while a session was actually running.
+  it('pruneSessions keeps the newest 20 files', { timeout: 30000 }, () => {
     for (let i = 0; i < 23; i++) {
       const s = new SessionManager(50);
       s.addMessage('user', `session ${i}`);

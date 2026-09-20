@@ -81,8 +81,8 @@ function Harness({ app, snapshots, cancelRef }: {
   );
 }
 
-describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
-  it('streams text/tools to stdout, keeps them out of React state, persists fullContent', async () => {
+describe('useChat streaming (v3.3.0 live-paragraph rendering)', () => {
+  it('commits streamed text as ONE markdown message at boundaries; tool lines keep order', async () => {
     const captured = { persisted: [] as string[], sessionMsgs: [] as Array<{ role: string; content: unknown }> };
     const snapshots = { messages: [] as MessageData[][], usage: [] as Array<Usage | null> };
     const chunks: StreamChunk[] = [
@@ -100,27 +100,16 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
       expect(captured.persisted).toHaveLength(1);
     });
     // let the final React commit flush
-    await new Promise(r => setTimeout(r, 120));
+    await new Promise(r => setTimeout(r, 150));
 
-    // 1. fullContent accumulation + persistence unchanged (compression off):
-    //    user rides addMessage, assistant rides addMessageSafe — same as before.
+    // 1. fullContent accumulation + persistence unchanged (compression off).
     expect(captured.persisted[0]).toBe('ZQX-A-B-C ZQX-DONE');
     expect(captured.sessionMsgs).toEqual([{ role: 'user', content: 'hello' }]);
 
-    // 2. v3.0.18: streamed content DOES enter the Static list, but only as
-    //    plain items — never as a labeled assistant message that the frame
-    //    would re-render.
-    for (const msgs of snapshots.messages) {
-      for (const m of msgs) {
-        if (m.role === 'assistant' && String(m.content).includes('ZQX')) {
-          expect(m.plain).toBe(true);
-        }
-      }
-    }
-
-    // 3. output went through the stdout write channel instead: streamed text
-    //    (flushed in frame-budget batches), the pending ⟳ line, the result
-    //    line and the token chip all landed.
+    // 2. v3.3.0: the live block commits as ONE markdown message per text
+    //    run ('ZQX-A-B' before the tool, 'ZQX-DONE…' after) — NOT a pile
+    //    of per-batch plain lines (those wrapped Chinese into a ragged
+    //    narrow column).
     const all = frames.join('');
     expect(all).toContain('ZQX-A-B');
     expect(all).toContain('-C ZQX-DONE');
@@ -129,24 +118,22 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     expect(all).toContain('echo:hi');
     expect(all).toContain('1.2kt');
 
+    // 3. chronological order: first text run, THEN the tool line.
+    expect(all.indexOf('ZQX-A-B')).toBeLessThan(all.indexOf('⎿ echo'));
+
     // 4. usage surfaced for the Header cache chip
     expect(snapshots.usage.at(-1)?.completion_tokens).toBe(1200);
 
-    // 5. the final display list: user message + plain streamed items only
+    // 5. final display list: user message + the two committed text runs
     const finalMsgs = snapshots.messages.at(-1)!;
     expect(finalMsgs.some(m => m.role === 'user' && m.content === 'hello')).toBe(true);
-    for (const m of finalMsgs) {
-      if (m.role === 'assistant') expect(m.plain).toBe(true);
-    }
+    const textMsgs = finalMsgs.filter(m => m.role === 'assistant' && String(m.content).includes('ZQX'));
+    expect(textMsgs.map(m => m.content)).toEqual(['ZQX-A-B', '-C ZQX-DONE']);
   });
 
-  it('flushes streamed text at word boundaries — never splits a word across lines', async () => {
+  it('renders the current run as a live paragraph — words never split across lines', async () => {
     const captured = { persisted: [] as string[], sessionMsgs: [] as Array<{ role: string; content: unknown }> };
     const snapshots = { messages: [] as MessageData[][], usage: [] as Array<Usage | null> };
-    // 'alpha' sits pending >FLUSH_MS (200ms) with no whitespace yet — the
-    // flush must HOLD it back instead of printing a mid-word line, then
-    // join it with the next burst. Every emitted chunk must end at a word
-    // boundary (whitespace) except the final flush at round end.
     const chunks: StreamChunk[] = [
       { type: 'text', content: 'say alpha' },
       { type: 'text', content: 'betomega' },
@@ -157,7 +144,7 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
       ...fakeApp(chunks, captured),
       async *streamResponse(): AsyncGenerator<StreamChunk, { content: string; role: 'assistant' }> {
         yield chunks[0];
-        await new Promise(r => setTimeout(r, 320)); // mid-stream flush fires here
+        await new Promise(r => setTimeout(r, 320)); // live view paints here
         yield chunks[1];
         yield chunks[2];
         await new Promise(r => setTimeout(r, 30));
@@ -171,16 +158,9 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     await new Promise(r => setTimeout(r, 150));
 
     const all = frames.join('');
-    expect(all).toContain('alphabetomega'); // held-back word rejoined, unsplit
-    expect(all).toContain('end');
-    // No emitted line may END mid-word: the only plain text lines are
-    // 'say ' (flushed before the pause) and 'alphabetomega end' (final).
-    const textLines = all.split('\n')
-      .map(l => l.replace(/\s+/g, ' ').trim())
-      .filter(l => l.includes('alpha') || l.includes('say'));
-    for (const line of textLines) {
-      expect(line === 'say' || line.startsWith('alphabetomega end') || line === 'say alphabetomega end').toBe(true);
-    }
+    // The run commits as ONE growing paragraph — 'alphabetomega' is never
+    // split into separate ragged lines.
+    expect(all).toContain('say alphabetomega end');
   });
 
   it('abort keeps streamed text on stdout, skips persistence, adds only a notice', async () => {
@@ -195,6 +175,9 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
       ...fakeApp(chunks, captured),
       async *streamResponse(_msgs?: unknown, opts?: { signal?: AbortSignal }) {
         yield chunks[0];
+        // Abort may fire before this listener attaches — an
+        // already-aborted signal must throw immediately (like fetch does).
+        if (opts?.signal?.aborted) throw new Error('AbortError');
         await new Promise((_, reject) => {
           opts?.signal?.addEventListener('abort', () => reject(new Error('AbortError')), { once: true });
         });
@@ -203,27 +186,24 @@ describe('useChat append-only streaming (v3.0.16 scroll-wheel fix)', () => {
     } as unknown as App;
     const { frames } = render(<Harness app={app} snapshots={snapshots} cancelRef={cancelRef} />);
 
-    // first chunk reached stdout…
-    await vi.waitFor(() => {
-      expect(frames.join('')).toContain('ABORT-MARKER');
-    });
-    // …then the user cancels mid-stream
+    // cancel mid-stream (the live view itself lives in app.tsx's frame,
+    // not in this harness — the committed block appears after the cancel)
     await vi.waitFor(() => {
       expect(cancelRef.current).toBeTruthy();
     });
+    // let the stream actually start (user cancels WHILE it streams)
+    await new Promise(r => setTimeout(r, 150));
     cancelRef.current!();
-    await new Promise(r => setTimeout(r, 120));
+    await vi.waitFor(() => {
+      expect(frames.join('')).toContain('ABORT-MARKER');
+    });
 
     // partial content was NOT persisted (v2.2.4 rule)
     expect(captured.persisted).toEqual([]);
-    // the LAST item is the [已中断] notice; streamed partial text only
-    // appears as plain items (v3.0.18 contract)
+    // the LAST item is the [已中断] notice; the partial live block is
+    // committed for DISPLAY (v3.3.0) but never persisted.
     const flat = snapshots.messages.flat();
     expect(flat.at(-1)?.content).toBe('[已中断]');
-    for (const m of flat) {
-      if (m.role === 'assistant' && String(m.content).includes('ABORT-MARKER')) {
-        expect(m.plain).toBe(true);
-      }
-    }
+    expect(flat.some(m => String(m.content).includes('ABORT-MARKER'))).toBe(true);
   });
 });
