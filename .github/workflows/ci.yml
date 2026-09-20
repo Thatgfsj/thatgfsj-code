@@ -1,0 +1,25 @@
+name: CI
+# v3.4.0 (mcode verify-parity, minimal): one pipeline, both OSes that our
+# users actually run. The 3.2.2 black-screen class of bugs was Windows-only
+# terminal behavior — a Windows job is the minimum viable safety net.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run verify

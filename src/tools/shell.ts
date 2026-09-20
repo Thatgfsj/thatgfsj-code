@@ -49,18 +49,85 @@ const READONLY_GIT_SUBCOMMANDS = new Set([
   'describe', 'ls-files', 'blame', 'shortlog', 'config', 'ls-remote', 'cat-file',
 ]);
 
-/** True when the command (whole string) is classified as read-only. */
+/**
+ * v3.4.0 (mcode-parity hardening): quote-aware segment split. The old naive
+ * split on /&&|\|\||;|\|/ broke `echo "a && b"` into two bogus segments.
+ */
+export function splitShellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; current += ch; continue; }
+    if (ch === '&' && command[i + 1] === '&') { segments.push(current); current = ''; i++; continue; }
+    if (ch === '|' && command[i + 1] === '|') { segments.push(current); current = ''; i++; continue; }
+    if (ch === ';' || ch === '|' || ch === '\n' || ch === '\r') { segments.push(current); current = ''; continue; }
+    current += ch;
+  }
+  segments.push(current);
+  return segments.map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * v3.4.0: commands that re-exec something else. A wrapper prefix must strip
+ * its read-only shortcut (never auto-approve through it) and the INNER
+ * command is what dangerous patterns must see.
+ */
+const WRAPPER_COMMANDS = new Set(['env', 'sudo', 'nohup', 'xargs', 'timeout', 'command', 'nice', 'setsid']);
+
+/** Strip leading wrapper tokens (`env rm -rf /` → `rm -rf /`). */
+function unwrapWrappers(tokens: string[]): string[] {
+  let t = tokens;
+  while (t.length > 0 && WRAPPER_COMMANDS.has(t[0].toLowerCase())) {
+    // skip the wrapper plus option-ish tokens until the inner command word
+    t = t.slice(1);
+    while (t.length > 0 && (t[0].startsWith('-') || /^[A-Za-z_]\w*=/.test(t[0]) || /^\d+$/.test(t[0]))) t = t.slice(1);
+  }
+  return t;
+}
+
+/**
+ * v3.4.0 (mcode bash-fast-allow idea): `TARGET=/etc/shadow type $TARGET` —
+ * when leading assignments exist and later tokens reference them, the
+ * "read-only" surface is a disguise. Conservative bail.
+ */
+function hasAssignmentDeception(tokens: string[]): boolean {
+  const assigned: string[] = [];
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[i])) {
+    assigned.push(tokens[i].slice(0, tokens[i].indexOf('=')));
+    i++;
+  }
+  if (assigned.length === 0 || i >= tokens.length) return false;
+  const rest = tokens.slice(i).join(' ');
+  return assigned.some(name => rest.includes('$' + name) || rest.toLowerCase().includes('%' + name.toLowerCase() + '%'));
+}
+
+/**
+ * True when the command (whole string) is classified as read-only.
+ * v3.4.0: quote-aware segments; wrapper prefixes never auto-approve;
+ * assignment-deception bails; `find` write-capable flags are not read-only.
+ */
 export function isReadOnlyCommand(command: string): boolean {
-  const segments = command.split(/(?:\s*(?:&&|\|\||;|\|)\s*|\r?\n)/).map(s => s.trim()).filter(Boolean);
+  const segments = splitShellSegments(command);
   if (segments.length === 0) return false;
   return segments.every(segment => {
     // Any redirection touches the filesystem — not read-only.
     if (/[<>]/.test(segment)) return false;
-    const tokens = segment.split(/\s+/);
-    const cmd = tokens[0].toLowerCase().replace(/\.exe$|\.cmd$|\.bat$/i, '');
+    const rawTokens = segment.split(/\s+/);
+    // Wrapper prefixes (env/sudo/xargs/…) disqualify the fast-allow path.
+    if (WRAPPER_COMMANDS.has(rawTokens[0].toLowerCase())) return false;
+    if (hasAssignmentDeception(rawTokens)) return false;
+    const cmd = rawTokens[0].toLowerCase().replace(/\.exe$|\.cmd$|\.bat$/i, '');
     if (!READONLY_COMMANDS.has(cmd)) return false;
     // Version/help probes are always safe for interpreters and package managers.
-    const args = tokens.slice(1).map(a => a.toLowerCase());
+    const args = rawTokens.slice(1).map(a => a.toLowerCase());
     if (cmd === 'node' || cmd === 'python' || cmd === 'python3') {
       return args.some(a => /^(-v|--version)$/.test(a)) || args.some(a => a === '--help' || a === '-h');
     }
@@ -79,6 +146,10 @@ export function isReadOnlyCommand(command: string): boolean {
       if (sub === 'config') return args.some(a => a === '--get' || a === '--list' || a.startsWith('--get'));
       if (sub === 'branch') return args.length === 0 || args.every(a => a.startsWith('-'));
       return true;
+    }
+    if (cmd === 'find') {
+      // v3.4.0: `find . -delete` / `-exec …` are write/execute, not inspection.
+      return !args.some(a => ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fls'].includes(a));
     }
     return true;
   });
@@ -109,8 +180,7 @@ export class ShellTool implements Tool {
 
   metadata = {
     permissions: ['execute', 'write', 'network'] as ('read' | 'write' | 'execute' | 'network')[],
-    tags: ['shell', 'system', 'dangerous'],
-    maxDuration: 120000,
+    tags: ['shell', 'system', 'dangerous'],
     version: '1.0.0',
   };
 
@@ -122,19 +192,19 @@ export class ShellTool implements Tool {
 
   /**
    * Check if command matches dangerous patterns.
-   * v3.0.19: split the command into segments on shell chaining operators
-   * (&&, ||, ;, |) and newlines, then check every trimmed segment — a bare
-   * whole-string match let `echo ok && rm -rf /` slip through because the
-   * pattern is anchored to the start of the full string.
-   *
-   * Known limitation (naive, quote-unaware split): `echo "a && b"` is split
-   * into `echo "a` / `b"` — harmless for the current pattern list (no false
-   * block), but a quoted string containing an anchored-dangerous segment,
-   * e.g. `echo "x && rm -rf /"`, WOULD be over-blocked.
+   * v3.0.19: check every segment on chaining operators, not the raw string.
+   * v3.4.0: quote-aware split (`echo "x && rm -rf /"` no longer over-blocks
+   * — but also, wrapper-stripped segments are checked so `env rm -rf /`
+   * cannot hide behind the env prefix).
    */
   private isDangerous(command: string): boolean {
-    const segments = command.split(/(?:\s*(?:&&|\|\||;|\|)\s*|\r?\n)/);
-    return segments.some(segment => DANGEROUS_PATTERNS.some(pattern => pattern.test(segment.trim())));
+    const segments = splitShellSegments(command);
+    return segments.some(segment => {
+      const plain = DANGEROUS_PATTERNS.some(pattern => pattern.test(segment));
+      if (plain) return true;
+      const unwrapped = unwrapWrappers(segment.split(/\s+/)).join(' ');
+      return unwrapped !== segment && DANGEROUS_PATTERNS.some(pattern => pattern.test(unwrapped));
+    });
   }
 
   async execute(params: Record<string, any>, ctx?: ToolContext): Promise<ToolResult> {

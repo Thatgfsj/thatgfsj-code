@@ -7,6 +7,8 @@ dist/
 coverage/
 *.tgz
 hello.txt
+# scratch/debug artifacts from ad-hoc probes
+tmp-*
 # NWT (project-scoped timeline; created on first run)
 .nwt/
 # Local cache stats — created on first chat round

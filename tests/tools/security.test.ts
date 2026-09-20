@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isBlockedHost, isAllowedUrl } from '../../src/tools/browser.js';
-import { ShellTool } from '../../src/tools/shell.js';
+import { ShellTool, isReadOnlyCommand } from '../../src/tools/shell.js';
 
 describe('browser SSRF guard: isBlockedHost', () => {
   it.each([
@@ -76,11 +76,22 @@ describe('shell dangerous-command segmentation', () => {
   });
 
   it('does NOT block a quoted "&&" inside echo arguments', async () => {
-    // Decline at confirmation so nothing actually executes; reaching the
-    // "cancelled" error proves the blacklist did not fire first.
+    // v3.4.0 quote-aware split: `echo "a && b"` is ONE read-only segment —
+    // no blacklist hit AND no confirmation needed; it simply runs.
     const r = await tool.execute({ command: 'echo "a && b"' }, { confirmAction: async () => false });
-    expect(r.success).toBe(false);
-    expect(r.error).not.toContain('Blocked');
-    expect(r.error).toContain('cancelled');
+    expect(r.success).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(r.output).toContain('a && b');
+  });
+
+  it('wrapper prefixes disqualify the read-only fast path (env rm -rf /)', () => {
+    expect(isReadOnlyCommand('env rm -rf /x')).toBe(false);
+    expect(isReadOnlyCommand('sudo git status')).toBe(false);
+    // assignment deception: TARGET=x type $TARGET must not be auto-allowed
+    expect(isReadOnlyCommand('TARGET=x type $TARGET')).toBe(false);
+    // find write-capable flags
+    expect(isReadOnlyCommand('find . -delete')).toBe(false);
+    expect(isReadOnlyCommand('find . -name x -exec rm {} \\;')).toBe(false);
+    expect(isReadOnlyCommand('find . -name x')).toBe(true);
   });
 });

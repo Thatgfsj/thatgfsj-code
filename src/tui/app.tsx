@@ -2,7 +2,6 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import chalk from 'chalk';
-import { Header } from './components/Header.js';
 import { ChatMessage } from './components/ChatMessage.js';
 import { Markdown } from './components/Markdown.js';
 import { Thinking } from './components/Thinking.js';

@@ -320,8 +320,6 @@ program
           }
           app.session.persist();
 
-          app.session.persist();
-
           // v3.0.13: token-aware auto-compact (headless path).
           const compactNotice = app.maybeAutoCompact(lastUsage);
           if (compactNotice) {

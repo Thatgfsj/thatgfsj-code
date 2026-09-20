@@ -9,11 +9,10 @@ import type { StreamChunk, ToolCall, ToolCallResult, Usage } from '../../types.j
 
 interface ChatState {
   /**
-   * The Static item list. EVERYTHING the user sees — user messages, streamed
-   * assistant text (in batched plain chunks), tool lines, stats, notices —
-   * lives here as immutable entries. Ink's <Static> renders each entry
-   * exactly once into the terminal scrollback and never touches it again,
-   * which is what keeps the mouse wheel usable while streaming.
+   * Everything the user sees EXCEPT the current text run — user messages,
+   * committed assistant runs, ⎿ tool lines, chips, notices — as immutable
+   * entries. v3.3.0: rendered by the alt-screen viewport window
+   * (app.tsx buildWindow), no longer via Ink <Static>.
    */
   messages: MessageData[];
   /**
@@ -33,21 +32,14 @@ interface ChatState {
 /**
  * Hook for managing chat state and the streaming response lifecycle.
  *
- * v3.0.18 (final scroll fix — "everything is Static"): the previous
- * attempt (3.0.15/16) wrote streamed text to stdout BESIDE the live Ink
- * frame. Manual writes move the cursor without telling Ink, so Ink's next
- * frame redraw of the (constant-height) input box stomped old frame
- * copies into the middle of the streamed text — the `┏━━┓` stamping the
- * user reported. The robust design, per the Claude Code architecture
- * study, is simpler:
- *
- *   - streamed text is buffered and committed as NEW <Static> items every
- *     ~200ms (Static renders each item once, then never re-renders it —
- *     Ink manages all cursor movement itself);
- *   - tool pending/result lines, the token chip, and the per-round stats
- *     line are Static items too;
- *   - the live frame is ONLY the constant-height region (thinking spinner
- *     + input box + queue notice).
+ * v3.3.0 (live-paragraph rendering, mcode stable-tail idea): streamed text
+ * accumulates in a view buffer that re-renders as ONE growing markdown
+ * block every ~200ms; the block commits as a real assistant message at
+ * every boundary (tool line, round end). Earlier designs shipped per-batch
+ * lines: 3.0.15/16 wrote to stdout beside the Ink frame (the `┏━━┓`
+ * stamping bug), 3.0.18 moved everything into <Static> items (which
+ * wrapped Chinese streams into a narrow ragged column — each 200ms batch
+ * is only a handful of CJK chars).
  *
  * Persisted message order still matches the source chunks exactly:
  *   - text chunks → accumulated into fullContent (compressed via

@@ -4,6 +4,31 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.4.0] - 2026-09-20  - 全面测试与维护（成熟 CLI 实践对标）
+
+> 本轮为维护版本：三个子代理分别对标成熟 CLI 工程实践（MiniMax mcode）、执行完整验证（build/tsc/242 用例/63 项冒烟/e2e/依赖审计）、逐项核实遗留技术债后统一修复。
+
+### Security
+
+- **shell 只读快速通道加固**（堵住三个免确认绕过）：引号感知分段（`echo "a && b"` 不再被伪切分）；`env`/`sudo`/`nohup`/`xargs` 等包装前缀永不走免确认且危险模式匹配解包后的内层命令（`env rm -rf /` 现被硬拦）；`K=V cmd $K` 环境变量伪装形状直接剥夺免确认；`find` 的 `-delete/-exec/-execdir/-ok` 等写/执行参数不再视为只读。
+- **browser DNS rebinding 防护**：open 动作解析主机名并对每个解析结果复查内网/环回规则——公网域名解析到 127.0.0.1/169.254.x 无法再绕过 SSRF 防护。
+- **apply_patch 写入原子化**：写入前记录回滚日志（原字节或"不存在"），失败按倒序完整回滚并报告"已回滚、无文件变更"——不再留下部分应用的半套改动。
+
+### Removed
+
+- 死代码清理：HookManager（建好未接线，整体移除）、ChatList（Static 渲染已废弃，测试改为走真实渲染路径）、`Header` 未用导入、skills `autoActivate` 无调用方法、StatusBar 的 SessionStats 死契约（ctx/↑↓/节省 ¥ 分支不可达）、`metadata.maxDuration` 声明（全库无消费方）、headless 路径重复的 `session.persist()`。
+- 仓库卫生：移除误提交的 `m.role+'`、`setTimeout(r` 畸形文件与 `build.log`；`.gitignore` 增加 `tmp-*`。
+- dev 依赖：`npm audit fix`（vitest 4.1.11，修复 @vitest/mocker GHSA-82fw-gwwq-j7x9，仅影响开发环境）。
+
+### Added
+
+- **工程化（mcode verify 思想的最小落地）**：`npm run verify` 一条命令跑全部质量门禁（build + 242 用例 + 63 项冒烟断言），prepublishOnly 与本地、CI 同源；新增 GitHub Actions（ubuntu + windows × node 20/22）与 dependabot（npm + actions，周检）。
+- crash 日志轮转：`~/.thatgfsj/last-error.log` 超过 200KB 自动清空重建，不再无限增长。
+
+### Fixed
+
+- README 与实现对齐：shell 工具描述改为"只读免确认"（原文"每次确认"与分级审批矛盾）；apply_patch 特性描述补"写入失败自动回滚"。
+
 ## [3.3.0] - 2026-09-20  - 取精华 MiniMax mcode：补齐三个结构性缺口
 
 > 基于 3 个子代理对 mcode（MiniMax-AI/minimax-code，MIT）与本项目的双向调查与差异分析（66.8 万行 vs 1.4 万行），按"用户价值 × 实现成本"落地 P0 项。思想采纳、代码重写，无逐字移植。

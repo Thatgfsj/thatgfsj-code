@@ -26,7 +26,6 @@ import { LLMService } from '../llm/index.js';
 import { SessionManager, sanitizeLoadedMessages } from '../session/index.js';
 import { ToolRegistry } from '../tools/index.js';
 import type { ToolContext } from '../tools/types.js';
-import { HookManager } from '../hooks/index.js';
 import { SystemPromptBuilder } from '../prompts/index.js';
 import { SkillRegistry } from '../skills/index.js';
 import { CacheStatsStore } from '../cache/stats.js';
@@ -60,7 +59,6 @@ export class App {
   llm: LLMService;
   session: SessionManager;
   tools: ToolRegistry;
-  hooks: HookManager;
   prompts: SystemPromptBuilder;
   skills: SkillRegistry;
   /**
@@ -118,7 +116,6 @@ export class App {
     llm: LLMService,
     session: SessionManager,
     tools: ToolRegistry,
-    hooks: HookManager,
     prompts: SystemPromptBuilder,
     skills: SkillRegistry,
     cacheStats: CacheStatsStore,
@@ -128,7 +125,6 @@ export class App {
     this.llm = llm;
     this.session = session;
     this.tools = tools;
-    this.hooks = hooks;
     this.prompts = prompts;
     this.skills = skills;
     this.cacheStats = cacheStats;
@@ -151,7 +147,6 @@ export class App {
       );
     };
     const tools = new ToolRegistry();
-    const hooks = new HookManager();
     const skills = new SkillRegistry();
     let mcpResults: App['mcpStartupResults'] = [];
 
@@ -196,7 +191,7 @@ export class App {
       permissionMode: 'ask',
       skillsPrompt: skills.getActivePrompts(),
     });
-    const app = new App(config, llm, session, tools, hooks, prompts, skills, cacheStats, mcp);
+    const app = new App(config, llm, session, tools, prompts, skills, cacheStats, mcp);
     app.mcpStartupResults = mcpResults;
     app.usingBuiltinModel = usingBuiltinModel;
 

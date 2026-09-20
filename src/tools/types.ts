@@ -26,8 +26,7 @@ export interface ToolInputSchema {
 }
 
 export interface ToolMetadata {
-  permissions?: ('read' | 'write' | 'execute' | 'network')[];
-  maxDuration?: number;
+  permissions?: ('read' | 'write' | 'execute' | 'network')[];
   tags?: string[];
   version?: string;
   deprecated?: string;

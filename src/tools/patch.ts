@@ -414,7 +414,6 @@ export class ApplyPatchTool implements Tool {
   metadata = {
     permissions: ['write' as const],
     tags: ['file', 'patch', 'edit'],
-    maxDuration: 30000,
     version: '1.0.0',
   };
 
@@ -452,14 +451,21 @@ export class ApplyPatchTool implements Tool {
     const touched: string[] = [];
     let totalAdded = 0;
     let totalRemoved = 0;
+    /** v3.4.0: rollback journal — original bytes (or 'absent') per written
+     * path, so a mid-patch failure restores the pre-patch state instead of
+     * leaving "partially applied" half-forests behind. */
+    const journal: Array<{ path: string; existed: boolean; content: Buffer | null }> = [];
     try {
       for (const p of planned) {
         if (p.patch.kind === 'delete') {
+          journal.push({ path: p.originalPath, existed: existsSync(p.originalPath), content: existsSync(p.originalPath) ? readFileSync(p.originalPath) : null });
           unlinkSync(p.originalPath);
           touched.push(`− ${p.originalPath}`);
         } else {
           const dir = dirname(p.finalPath);
           if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          const existed = existsSync(p.finalPath);
+          journal.push({ path: p.finalPath, existed, content: existed ? readFileSync(p.finalPath) : null });
           if (p.patch.kind === 'update' && p.finalPath !== p.originalPath && existsSync(p.originalPath)) {
             writeFileSync(p.finalPath, p.resultContent!, 'utf-8');
             unlinkSync(p.originalPath);
@@ -472,7 +478,18 @@ export class ApplyPatchTool implements Tool {
         totalRemoved += p.removed;
       }
     } catch (error: any) {
-      return { success: false, error: `Patch partially applied before failure: ${error.message}. Applied so far: ${touched.join(', ') || 'none'}.` };
+      // v3.4.0: roll back everything this patch touched, newest first.
+      try {
+        for (let i = journal.length - 1; i >= 0; i--) {
+          const j = journal[i];
+          if (j.existed && j.content !== null) {
+            writeFileSync(j.path, j.content);
+          } else if (!j.existed) {
+            try { unlinkSync(j.path); } catch { /* wasn't created */ }
+          }
+        }
+      } catch { /* rollback is best-effort; report both failures */ }
+      return { success: false, error: `Patch failed and was ROLLED BACK (no files changed): ${error.message}` };
     }
 
     const names = planned.map(p => p.patch.moveTo || p.patch.path).join(', ');

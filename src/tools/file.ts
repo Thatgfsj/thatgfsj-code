@@ -31,8 +31,7 @@ export class FileTool implements Tool {
 
   metadata = {
     permissions: ['read', 'write'] as ('read' | 'write' | 'execute' | 'network')[],
-    tags: ['file', 'filesystem'],
-    maxDuration: 30000,
+    tags: ['file', 'filesystem'],
     version: '1.0.0'
   };
 

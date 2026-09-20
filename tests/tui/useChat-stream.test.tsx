@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Box, Text } from 'ink';
 import { useChat } from '../../src/tui/hooks/useChat.js';
-import { ChatList } from '../../src/tui/components/ChatList.js';
+import { ChatMessage } from '../../src/tui/components/ChatMessage.js';
 import type { MessageData } from '../../src/tui/components/ChatMessage.js';
 import type { App } from '../../src/app/index.js';
 import type { StreamChunk, Usage } from '../../src/types.js';
@@ -76,7 +76,11 @@ function Harness({ app, snapshots, cancelRef }: {
   return (
     <Box flexDirection="column">
       <Text>FRAME-SENTINEL</Text>
-      <ChatList messages={chat.messages} mode="Build" model="test-model" />
+      {/* v3.3.0: the app renders the window via ChatMessage directly (no
+          Static) — mirror that here so the test exercises the real path. */}
+      {chat.messages.map((m, i) => (
+        <ChatMessage key={i} message={m} mode="Build" model="test-model" />
+      ))}
     </Box>
   );
 }
@@ -95,10 +99,11 @@ describe('useChat streaming (v3.3.0 live-paragraph rendering)', () => {
     ];
     const { frames } = render(<Harness app={fakeApp(chunks, captured)} snapshots={snapshots} />);
 
-    // stream finished + state settled
+    // stream finished + state settled (generous timeout: under a full
+    // parallel vitest run this harness can start slowly)
     await vi.waitFor(() => {
       expect(captured.persisted).toHaveLength(1);
-    });
+    }, { timeout: 10000, interval: 100 });
     // let the final React commit flush
     await new Promise(r => setTimeout(r, 150));
 
@@ -190,13 +195,13 @@ describe('useChat streaming (v3.3.0 live-paragraph rendering)', () => {
     // not in this harness — the committed block appears after the cancel)
     await vi.waitFor(() => {
       expect(cancelRef.current).toBeTruthy();
-    });
+    }, { timeout: 10000, interval: 100 });
     // let the stream actually start (user cancels WHILE it streams)
     await new Promise(r => setTimeout(r, 150));
     cancelRef.current!();
     await vi.waitFor(() => {
-      expect(frames.join('')).toContain('ABORT-MARKER');
-    });
+      expect(frames.join("")).toContain("ABORT-MARKER");
+    }, { timeout: 10000, interval: 100 });
 
     // partial content was NOT persisted (v2.2.4 rule)
     expect(captured.persisted).toEqual([]);

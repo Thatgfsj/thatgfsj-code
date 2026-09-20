@@ -102,18 +102,6 @@ export class SkillRegistry {
 
     return active.map(s => `### Skill: ${s.name}\n${s.prompt}`).join('\n\n');
   }
-
-  /**
-   * Auto-activate skills based on user input
-   */
-  autoActivate(input: string): void {
-    const lower = input.toLowerCase();
-    for (const skill of this.skills.values()) {
-      if (skill.autoActivate?.some(kw => lower.includes(kw))) {
-        this.activeSkills.add(skill.id);
-      }
-    }
-  }
 }
 
 export {

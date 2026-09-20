@@ -20,6 +20,7 @@
 
 import type { Tool, ToolContext, ToolResult } from './types.js';
 import { URL } from 'node:url';
+import { lookup } from 'node:dns/promises';
 
 const GOTO_TIMEOUT_MS = 25000;
 const MAX_PAGE_TEXT = 6000;
@@ -141,7 +142,6 @@ export class BrowserTool implements Tool {
   metadata = {
     permissions: ['network'] as ('read' | 'write' | 'execute' | 'network')[],
     tags: ['browser', 'web', 'network'],
-    maxDuration: 60000,
     version: '1.0.0',
   };
 
@@ -347,6 +347,18 @@ export class BrowserTool implements Tool {
         if (!isAllowedUrl(normalized)) {
           return { success: false, error: 'blocked: 不允许访问内网/环回地址' };
         }
+        // v3.4.0: DNS rebinding protection — resolve the hostname and run
+        // EVERY address through the same intranet rules. isBlockedHost only
+        // sees the literal hostname; a public domain resolving to
+        // 127.0.0.1 / 169.254.x would otherwise sail through.
+        try {
+          const host = new URL(normalized).hostname;
+          const addrs = await lookup(host, { all: true, verbatim: true });
+          const bad = addrs.find(a => isBlockedHost(a.address));
+          if (bad) {
+            return { success: false, error: `blocked: ${host} 解析到 ${bad.address}（内网/环回地址，DNS rebinding 防护）` };
+          }
+        } catch { /* resolution failure: let page.goto surface the real error */ }
         const browser = await this.launch();
         const { page, closeOnAbort } = await this.gotoWithRetry(
           browser,
