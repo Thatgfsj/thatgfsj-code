@@ -17,7 +17,7 @@ import { PlanApproval } from './components/PlanApproval.js';
 import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
-import { buildWindow, estimateMsgLines, clipContentToRows } from './window.js';
+import { buildWindow, estimateMsgLines, clipContentToRows, maxUsefulScroll } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
@@ -105,10 +105,16 @@ export function TuiApp({ app }: Props) {
   const scrollBy = useCallback((d: number) => {
     setScroll(prev => {
       const next = (prev ?? 0) + d;
-      const max = Math.max(0, allMessagesRef.current.length - 1);
+      // v3.4.1: clamp at the USEFUL ceiling — past it the window would only
+      // hide the newest messages without revealing anything older (at the
+      // old length-1 clamp the pager showed nothing but the first message).
+      const w = terminalWidth - 4 - (terminalWidth >= 100 ? 41 : 0);
+      const budget = Math.max(3, terminalRows - 11);
+      const max = maxUsefulScroll(allMessagesRef.current, w, budget);
+      if (max === 0) return null;
       return next <= 0 ? null : Math.min(next, max);
     });
-  }, []);
+  }, [terminalWidth, terminalRows]);
   // v3.2.2: new output no longer yanks a paged user back to the tail —
   // paging must survive streaming (each 200ms flush used to reset scroll).
   // The window recomputes by itself; scroll resets only explicitly:
@@ -388,6 +394,7 @@ export function TuiApp({ app }: Props) {
   const streamEst = streamView ? estimateMsgLines({ role: 'assistant', content: streamView }, chatWidth) : 0;
   const windowHeaderRows = scroll !== null ? 1 : 0;
   const win = buildWindow(allMessages, scroll, chatWidth, workspaceRows - windowHeaderRows - 1 - streamEst);
+  const maxScroll = maxUsefulScroll(allMessages, chatWidth, workspaceRows - 2);
   const contextBreakdown = useMemo(() => {
     try {
       const bd = app.prompts.estimateBreakdown();
@@ -582,7 +589,7 @@ export function TuiApp({ app }: Props) {
             <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={1}>
               {scroll !== null && (
                 <Text color={theme.textFaint}>
-                  ── 翻页 {Math.min(scroll, Math.max(0, allMessages.length - 1))}/{Math.max(0, allMessages.length - 1)} · ↑ 更早 · ↓ 返回 · esc 退出 ──
+                  ── 翻页 {Math.min(scroll, maxScroll)}/{maxScroll} · ↑ 更早 · ↓ 返回 · esc 退出 ──
                 </Text>
               )}
               {win.messages.map((m, i) => (

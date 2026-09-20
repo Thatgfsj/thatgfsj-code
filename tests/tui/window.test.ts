@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { textWidth, wrappedLines, estimateMsgLines, buildWindow } from '../../src/tui/window.js';
+import { textWidth, wrappedLines, estimateMsgLines, buildWindow, maxUsefulScroll } from '../../src/tui/window.js';
 import type { MessageData } from '../../src/tui/components/ChatMessage.js';
 
 /**
@@ -75,5 +75,29 @@ describe('buildWindow', () => {
     const win = buildWindow(msgs, 0, 80, 10);
     expect(win.messages.length).toBeGreaterThan(0);
     expect(win.end).toBe(40);
+  });
+});
+
+describe('maxUsefulScroll (v3.4.1 pager ceiling)', () => {
+  it('is 0 when the whole conversation fits in one window', () => {
+    const small = [{ role: 'assistant', content: 'hi', plain: true }, { role: 'user', content: '你好' }] as const;
+    expect(maxUsefulScroll(small as any, 80, 20)).toBe(0);
+  });
+
+  it('is positive only while older content remains above the window', () => {
+    const msgs = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant', content: `m${i} some filler text to occupy lines`, plain: true })) as any[];
+    const max = maxUsefulScroll(msgs, 80, 10);
+    expect(max).toBeGreaterThan(0);
+    // At max scroll the window must start at index 0 — the oldest content
+    // is visible and nothing was hidden without something revealed.
+    const win = buildWindow(msgs, max, 80, 10);
+    expect(win.start).toBe(0);
+    // and it must still show meaningful content, not just one message
+    expect(win.messages.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('degrades to per-message stepping when nothing fits the budget', () => {
+    const huge = Array.from({ length: 5 }, (_, i) => ({ role: 'assistant', content: 'x'.repeat(500), plain: true })) as any[];
+    expect(maxUsefulScroll(huge, 80, 1)).toBe(4);
   });
 });

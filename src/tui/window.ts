@@ -94,6 +94,36 @@ export function clipContentToRows(content: string, width: number, rows: number):
 }
 
 /**
+ * v3.4.1: the useful paging ceiling. Scrolling past the moment the window's
+ * start reaches index 0 only HIDES the newest messages without revealing
+ * anything older — at max scroll the pager showed nothing but the first
+ * message (user report: 翻页 10/10 只剩一条). Returns the largest scroll
+ * whose window still ends at a position where earlier content exists above
+ * (i.e. the first scroll at which start hits 0). Whole conversation fits in
+ * one screen → 0 → ↑ is a no-op, exactly as it should feel.
+ */
+export function maxUsefulScroll(
+  messages: readonly MessageData[],
+  width: number,
+  budget: number,
+): number {
+  const b = Math.max(1, budget);
+  let acc = 0;
+  let e = 0;
+  while (e < messages.length) {
+    const h = estimateMsgLines(messages[e], width);
+    if (acc + h > b) break;
+    acc += h;
+    e++;
+  }
+  // e = how many oldest messages fit in one window. Paging is useful until
+  // the window's end reaches e (earlier content above still exists while
+  // end > e). If e === 0 nothing fits — degrade to per-message stepping.
+  const firstFit = Math.max(1, e);
+  return Math.max(0, messages.length - firstFit);
+}
+
+/**
  * Build the visible window ending at `end` (exclusive). `scroll` > 0 moves
  * the end backwards (pager); null = live tail. Clipping is WRAP-aware and
  * iterative: cutting by source-line count alone is a no-op for messages
