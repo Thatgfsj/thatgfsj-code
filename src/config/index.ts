@@ -168,14 +168,15 @@ export class ConfigManager {
         || '';
     }
 
-    // Base URL: config > env > provider default
+    // Base URL: v3.4.8 — the saved baseUrl is ONLY meaningful for custom
+    // relays. It used to be applied to every provider, so configuring a
+    // relay once permanently redirected zhipu/deepseek/... requests to the
+    // relay endpoint with no UI to undo it.
     let baseUrl = config.baseUrl;
-    if (!baseUrl) {
-      if (isCustomProvider(provider)) {
-        baseUrl = process.env.CUSTOM_BASE_URL || '';
-      } else {
-        baseUrl = providerConfig.baseUrl;
-      }
+    if (isCustomProvider(provider)) {
+      baseUrl = baseUrl || process.env.CUSTOM_BASE_URL || '';
+    } else {
+      baseUrl = providerConfig.baseUrl;
     }
 
     return { ...config, provider, baseUrl, model, apiKey: apiKey || '' };

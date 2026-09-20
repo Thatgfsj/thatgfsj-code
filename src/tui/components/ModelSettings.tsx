@@ -1,19 +1,19 @@
 /** @jsxImportSource react */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import stringWidth from 'string-width';
 import type { App } from '../../app/index.js';
-import { PROVIDERS, MODEL_CATALOGS, getApiKeyFromEnv, listProviders } from '../../config/providers.js';
+import { PROVIDERS, MODEL_CATALOGS, getApiKeyFromEnv, listProviders, isCustomProvider } from '../../config/providers.js';
 import { BUILTIN_MODEL_ID } from '../../config/builtin.js';
 import { historyForProvider } from '../../config/modelHistory.js';
 import type { ProviderName } from '../../config/types.js';
 import { theme } from '../theme.js';
 
 type Submode = null | {
-  type: 'add' | 'context' | 'window' | 'key' | 'provider';
+  type: 'add' | 'context' | 'window' | 'key' | 'url' | 'provider';
   value: string;
   error?: string;
-  /** key submode: which provider/model the key is for */
+  /** key/url submode: which provider/model the input is for */
   provider?: ProviderName;
   model?: string;
   /** provider submode: highlighted row in the provider list */
@@ -149,6 +149,11 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
   const [selected, setSelected] = useState(1); // first real entry under the current-provider header
   const [submode, setSubmode] = useState<Submode>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [toastError, setToastError] = useState(false);
+  // custom relay setup is two-step (key → base URL); the key waits here
+  const pendingKeyRef = useRef<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
 
   const refresh = () => {
     const next = buildEntries(app);
@@ -162,10 +167,15 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
 
   const currentModel = app.config.get().model;
 
-  const flash = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => { setToast(null); rerender(); }, 3000);
+  const flash = (msg: string, isError = false) => {
+    setToastError(isError);
+    setToast(isError ? `✗ ${msg}` : msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current); // v3.4.8: timers must not clear each other
+    toastTimerRef.current = setTimeout(() => { setToast(null); setToastError(false); rerender(); }, 3000);
   };
+
+  /** True for rows that can be operated on (not section separators). */
+  const actionable = (e: Entry | undefined): e is Entry => !!e && !e.sep && (!!e.id || !!e.addProvider);
 
   /** Loose identity: case + separators insensitive (glm5.3 vs glm-5.3). */
   const normId = (s: string) => s.toLowerCase().replace(/[-_.\s]/g, '');
@@ -177,7 +187,30 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
     if (!target) return;
     if (target === currentModel) { flash(`${target} 已是当前模型`); return; }
     await app.switchModel(target);
-    flash(`已切换使用 ${target}`);
+    // v3.4.8: same warning as the /model command path — switching to a
+    // provider we hold no key for silently produced 401s before.
+    const after = app.config.get();
+    if (!after.apiKey && !PROVIDERS[after.provider]?.keyless && !after.useBuiltin) {
+      flash('已切换，但该服务商未配置 Key，请求会失败（按 k 配置）', true);
+    } else {
+      flash(`已切换使用 ${target}`);
+    }
+  };
+
+  /** v3.4.8: one funnel for every save+switch path (activate, key step,
+   *  url step, provider picker). All of them just build an intent; errors
+   *  land in the dialog instead of killing the TUI via unhandledRejection. */
+  const commitActivation = async (intent: { model?: string; provider?: ProviderName; apiKey?: string; baseUrl?: string; useBuiltin?: boolean }, okMsg: string) => {
+    try {
+      await app.switchModel(intent.model || app.config.get().model, intent);
+      refresh();
+      setSubmode(null);
+      pendingKeyRef.current = null;
+      flash(okMsg);
+      rerender();
+    } catch (e: any) {
+      setSubmode(s => (s ? { ...s, error: `保存失败: ${e?.message || e}` } : s));
+    }
   };
 
   /** Selecting any entry: same provider → plain switch; foreign → provider
@@ -190,28 +223,45 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
     if (e.sep || !e.id || !e.provider) return;
     const c = app.config.get();
     const kind = resolveActivation(c, !!getApiKeyFromEnv(e.provider), e);
-    if (kind === 'builtin') {
-      await app.switchModel(BUILTIN_MODEL_ID, { provider: 'siliconflow', useBuiltin: true });
-      flash('已切换到内置共享模型（无需 Key）');
-      rerender();
-      return;
-    }
-    if (kind === 'same-provider') {
-      await switchTo(e.id);
-      rerender();
-      return;
-    }
-    if (kind === 'switch-ready') {
-      const pc = PROVIDERS[e.provider];
-      await app.switchModel(e.id, { provider: e.provider });
-      flash(`已切换: ${pc?.name || e.provider} / ${e.id}`);
-      rerender();
-    } else if (kind === 'need-key') {
-      setSubmode({ type: 'key', value: '', provider: e.provider, model: e.id });
+    try {
+      if (kind === 'builtin') {
+        await commitActivation({ provider: 'siliconflow', useBuiltin: true, model: BUILTIN_MODEL_ID }, '已切换到内置共享模型（无需 Key）');
+        return;
+      }
+      if (kind === 'same-provider') {
+        await switchTo(e.id);
+        rerender();
+        return;
+      }
+      if (kind === 'switch-ready') {
+        const pc = PROVIDERS[e.provider];
+        // v3.4.8: a custom relay without a Base URL cannot be activated —
+        // collect the URL (and env-less key) instead of saving a dead config.
+        if (isCustomProvider(e.provider) && !c.baseUrl) {
+          pendingKeyRef.current = getApiKeyFromEnv(e.provider) || null;
+          setSubmode({ type: 'url', value: c.baseUrl || '', provider: e.provider, model: e.id });
+          return;
+        }
+        await commitActivation({ provider: e.provider, model: e.id }, `已切换: ${pc?.name || e.provider} / ${e.id}`);
+      } else if (kind === 'need-key') {
+        setSubmode({ type: 'key', value: '', provider: e.provider, model: e.id });
+      }
+    } catch (e2: any) {
+      flash(`切换失败: ${e2?.message || e2}`, true);
     }
   };
 
   const commitSubmode = async () => {
+    if (!submode) return;
+    try {
+      await commitSubmodeInner();
+    } catch (e: any) {
+      // v3.4.8: a failed save used to escape as unhandledRejection → TUI exit
+      setSubmode(s => (s ? { ...s, error: `保存失败: ${e?.message || e}` } : s));
+    }
+  };
+
+  const commitSubmodeInner = async () => {
     if (!submode) return;
     if (submode.type === 'add') {
       const id = submode.value.trim();
@@ -233,16 +283,38 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
     } else if (submode.type === 'key') {
       const key = submode.value.trim();
       if (!key) { setSubmode({ ...submode, error: 'Key 不能为空' }); return; }
-      await app.switchModel(submode.model || app.config.get().model, {
-        provider: submode.provider,
-        apiKey: key,
-      });
-      refresh();
-      setSubmode(null);
-      flash(`已保存 ${PROVIDERS[submode.provider!]?.name || submode.provider} 的 Key 并切换`);
-      rerender();
+      // v3.4.8: custom relays need a Base URL too — chain into the URL step
+      // (prefilled with the saved URL) unless one is already configured.
+      if (submode.provider && isCustomProvider(submode.provider) && !app.config.get().baseUrl) {
+        pendingKeyRef.current = key;
+        setSubmode({ type: 'url', value: '', provider: submode.provider, model: submode.model });
+        return;
+      }
+      await commitActivation(
+        { provider: submode.provider, apiKey: key, model: submode.model },
+        `已保存 ${PROVIDERS[submode.provider!]?.name || submode.provider} 的 Key 并切换`,
+      );
+    } else if (submode.type === 'url') {
+      const existing = submode.provider ? app.config.get().baseUrl : '';
+      let url = submode.value.trim().replace(/\/+$/, '');
+      if (!/^https?:\/\//i.test(url)) {
+        if (!url && existing) url = existing.replace(/\/+$/, ''); // empty enter = keep saved URL
+        else if (!url) { setSubmode({ ...submode, error: 'URL 不能为空' }); return; }
+        else url = 'https://' + url;
+      }
+      const provider = submode.provider!;
+      await commitActivation(
+        {
+          provider,
+          model: submode.model || PROVIDERS[provider]?.defaultModel || app.config.get().model,
+          apiKey: pendingKeyRef.current ?? undefined,
+          baseUrl: url,
+        },
+        `已切换: ${PROVIDERS[provider]?.name || provider} · ${url}`,
+      );
     } else if (submode.type === 'context') {
-      const tgt = active?.id || currentModel;
+      if (!actionable(active) || !active.id || active.addProvider) { setSubmode(null); flash('请先选一个模型行', true); return; }
+      const tgt = active.id;
       const nv = parseInt(submode.value, 10);
       if (!Number.isFinite(nv) || nv < 5 || nv > 1000) {
         setSubmode({ ...submode, error: '请输入 5-1000 的数字' });
@@ -252,7 +324,8 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
       setSubmode(null);
       flash(`${tgt} 上下文长度 → ${nv}`);
     } else if (submode.type === 'window') {
-      const tgt = active?.id || currentModel;
+      if (!actionable(active) || !active.id || active.addProvider) { setSubmode(null); flash('请先选一个模型行', true); return; }
+      const tgt = active.id;
       const nv = parseInt(submode.value, 10);
       if (!Number.isFinite(nv) || nv < 1000 || nv > 10000000) {
         setSubmode({ ...submode, error: '请输入 1,000-10,000,000 的 token 数' });
@@ -265,57 +338,84 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
   };
 
   const cycleThinking = async () => {
-    const tgt = active?.id || currentModel;
-    const order: Array<'off' | 'low' | 'medium' | 'high'> = ['off', 'low', 'medium', 'high'];
-    const now = app.getThinking(tgt);
-    const next = order[(order.indexOf(now) + 1) % order.length];
-    await app.setModelThinking(tgt, next);
-    rerender();
-    flash(next === 'off' ? `${tgt} 思考关闭` : `${tgt} 思考强度 → ${next}`);
+    if (!actionable(active) || !active.id) { flash('请先选一个模型行', true); return; }
+    const tgt = active.id;
+    try {
+      const order: Array<'off' | 'low' | 'medium' | 'high'> = ['off', 'low', 'medium', 'high'];
+      const now = app.getThinking(tgt);
+      const next = order[(order.indexOf(now) + 1) % order.length];
+      await app.setModelThinking(tgt, next);
+      rerender();
+      flash(next === 'off' ? `${tgt} 思考关闭` : `${tgt} 思考强度 → ${next}`);
+    } catch (e: any) {
+      flash(`设置失败: ${e?.message || e}`, true);
+    }
   };
 
   const deleteSelected = async () => {
-    const id = active?.id;
-    if (!id) return;
+    if (!actionable(active) || !active.id) { flash('请先选一个模型行', true); return; }
+    const id = active.id;
+    if (active.addProvider) return;
     if (id === currentModel) { flash('当前使用中的模型不能删除'); return; }
     if (!(app.config.get().customModels || []).includes(id)) {
       flash('只有自定义添加的模型可以删除');
       return;
     }
-    await app.removeCustomModel(id);
-    refresh();
-    setSelected(0);
-    flash(`已删除 ${id}`);
+    try {
+      await app.removeCustomModel(id);
+      const next = refresh();
+      // land the selection on a real row, never a separator
+      const firstReal = next.findIndex(e2 => !e2.sep && !e2.addProvider);
+      setSelected(Math.max(0, firstReal));
+      flash(`已删除 ${id}`);
+    } catch (e: any) {
+      flash(`删除失败: ${e?.message || e}`, true);
+    }
+  };
+
+  // v3.4.8: navigation skips section separators and the add-provider row —
+  // the selection used to vanish on a separator and b/w/c/d silently fell
+  // back to the CURRENT model.
+  const moveSelection = (dir: 1 | -1) => {
+    setSelected(prev => {
+      let i = prev;
+      for (let n = 0; n < entries.length; n++) {
+        i = Math.min(entries.length - 1, Math.max(0, i + dir));
+        if (actionable(entries[i])) return i;
+      }
+      return prev;
+    });
   };
 
   useInput((input, key) => {
     if (submode?.type === 'provider') {
       const list = listProviders();
       const pidx = Math.min(Math.max(0, submode.idx ?? 0), list.length - 1);
-      if (key.escape) { setSubmode(null); return; }
+      if (key.escape) { setSubmode(null); pendingKeyRef.current = null; return; }
       if (key.upArrow) { setSubmode({ ...submode, idx: Math.max(0, pidx - 1) }); return; }
       if (key.downArrow) { setSubmode({ ...submode, idx: Math.min(list.length - 1, pidx + 1) }); return; }
       if (key.return) {
         const p = list[pidx];
         const pc = PROVIDERS[p.key];
+        // v3.4.8: keep provider-agnostic custom models across the switch;
+        // catalog-bound ids fall back to the new provider's default.
+        const c = app.config.get();
+        const keepModel = (c.customModels || []).includes(c.model) ? c.model : (pc?.defaultModel || c.model);
         if (pc?.keyless) {
-          void app.switchModel(pc.defaultModel, { provider: p.key }).then(() => {
-            refresh();
-            setSubmode(null);
-            flash(`已切换: ${p.name} / ${pc.defaultModel}`);
-            rerender();
-          });
+          void commitActivation({ provider: p.key, model: keepModel }, `已切换: ${p.name} / ${keepModel}`);
         } else {
-          setSubmode({ type: 'key', value: '', provider: p.key, model: pc?.defaultModel });
+          setSubmode({ type: 'key', value: '', provider: p.key, model: keepModel });
         }
       }
       return;
     }
     if (submode) {
-      if (key.escape) { setSubmode(null); return; }
+      if (key.escape) { setSubmode(null); pendingKeyRef.current = null; return; }
       if (key.return) { void commitSubmode(); return; }
       if (key.backspace || key.delete) {
-        setSubmode(s => (s ? { ...s, value: s.value.slice(0, -1), error: undefined } : s));
+        // v3.4.8: delete by CODE POINT — slicing UTF-16 units stranded half
+        // a surrogate pair for astral characters (𠮷 → lone low surrogate).
+        setSubmode(s => (s ? { ...s, value: Array.from(s.value).slice(0, -1).join(''), error: undefined } : s));
         return;
       }
       if (input && !key.ctrl && !key.meta) {
@@ -325,22 +425,23 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
     }
 
     if (key.escape) { onClose(); return; }
-    if (key.upArrow) { setSelected(i => Math.max(0, i - 1)); return; }
-    if (key.downArrow) { setSelected(i => Math.min(entries.length - 1, i + 1)); return; }
+    if (key.upArrow) { moveSelection(-1); return; }
+    if (key.downArrow) { moveSelection(1); return; }
 
     if (key.return) { void activate(active); return; }
 
     if (input === 'a' || input === 'A') { setSubmode({ type: 'add', value: '' }); return; }
     if (input === 'b' || input === 'B') {
-      const id = active?.id || currentModel;
+      if (!actionable(active) || !active.id || active.addProvider) { flash('请先选一个模型行', true); return; }
+      const id = active.id;
       const cur = app.config.get().modelSettings?.[id]?.contextLength ?? app.session.getMaxMessages();
       setSubmode({ type: 'context', value: String(cur) });
       return;
     }
     if (input === 'c' || input === 'C') { void cycleThinking(); return; }
     if (input === 'w' || input === 'W') {
-      const id = active?.id || currentModel;
-      setSubmode({ type: 'window', value: String(app.getContextWindow(id)) });
+      if (!actionable(active) || !active.id || active.addProvider) { flash('请先选一个模型行', true); return; }
+      setSubmode({ type: 'window', value: String(app.getContextWindow(active.id)) });
       return;
     }
     if (input === 'd' || input === 'D') { void deleteSelected(); return; }
@@ -368,8 +469,9 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
   const submodeLabel =
     submode?.type === 'add' ? '添加模型 id ❯ '
       : submode?.type === 'key' ? `输入 ${PROVIDERS[submode.provider!]?.name || submode.provider} 的 API Key ❯ `
-        : submode?.type === 'window' ? `${truncateToWidth(active?.id || currentModel, 24)} 上下文窗口(tokens) ❯ `
-          : `${truncateToWidth(active?.id || currentModel, 24)} 上下文长度 ❯ `;
+        : submode?.type === 'url' ? '输入中转站 Base URL ❯ '
+          : submode?.type === 'window' ? `${truncateToWidth(active?.id || currentModel, 24)} 上下文窗口(tokens) ❯ `
+            : `${truncateToWidth(active?.id || currentModel, 24)} 上下文长度 ❯ `;
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} width={dialogWidth}>

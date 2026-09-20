@@ -61,6 +61,14 @@ export function TuiApp({ app }: Props) {
     return () => { (stdout as any)?.off?.('resize', onResize); };
   }, [stdout]);
 
+  // v3.4.8: splash ⇄ chat layout switches repaint through Ink's line-diff,
+  // which leaves the previous layout's remnants on screen (splash art under
+  // chat text — the "/help 没反应" report). One frame at FULL viewport
+  // height makes Ink 7.1 full-clear + repaint everything; then we settle
+  // back to rows-1 (the anti-黑屏 height). The effect lives below, next to
+  // the splashMode declaration.
+  const [tallFrame, setTallFrame] = useState(false);
+
   const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
   const [resolvedTtl, setResolvedTtl] = useState<'5m' | '1h' | null>(app.resolvedTtl);
   const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
@@ -341,6 +349,18 @@ export function TuiApp({ app }: Props) {
   allMessagesRef.current = allMessages;
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
+  // v3.4.8: see the tallFrame note above — one full-height frame forces
+  // Ink's whole-screen clear on splash ⇄ chat transitions.
+  const prevSplash = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (prevSplash.current === null) { prevSplash.current = splashMode; return; }
+    if (prevSplash.current !== splashMode) {
+      prevSplash.current = splashMode;
+      setTallFrame(true);
+      const t = setTimeout(() => setTallFrame(false), 120);
+      return () => clearTimeout(t);
+    }
+  }, [splashMode]);
   const cfg = app.config.get();
 
   // ── v3.2.1: right-hand info column (opencode parity) — plan ABOVE the
@@ -491,7 +511,7 @@ export function TuiApp({ app }: Props) {
   }
 
   return (
-    <Box flexDirection="column" width={terminalWidth} paddingX={1} height={terminalRows - 1}>
+    <Box flexDirection="column" width={terminalWidth} paddingX={1} height={tallFrame ? terminalRows : terminalRows - 1}>
       {splashMode ? (
         <>
           <Splash />
