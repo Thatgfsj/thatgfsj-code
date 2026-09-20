@@ -4,6 +4,21 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.0] - 2026-09-20  - 取精华 MiniMax mcode：补齐三个结构性缺口
+
+> 基于 3 个子代理对 mcode（MiniMax-AI/minimax-code，MIT）与本项目的双向调查与差异分析（66.8 万行 vs 1.4 万行），按"用户价值 × 实现成本"落地 P0 项。思想采纳、代码重写，无逐字移植。
+
+### Added
+
+- **工具调用完整入会话**（此前最大结构性缺口：agent 循环的工具消息只活在局部变量里，跨 turn 模型完全失忆上一轮读过/改过什么，重复劳动 + token 翻倍）：`chatStream` 新增 `onMessage` 镜像，assistant tool_calls 与每个 tool result 同步写入 session；`/resume` 恢复时以 `⎿ name: 摘要` 行呈现工具维度；既有压缩器的"工具组原子性"从此有真实对象。
+- **调用前上下文检查**（mcode beforeLlmCall 的落点思想）：`beforeRound` 钩子在**每轮** provider 调用前估算（系统装配 + 全历史），超过 `窗口 − max(16k 预留, maxTokens+2k)` 即先行压缩——旧逻辑只在 turn 末用上一轮 usage 判断，单个工具密集 turn 中途撞窗会硬 400。
+- **runaway-guard 软提醒**（思想采纳自 mcode runaway-guard）：同一工具调用（含参数指纹）一轮内重复达 3 次即注入 `[SYSTEM REMINDER]` 要求换方法/换工具/问用户——软纠正不硬停，合法重试不受影响。
+
+### Fixed
+
+- **agent 循环响应中断**：循环顶部与每个工具执行前检查 abort 信号；工具组执行中取消时，未执行的调用补 `[cancelled by user]` 结果占位（API 要求每个 tool_call 都有 result，否则下一请求 400）。esc 现在真正立即停下，而不是"界面停了、后台跑完 10 轮"。
+- 会话组装入口统一过 `sanitizeLoadedMessages`（崩溃残留的悬空工具对不再引发 provider 400）。
+
 ## [3.2.2] - 2026-09-20  - 视口渲染重构：发送黑屏根治 + 8 路对抗审查修复
 
 ### Fixed

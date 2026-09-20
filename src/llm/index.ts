@@ -21,6 +21,7 @@ import { OpenAIProvider } from './openai.js';
 import { AnthropicProvider } from './anthropic.js';
 import { GeminiProvider } from './gemini.js';
 import { decideTTL } from '../cache/smartModel.js';
+import { createRunawayGuard } from '../utils/runaway.js';
 
 export class LLMService {
   private provider: LLMProvider;
@@ -143,9 +144,30 @@ export class LLMService {
    */
   async *chatStream(
     messages: ChatMessage[],
-    options?: ChatOptions & { maxIterations?: number; signal?: AbortSignal }
+    options?: ChatOptions & {
+      maxIterations?: number;
+      signal?: AbortSignal;
+      /**
+       * v3.3.0 (mcode-parity): mirror every message the agent loop adds —
+       * assistant tool_calls and each tool result — so the SESSION keeps
+       * the tool dimension. Without this the next turn rebuilds its
+       * request from a session that has no idea what was read/changed,
+       * and the model repeats the work from scratch.
+       */
+      onMessage?: (msg: ChatMessage) => void;
+      /**
+       * v3.3.0 (mcode-parity beforeLlmCall): called before EVERY provider
+       * round. May return a replacement message array (e.g. after a
+       * pre-call context compaction); the loop adopts it for the request.
+       */
+      beforeRound?: (msgs: ChatMessage[]) => Promise<ChatMessage[] | void> | ChatMessage[] | void;
+    }
   ): AsyncGenerator<StreamChunk, ChatResponse> {
     if (!this.hasApiKey()) throw new Error(this.getNoKeyMessage());
+
+    const mirror = (m: ChatMessage): void => {
+      try { options?.onMessage?.(m); } catch { /* session persistence must not break the loop */ }
+    };
 
     // v3.0.3: Resolve TTL once per session.
     // v3.0.4: default is 1h (long-task). 'auto' (legacy config value)
@@ -173,9 +195,23 @@ export class LLMService {
     let currentMessages = [...messages];
     let iterations = 0;
     let lastUsage: ChatResponse['usage'] | undefined;
+    const runaway = createRunawayGuard();
 
     while (iterations < maxIterations) {
+      // v3.3.0: cooperative cancellation — the old loop only aborted the
+      // in-flight fetch, so an esc during tool execution still ran every
+      // remaining tool of the round AND started the next round.
+      if (options?.signal?.aborted) {
+        return { content: '[已中断]', role: 'assistant', usage: lastUsage };
+      }
       iterations++;
+      // v3.3.0: pre-round hook — the App layer uses this to compact the
+      // context BEFORE the request instead of hitting the window mid-turn
+      // (mcode's beforeLlmCall placement).
+      try {
+        const refreshed = await options?.beforeRound?.(currentMessages);
+        if (refreshed) currentMessages = refreshed;
+      } catch { /* hook failure must not break the loop */ }
       const toolsArray = [...this.tools.values()];
       const hasTools = toolsArray.length > 0;
 
@@ -214,11 +250,32 @@ export class LLMService {
         yield { type: 'tool_calls', toolCalls: detectedToolCalls, pending: true };
 
         // Add assistant message with tool calls (append-only, preserves prefix cache)
-        currentMessages.push({
+        const assistantToolMsg: ChatMessage = {
           role: 'assistant',
           content: fullContent || '',
           tool_calls: detectedToolCalls,
-        });
+        };
+        currentMessages.push(assistantToolMsg);
+        mirror(assistantToolMsg);
+
+        const abortedMidGroup = (): void => {
+          // The API requires a result for EVERY tool_call of the assistant
+          // message — fill the not-yet-executed ones with a cancelled stub
+          // so the next request stays valid. callResults is index-aligned
+          // with detectedToolCalls (protocol invariant).
+          for (let i = callResults.length; i < detectedToolCalls.length; i++) {
+            const tc = detectedToolCalls[i];
+            const cancelled: ChatMessage = {
+              role: 'tool',
+              content: '[cancelled by user]',
+              tool_call_id: tc.id,
+              name: tc.function.name,
+            };
+            currentMessages.push(cancelled);
+            mirror(cancelled);
+            callResults.push({ name: tc.function.name, ok: false, output: '[cancelled by user]' });
+          }
+        };
 
         // Execute each tool and emit a single structured tool_calls chunk
         // describing the dispatch plan. Per-tool results are appended to
@@ -239,6 +296,13 @@ export class LLMService {
         // can render per-tool outcomes.
         const callResults: ToolCallResult[] = [];
         for (const toolCall of detectedToolCalls) {
+          // v3.3.0: mid-group abort — stop executing, stub the remaining
+          // results so the history stays provider-valid, then unwind.
+          if (options?.signal?.aborted) {
+            abortedMidGroup();
+            yield { type: 'tool_calls', toolCalls: detectedToolCalls, results: callResults };
+            return { content: '[已中断]', role: 'assistant', usage: lastUsage };
+          }
           const tool = this.tools.get(toolCall.function.name);
 
           if (!tool) {
@@ -256,12 +320,22 @@ export class LLMService {
               tool_call_id: toolCall.id,
               name: toolCall.function.name,
             });
+            mirror(currentMessages[currentMessages.length - 1]);
             callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
             continue;
           }
 
           try {
             const parsed = JSON.parse(toolCall.function.arguments || '{}');
+            // v3.3.0 runaway guard: the same call repeating is the model
+            // spinning — remind it to change approach (soft nudge only).
+            const runawayHit = runaway.track(toolCall.function.name, toolCall.function.arguments || '');
+            if (runawayHit.remind) {
+              currentMessages.push({
+                role: 'system',
+                content: `[SYSTEM REMINDER] "${toolCall.function.name}" has now been called ${runawayHit.count} times with IDENTICAL arguments and produced the same outcome. Do not repeat it again: change the approach, use a different tool, or ask the user.`,
+              });
+            }
 
             // v3.0.5 fix (found in live testing): validate required params
             // BEFORE executing. A missing `content` on file write used to
@@ -286,6 +360,7 @@ export class LLMService {
                 tool_call_id: toolCall.id,
                 name: toolCall.function.name,
               });
+              mirror(currentMessages[currentMessages.length - 1]);
               currentMessages.push({
                 role: 'system',
                 content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" was called with missing required parameters (${missing.join(', ')}). Re-issue the call and include them.`,
@@ -307,6 +382,7 @@ export class LLMService {
               tool_call_id: toolCall.id,
               name: toolCall.function.name,
             });
+            mirror(currentMessages[currentMessages.length - 1]);
 
             callResults.push({ name: toolCall.function.name, ok: result.success, output });
 
@@ -325,6 +401,7 @@ export class LLMService {
               tool_call_id: toolCall.id,
               name: toolCall.function.name,
             });
+            mirror(currentMessages[currentMessages.length - 1]);
             callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
             // Hard failure: tool.execute threw. Repair message so the model
             // can see the failure next round and adjust (e.g. fix a path

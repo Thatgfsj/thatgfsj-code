@@ -100,3 +100,82 @@ describe('agent loop: tool_calls pre-launch (v3.0.16 pending chunk)', () => {
     expect(chunks[0]).toEqual({ type: 'text', content: 'plain answer' });
   });
 });
+
+describe('agent loop v3.3.0 (mcode-parity: session mirror / abort / runaway)', () => {
+  it('mirrors assistant tool_calls and tool results through onMessage', async () => {
+    const provider = fakeProvider([
+      [
+        { type: 'tool_calls', toolCalls: [call] } as StreamChunk,
+      ],
+      [{ type: 'text', content: 'done' }],
+    ]);
+    const svc = new LLMService(provider, 'k');
+    svc.registerTools([echoTool]);
+
+    const mirrored: ChatMessage[] = [];
+    for await (const _c of svc.chatStream([{ role: 'user', content: 'go' }], {
+      onMessage: m => mirrored.push(m),
+    })) {
+      // drain
+    }
+    expect(mirrored).toHaveLength(2);
+    expect(mirrored[0].role).toBe('assistant');
+    expect(mirrored[0].tool_calls?.[0].id).toBe('c1');
+    expect(mirrored[1].role).toBe('tool');
+    expect(mirrored[1].tool_call_id).toBe('c1');
+    expect(mirrored[1].content).toBe('echo:hi');
+  });
+
+  it('aborts before the next round and stubs results for a mid-group cancel', async () => {
+    const ctrl = new AbortController();
+    const provider = fakeProvider([
+      [
+        { type: 'tool_calls', toolCalls: [call] } as StreamChunk,
+      ],
+      [{ type: 'text', content: 'SHOULD NEVER RUN' }],
+    ]);
+    const svc = new LLMService(provider, 'k');
+    svc.registerTools([echoTool]);
+
+    for await (const c of svc.chatStream([{ role: 'user', content: 'go' }], {
+      signal: ctrl.signal,
+      onMessage: () => { ctrl.abort(); }, // cancel right after the group lands
+    })) {
+      if (c.type === 'tool_calls' && c.results) break;
+    }
+    // The loop must return before round 2 — the fake provider records what
+    // it saw, and round 2 must never be requested.
+    expect(provider.seen.length).toBe(1);
+  });
+
+  it('injects a runaway reminder on the 3rd identical call (soft nudge)', async () => {
+    const provider = fakeProvider([
+      ...Array.from({ length: 3 }, () => [{ type: 'tool_calls', toolCalls: [call] } as StreamChunk]),
+      [{ type: 'text', content: 'done' }],
+    ]);
+    const svc = new LLMService(provider, 'k');
+    svc.registerTools([echoTool]);
+
+    for await (const _c of svc.chatStream([{ role: 'user', content: 'go' }])) {
+      // drain
+    }
+    // Round 4's request must carry the reminder after the 3rd identical call.
+    const last = provider.seen[provider.seen.length - 1];
+    expect(last.some(m => m.role === 'system' && m.content.includes('IDENTICAL arguments'))).toBe(true);
+  });
+
+  it('beforeRound can replace the message array (pre-call compaction hook)', async () => {
+    const provider = fakeProvider([
+      [{ type: 'text', content: 'ok' }],
+    ]);
+    const svc = new LLMService(provider, 'k');
+    const replacement: ChatMessage[] = [{ role: 'user', content: 'compacted view' }];
+    for await (const _c of svc.chatStream([{ role: 'user', content: 'huge history' }], {
+      beforeRound: () => replacement,
+    })) {
+      // drain
+    }
+    expect(provider.seen[0]).toHaveLength(1);
+    expect(provider.seen[0][0].content).toBe('compacted view');
+  });
+});

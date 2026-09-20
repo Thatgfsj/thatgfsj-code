@@ -23,7 +23,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { ConfigManager } from '../config/index.js';
 import { LLMService } from '../llm/index.js';
-import { SessionManager } from '../session/index.js';
+import { SessionManager, sanitizeLoadedMessages } from '../session/index.js';
 import { ToolRegistry } from '../tools/index.js';
 import type { ToolContext } from '../tools/types.js';
 import { HookManager } from '../hooks/index.js';
@@ -31,6 +31,7 @@ import { SystemPromptBuilder } from '../prompts/index.js';
 import { SkillRegistry } from '../skills/index.js';
 import { CacheStatsStore } from '../cache/stats.js';
 import { compressThinking } from '../utils/thinking.js';
+import { estimateTokens } from '../utils/tokens.js';
 import { MCPServerManager, type McpConfigFile } from '../mcp/client.js';
 import { createGetContextTool } from '../tools/context.js';
 import type { ChatMessage, ChatResponse, StreamChunk, Usage } from '../types.js';
@@ -450,6 +451,36 @@ export class App {
   }
 
   /**
+   * v3.3.0 (mcode-parity beforeLlmCall): estimate the NEXT request's size
+   * (system assembly + full history) and compact BEFORE the request when
+   * it would overflow the window — the old check ran only at turn end on
+   * the previous round's usage, so a single tool-heavy turn could blow
+   * through the window mid-turn and hard-fail with a provider 400.
+   * Returns refreshed messages when compaction ran, null otherwise.
+   */
+  preCallContextCheck(msgs: ChatMessage[]): ChatMessage[] | null {
+    const win = this.getContextWindow();
+    if (win <= 0) return null;
+    let bd = { systemPrompt: 0, systemTools: 0, mcpTools: 0, skills: 0 };
+    try { bd = this.prompts.estimateBreakdown(); } catch { /* stubs in tests */ }
+    let est = bd.systemPrompt + bd.systemTools + bd.mcpTools + bd.skills + 64;
+    for (const m of msgs) {
+      const c = m.content;
+      est += estimateTokens(typeof c === 'string' ? c : JSON.stringify(c ?? '')) + 4;
+      if (m.tool_calls) {
+        for (const tc of m.tool_calls) est += estimateTokens(tc.function?.arguments || '') + 8;
+      }
+    }
+    const cfg = (this.config.get() as any);
+    const maxTokens = cfg.maxTokens ?? 4096;
+    const triggerAt = win - Math.max(16384, maxTokens + 2048);
+    if (est <= triggerAt) return null;
+    const r = this.session.compactNow();
+    if (!r) return null;
+    return sanitizeLoadedMessages(this.session.getMessages());
+  }
+
+  /**
    * Stream a response for the current session messages.
    * The LLMService handles the full agent loop internally.
    *
@@ -458,11 +489,28 @@ export class App {
    *
    * v3.0.5: accepts { signal } — propagated into provider fetch calls so
    * cancellation actually aborts the HTTP request.
+   * v3.3.0: session mode mirrors agent-loop messages (tool dimension)
+   * back into the session, sanitizes the assembled history, and runs the
+   * pre-call context check before every round.
    */
   async *streamResponse(messages?: ChatMessage[], opts?: { signal?: AbortSignal }): AsyncGenerator<StreamChunk, ChatResponse> {
-    const msgs = messages || this.session.getMessages();
+    const sessionMode = !messages;
+    const msgs = messages
+      ? messages
+      : sanitizeLoadedMessages(this.session.getMessages());
     // v3.0.8: per-model thinking effort rides along with every request.
-    const inner = this.llm.chatStream(msgs, { signal: opts?.signal, thinking: this.getThinking() });
+    const inner = this.llm.chatStream(msgs, {
+      signal: opts?.signal,
+      thinking: this.getThinking(),
+      // v3.3.0: keep the session's memory complete (tool dimension) and
+      // compact before each round instead of after the window is gone.
+      onMessage: sessionMode
+        ? (m) => { try { this.session.addMessage(m.role, typeof m.content === 'string' ? m.content : JSON.stringify(m.content), m); } catch { /* never break the loop */ } }
+        : undefined,
+      beforeRound: sessionMode
+        ? async (cur) => this.preCallContextCheck(cur) ?? undefined
+        : undefined,
+    });
     const debugUsage = !!process.env.GFCODE_DEBUG_USAGE;
     // v3.0.3: read TTL the LLMService resolved this round (sticky per session).
     this.resolvedTtl = this.llm.getResolvedTTL();

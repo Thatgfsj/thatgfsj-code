@@ -322,9 +322,20 @@ export function TuiApp({ app }: Props) {
           return;
         }
         app.session.loadFrom(file);
-        const visible: MessageData[] = file.messages
-          .filter(m => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-          .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }));
+        const visible: MessageData[] = [];
+        for (const m of file.messages) {
+          if (m.role === 'user' && typeof m.content === 'string') {
+            visible.push({ role: 'user', content: m.content });
+          } else if (m.role === 'assistant' && typeof m.content === 'string') {
+            visible.push({ role: 'assistant', content: m.content });
+          } else if (m.role === 'tool' && typeof m.content === 'string') {
+            // v3.3.0: tool results now persist — show them as ⎿ summary
+            // lines so a restored session keeps its tool dimension visible.
+            const name = (m as { name?: string }).name || 'tool';
+            const preview = m.content.length > 140 ? m.content.slice(0, 140) + '…' : m.content;
+            visible.push({ role: 'assistant', content: `⎿ ${name}: ${preview.replace(/\n/g, ' ')}`, plain: true, dim: true });
+          }
+        }
         setSystemMessages([]);
         hydrateMessages(visible);
         setScroll(null);
