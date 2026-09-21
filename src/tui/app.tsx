@@ -45,6 +45,8 @@ export function TuiApp({ app }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
+  // v3.4.15: rows are back (inline mode) — the splash centers vertically.
+  const terminalRows = (stdout as any)?.rows || 24;
   /**
    * v3.0.8 fix (user report): maximizing the window left the layout at the
    * old size — force a re-render on resize.
@@ -407,6 +409,11 @@ export function TuiApp({ app }: Props) {
 
       {splashMode ? (
         <>
+          {/* v3.4.15: center the splash block vertically in the viewport
+              (the startup clear leaves the cursor at row 1). The block is
+              ~16 rows; the pad lives in the live region and disappears
+              with the splash once the conversation starts. */}
+          <Box height={Math.max(0, Math.floor((terminalRows - 16) / 2))} />
           <Splash />
           {modeBadge}
           <Box justifyContent="center">{inputArea}</Box>
