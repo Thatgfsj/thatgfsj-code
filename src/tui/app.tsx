@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import chalk from 'chalk';
 import { ChatMessage } from './components/ChatMessage.js';
 import { Thinking } from './components/Thinking.js';
@@ -80,6 +80,14 @@ export function TuiApp({ app }: Props) {
     const t = setInterval(() => setHeartbeat(h => h + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // v3.4.19: ctrl+o toggles tool-call detail (collapsed one-liners by
+  // default; expanded shows the full command + result preview). The
+  // transcript stays scannable no matter how many tools run.
+  const [toolExpanded, setToolExpanded] = useState(false);
+  useInput((input, key) => {
+    if (key.ctrl && input === 'o') setToolExpanded(v => !v);
+  });
 
   // v3.4.17: transcript viewport scroll (mouse wheel delivers ↑/↓ in the
   // alternate screen; also ↑/↓ on an empty input). Full-history window via
@@ -504,7 +512,7 @@ export function TuiApp({ app }: Props) {
               </Text>
             )}
             {win.messages.map((m, i) => (
-              <ChatMessage key={`${win.start + i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
+              <ChatMessage key={`${win.start + i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} toolExpanded={toolExpanded} />
             ))}
             <Box flexGrow={1} />
             {streamView && (

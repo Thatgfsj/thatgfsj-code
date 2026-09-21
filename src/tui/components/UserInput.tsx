@@ -381,12 +381,12 @@ export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provid
       {fullWidth ? (
         <Box justifyContent="space-between" width="100%">
           <Text color={theme.textFaint}>enter 发送 · ↑↓ 历史/移光标 · ←→ 移光标 · esc 取消</Text>
-          <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
+          <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+o 工具 · ctrl+c 退出</Text>
         </Box>
       ) : (
         <Box flexDirection="column" alignItems="flex-end" width={width ?? 64}>
           <Text color={theme.textFaint}>enter 发送 · ↑↓ 历史 · esc 取消</Text>
-          <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
+          <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+o 工具 · ctrl+c 退出</Text>
         </Box>
       )}
     </Box>

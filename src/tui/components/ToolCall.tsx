@@ -12,7 +12,8 @@ interface ToolCallData {
 
 interface Props {
   tool: ToolCallData;
-  width?: number;
+  /** v3.4.19: collapsed (default) = ONE line; expanded (ctrl+o) = full. */
+  expanded?: boolean;
 }
 
 /**
@@ -107,12 +108,30 @@ export function formatToolPendingText(name: string, args: string): string {
  * line with a compact result summary — 2 lines of output (or the error),
  * not a full panel. The full text stays in the conversation history.
  */
-export function ToolCall({ tool }: Props) {
+export function ToolCall({ tool, expanded = false }: Props) {
   const { title, detail } = formatToolLabel(tool.name, tool.args);
   const running = tool.result === undefined;
   const resultLine = tool.result !== undefined
     ? formatToolResultLine(tool.result, !!tool.isError)
     : null;
+
+  // v3.4.19: collapsed = one truncated row (call + result summary). The
+  // transcript stays scannable no matter how many tools run; ctrl+o
+  // expands to the full command + result preview.
+  if (!expanded) {
+    const shortDetail = detail.length > 56 ? detail.slice(0, 56) + '…' : detail;
+    return (
+      <Box paddingLeft={2}>
+        <Text wrap="truncate-end">
+          <Text color={theme.toolMark}>⎿ </Text>
+          <Text color={theme.accentDim}>{title}</Text>
+          {shortDetail && <Text color={theme.textDim}> {shortDetail}</Text>}
+          {running && <Text color={theme.textFaint}> ⟳</Text>}
+          {resultLine && <Text color={resultLine.color}> · {resultLine.text}</Text>}
+        </Text>
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
@@ -127,6 +146,13 @@ export function ToolCall({ tool }: Props) {
       {resultLine && (
         <Box paddingLeft={2}>
           <Text color={resultLine.color} wrap="truncate-end">{resultLine.text}</Text>
+        </Box>
+      )}
+      {expanded && tool.result !== undefined && !tool.isError && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {tool.result.split('\n').filter(l => l.trim()).slice(1, 4).map((l, i) => (
+            <Text key={i} color={theme.textFaint} wrap="truncate-end">{l.slice(0, 120)}</Text>
+          ))}
         </Box>
       )}
     </Box>

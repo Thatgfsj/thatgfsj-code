@@ -29,6 +29,8 @@ interface Props {
   /** v3.0.9: shown on the assistant label line, opencode-style. */
   mode?: string;
   model?: string;
+  /** v3.4.19: ctrl+o global toggle — expand tool calls to full detail. */
+  toolExpanded?: boolean;
 }
 
 /**
@@ -53,11 +55,11 @@ function UserMessage({ content }: { content: string }) {
   );
 }
 
-function AssistantMessage({ content, toolCalls, mode, model, tokens, width }: { content: string; toolCalls?: ToolCallData[]; mode?: string; model?: string; tokens?: number; width?: number }) {
+function AssistantMessage({ content, toolCalls, mode, model, tokens, width, toolExpanded }: { content: string; toolCalls?: ToolCallData[]; mode?: string; model?: string; tokens?: number; width?: number; toolExpanded?: boolean }) {
   return (
     <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
       {toolCalls && toolCalls.map((tc, i) => (
-        <ToolCall key={i} tool={tc} />
+        <ToolCall key={i} tool={tc} expanded={toolExpanded} />
       ))}
       {content && (
         <Box flexDirection="column">
@@ -75,7 +77,7 @@ function AssistantMessage({ content, toolCalls, mode, model, tokens, width }: { 
   );
 }
 
-export const ChatMessage = React.memo(function ChatMessage({ message, mode, model, width }: Props) {
+export const ChatMessage = React.memo(function ChatMessage({ message, mode, model, width, toolExpanded }: Props) {
   if (message.role === 'user') {
     return <UserMessage content={message.content} />;
   }
@@ -89,7 +91,7 @@ export const ChatMessage = React.memo(function ChatMessage({ message, mode, mode
   }
   // v3.2.1: width flows down so the answer wraps at the WORKSPACE width,
   // not marked-terminal's 80-column default.
-  return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} tokens={message.tokens} width={width} />;
+  return <AssistantMessage content={message.content} toolCalls={message.toolCalls} mode={mode} model={model} tokens={message.tokens} width={width} toolExpanded={toolExpanded} />;
 });
 
 export type { MessageData };
