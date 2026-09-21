@@ -163,11 +163,19 @@ export class SessionManager {
   public onAutoCompact?: (info: { before: number; after: number }) => void;
 
   constructor(maxMessages = 50, options?: { onAutoCompact?: SessionManager['onAutoCompact'] }) {
-    this.maxMessages = maxMessages;
+    // v3.6.0: clamp here too — setMaxMessages clamps, the constructor did
+    // not, so a hand-edited config `contextLength: 0` took effect verbatim.
+    this.maxMessages = SessionManager.clampMaxMessages(maxMessages);
     this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     this.createdAt = new Date();
-    this.compactor = new ContextCompactor({ maxMessages });
+    this.compactor = new ContextCompactor({ maxMessages: this.maxMessages });
     this.onAutoCompact = options?.onAutoCompact;
+  }
+
+  /** v3.6.0: shared clamp for the message window (5..1000). */
+  static clampMaxMessages(n: number): number {
+    if (!Number.isFinite(n)) return 50;
+    return Math.min(1000, Math.max(5, Math.round(n)));
   }
 
   addMessage(role: ChatMessage['role'], content: string, extras?: Partial<ChatMessage>): void {
@@ -286,9 +294,14 @@ export class SessionManager {
     }
   }
 
-  /** v3.0.5: explicit compaction (the /compact command). */
-  compactNow(): { before: number; after: number } | null {
-    const { compacted, result } = this.compactor.compact(this.messages);
+  /**
+   * v3.0.5: explicit compaction (the /compact command).
+   * v3.6.0: `tokenPressure` bypasses the message-count gate — token-level
+   * compaction used to be dead code because compact() refused to act under
+   * the message limit (context-field-report P0).
+   */
+  compactNow(opts?: { tokenPressure?: boolean }): { before: number; after: number } | null {
+    const { compacted, result } = this.compactor.compact(this.messages, opts);
     if (result.removedCount <= 0) return null;
     const before = this.messages.length;
     this.messages = compacted;

@@ -125,6 +125,8 @@ program
           process.exit(1);
         }
         app.session.loadFrom(file);
+        // v3.6.0 (P1-2): restored session — stale counters must not leak.
+        app.resetSessionStats();
         if (!jsonMode) {
           console.log(chalk.gray(`  ↩ 已恢复会话 ${latest.id}（${latest.messageCount} 条消息）：${latest.preview}`));
         }

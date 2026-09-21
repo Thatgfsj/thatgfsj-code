@@ -35,6 +35,8 @@ function stubApp(overrides: Record<string, unknown> = {}): App {
     showThinking: false,
     getThinking: () => 'off',
     getContextWindow: () => 128000,
+    // v3.6.0: sidebar fallback goes through the live estimator.
+    currentContextEstimate: () => 1234,
     skills: { listActive: () => [] },
     requestConfirmation: async () => true,
     reloadModel: async () => {},

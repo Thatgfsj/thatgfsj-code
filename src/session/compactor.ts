@@ -73,9 +73,20 @@ export class ContextCompactor {
   /**
    * Compact messages if needed. Returns the input unchanged when under the
    * limit or when nothing can be removed.
+   *
+   * v3.6.0 (context-field-report P0): `tokenPressure` bypasses the message-
+   * count gate. The gate used to make token-triggered compaction DEAD CODE
+   * — a 50-message window with 8k-capped tool outputs can never reach the
+   * 108k-token trigger line, and when token pressure DID arrive (small-
+   * window models, Chinese-heavy text), compact() refused and the raw
+   * request sailed into a provider 400. Token pressure now compacts even
+   * under the message limit.
    */
-  compact(messages: ChatMessage[]): { compacted: ChatMessage[]; result: CompressionResult } {
-    if (messages.length <= this.maxMessages) {
+  compact(
+    messages: ChatMessage[],
+    opts?: { tokenPressure?: boolean },
+  ): { compacted: ChatMessage[]; result: CompressionResult } {
+    if (!opts?.tokenPressure && messages.length <= this.maxMessages) {
       return {
         compacted: messages,
         result: { originalCount: messages.length, compactedCount: messages.length, removedCount: 0 },
@@ -136,15 +147,6 @@ export class ContextCompactor {
    */
   autoCompact(messages: ChatMessage[]): { compacted: ChatMessage[]; result: CompressionResult } {
     return this.compact(messages);
-  }
-
-  /**
-   * Estimate token count (rough: ~4 chars per token)
-   */
-  estimateTokens(messages: ChatMessage[]): number {
-    const size = (m: ChatMessage) =>
-      (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length);
-    return messages.reduce((sum, m) => sum + Math.ceil(size(m) / 4) + 10, 0);
   }
 
   /**

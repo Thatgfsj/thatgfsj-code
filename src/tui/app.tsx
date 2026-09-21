@@ -310,6 +310,10 @@ export function TuiApp({ app }: Props) {
           return;
         }
         app.session.loadFrom(file);
+        // v3.6.0 (P1-2): a restored session's real size is unknown until
+        // the next usage report — stale counters from the previous session
+        // kept showing in the sidebar and get_context_remaining.
+        app.resetSessionStats();
         const visible: MessageData[] = [];
         for (const m of file.messages) {
           if (m.role === 'user' && typeof m.content === 'string') {
@@ -391,13 +395,13 @@ export function TuiApp({ app }: Props) {
       return { ...bd, msgTokens };
     } catch { return null; }
   }, [app, allMessages.length, app.permissionMode]); // eslint-disable-line react-hooks/exhaustive-deps
-  const usedTokens = contextBreakdown
-    ? (app.sessionStats.promptTokens > 0
-      ? app.sessionStats.promptTokens
-      : contextBreakdown.systemPrompt + contextBreakdown.systemTools
-        + contextBreakdown.mcpTools + contextBreakdown.skills
-        + contextBreakdown.msgTokens + 64)
-    : 0;
+  // v3.6.0 (P1-3/P2-8): one live-estimate source for the sidebar. The old
+  // fallback formula skipped the tool-instructions segment, and the switch
+  // from fallback to last-round usage made the number jump ~104% on round
+  // one. currentContextEstimate() is the same math preCall uses.
+  const usedTokens = app.sessionStats.promptTokens > 0
+    ? app.sessionStats.promptTokens
+    : app.currentContextEstimate();
   const ctxWin = app.getContextWindow();
   const ctxPct = ctxWin > 0 ? Math.min(100, Math.round((usedTokens / ctxWin) * 100)) : 0;
   // v3.4.16: SESSION sums (↑↓/cache) — the lifetime store confused a fresh

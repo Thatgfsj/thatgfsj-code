@@ -23,7 +23,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { ConfigManager } from '../config/index.js';
 import { recordModelUse } from '../config/modelHistory.js';
-import { PROVIDERS, MODEL_CATALOGS, getApiKeyFromEnv, isCustomProvider } from '../config/providers.js';
+import { PROVIDERS, MODEL_CATALOGS, MODEL_CONTEXT_WINDOWS, getApiKeyFromEnv, isCustomProvider } from '../config/providers.js';
 import type { Config, ProviderName } from '../config/types.js';
 import { LLMService } from '../llm/index.js';
 import { SessionManager, sanitizeLoadedMessages } from '../session/index.js';
@@ -218,8 +218,12 @@ export class App {
     // parity). Registered here because the numbers live on the App singleton;
     // the prompt builder below takes tools.list() AFTER this so the tool is
     // documented to the model from turn one.
+    // v3.6.0 (P1-3): report the LIVE estimate of the current request, not
+    // the last round's reported prompt_tokens (0 before round one, stale
+    // mid-round — the model used to see "0/128,000 (0%)" while already
+    // carrying a 4.5k-token request).
     tools.register(createGetContextTool(() => ({
-      used: app.sessionStats.promptTokens,
+      used: app.currentContextEstimate(),
       window: app.getContextWindow(),
     })));
     llm.registerTools(tools.list());
@@ -482,11 +486,69 @@ export class App {
 
   // ── v3.0.13: token-aware auto-compact ─────────────────────
 
-  /** Context window (tokens) for a model: per-model override → default 128k. */
+  /**
+   * Context window (tokens) for a model: per-model override → catalog
+   * metadata → config default → 128k.
+   *
+   * v3.6.0 (context-field-report P1-4): the blind 128k default was wrong
+   * in both directions (builtin Qwen3.5-4B is 262,144; step-1-8k is 8192).
+   * Known windows now come from MODEL_CONTEXT_WINDOWS.
+   */
   getContextWindow(modelId?: string): number {
     const c = this.config.get();
     const id = modelId || c.model;
-    return c.modelSettings?.[id]?.contextWindow ?? c.contextWindow ?? 128000;
+    return c.modelSettings?.[id]?.contextWindow
+      ?? MODEL_CONTEXT_WINDOWS[id]
+      ?? c.contextWindow
+      ?? 128000;
+  }
+
+  /**
+   * v3.6.0 (P1-5): window-occupancy size from a usage report. Anthropic's
+   * prompt_tokens EXCLUDES cache tokens, but the window INCLUDES them —
+   * add cache_read + cache_creation for the anthropic wire format (other
+   * providers already include cached tokens inside prompt_tokens).
+   */
+  private contextSizeFromUsage(u: Usage): number {
+    const base = u.prompt_tokens || 0;
+    if (this.config.getProviderFormat() !== 'anthropic') return base;
+    return base + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+  }
+
+  /**
+   * v3.6.0 (P1-2): zero the session-scoped counters. /new, /resume and
+   * one-shot --continue must call this — the old numbers otherwise lingered
+   * in the sidebar, /status and get_context_remaining until the next round
+   * reported fresh usage, and the MODEL made decisions off stale numbers.
+   */
+  resetSessionStats(): void {
+    this.sessionStats = { promptTokens: 0, completionTokens: 0, rounds: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+    this.resolvedTtl = null;
+  }
+
+  /**
+   * v3.6.0 (P1-3): estimate the CURRENT request size (system assembly +
+   * full history + tools), the same math preCallContextCheck uses. The
+   * old get_context_remaining reported the LAST round's prompt_tokens —
+   * 0 before the first round, thousands stale mid-round. Single source of
+   * truth for the tool, the TUI fallback and the pre-call check.
+   */
+  currentContextEstimate(): number {
+    let bd = { systemPrompt: 0, toolInstructions: 0, systemTools: 0, mcpTools: 0, skills: 0 };
+    try { bd = this.prompts.estimateBreakdown(); } catch { /* stubs in tests */ }
+    let est = bd.systemPrompt + bd.toolInstructions + bd.systemTools + bd.mcpTools + bd.skills + 64;
+    for (const m of this.session.getMessages()) {
+      // The system message IS the prompt assembly; count it via
+      // systemPrompt+toolInstructions (bd), not twice (double-counted in
+      // v3.5.0). Everything else is estimated per message.
+      if (m.role === 'system') continue;
+      const c = m.content;
+      est += estimateTokens(typeof c === 'string' ? c : JSON.stringify(c ?? '')) + 4;
+      if (m.tool_calls) {
+        for (const tc of m.tool_calls) est += estimateTokens(tc.function?.arguments || '') + 8;
+      }
+    }
+    return est;
   }
 
   async setModelContextWindow(modelId: string, tokens: number): Promise<void> {
@@ -501,15 +563,21 @@ export class App {
    * the model's context window. Compaction keeps the most recent complete
    * tool groups (see session/compactor) so the next request stays valid.
    * Returns a user-facing notice when compaction ran, null otherwise.
+   *
+   * v3.6.0: compaction now runs with tokenPressure (the message-count gate
+   * used to refuse, making this a no-op that nagged "没有可压缩的历史"
+   * every round on small-window models), and the null message states the
+   * actual situation.
    */
   maybeAutoCompact(usage?: Usage): string | null {
     if (!usage?.prompt_tokens || usage.prompt_tokens <= 0) return null;
     const win = this.getContextWindow();
-    const ratio = usage.prompt_tokens / win;
+    const size = this.contextSizeFromUsage(usage);
+    const ratio = size / win;
     if (ratio < 0.85) return null;
-    const r = this.session.compactNow();
+    const r = this.session.compactNow({ tokenPressure: true });
     if (!r) {
-      return `⚠️ 上下文已用 ${Math.round(ratio * 100)}%（${usage.prompt_tokens}/${win} tokens），但没有可压缩的历史。建议 /new 开新会话。`;
+      return `⚠️ 上下文已用 ${Math.round(ratio * 100)}%（${size}/${win} tokens），但没有可压缩的内容。强烈建议 /new 开新会话。`;
     }
     return `⚠️ 上下文接近模型窗口（${Math.round(ratio * 100)}%），已自动压缩：${r.before} → ${r.after} 条（工具调用块保持完整）。建议之后找机会 /new。`;
   }
@@ -560,26 +628,35 @@ export class App {
    * the previous round's usage, so a single tool-heavy turn could blow
    * through the window mid-turn and hard-fail with a provider 400.
    * Returns refreshed messages when compaction ran, null otherwise.
+   *
+   * v3.6.0 (context-field-report P0 + P1-6):
+   *  - the system prompt was double-counted (breakdown + the system
+   *    message in history); breakdown now also includes the
+   *    tool-instructions segment it used to skip. Net estimator error
+   *    was -12%; single-sided fixes would have shifted the trigger by 20%+.
+   *  - compaction used to be refused by the message-count gate when under
+   *    50 messages, making this whole token check dead code. It now runs
+   *    with tokenPressure.
+   *  - after compaction, re-check: if the estimate STILL exceeds the
+   *    trigger, say so on stderr (once per call) instead of silently
+   *    sending a too-large request.
    */
   preCallContextCheck(msgs: ChatMessage[]): ChatMessage[] | null {
     const win = this.getContextWindow();
     if (win <= 0) return null;
-    let bd = { systemPrompt: 0, systemTools: 0, mcpTools: 0, skills: 0 };
-    try { bd = this.prompts.estimateBreakdown(); } catch { /* stubs in tests */ }
-    let est = bd.systemPrompt + bd.systemTools + bd.mcpTools + bd.skills + 64;
-    for (const m of msgs) {
-      const c = m.content;
-      est += estimateTokens(typeof c === 'string' ? c : JSON.stringify(c ?? '')) + 4;
-      if (m.tool_calls) {
-        for (const tc of m.tool_calls) est += estimateTokens(tc.function?.arguments || '') + 8;
-      }
-    }
+    const est = this.currentContextEstimate();
     const cfg = (this.config.get() as any);
     const maxTokens = cfg.maxTokens ?? 4096;
     const triggerAt = win - Math.max(16384, maxTokens + 2048);
     if (est <= triggerAt) return null;
-    const r = this.session.compactNow();
+    const r = this.session.compactNow({ tokenPressure: true });
     if (!r) return null;
+    const estAfter = this.currentContextEstimate();
+    if (estAfter > triggerAt) {
+      process.stderr.write(
+        `\n  ⚠️ 上下文压缩后估算仍为 ${estAfter} tokens，超过触发线 ${triggerAt}（窗口 ${win}）。建议 /new 开新会话，或减少大输出工具的使用。\n`,
+      );
+    }
     return sanitizeLoadedMessages(this.session.getMessages());
   }
 
@@ -626,12 +703,19 @@ export class App {
         // v3.0.13: session token accounting for the status bar.
         try {
           const u = next.value.usage;
-          if (u.prompt_tokens > 0) this.sessionStats.promptTokens = u.prompt_tokens;
+          // v3.6.0 (context-field-report P1-5): Anthropic's prompt_tokens
+          // EXCLUDES cache_read/cache_creation, but window occupancy
+          // includes them. For window-size accounting, add cache tokens on
+          // the anthropic wire format; other providers already include
+          // cached tokens inside prompt_tokens.
+          if (u.prompt_tokens > 0) {
+            this.sessionStats.promptTokens = this.contextSizeFromUsage(u);
+          }
           this.sessionStats.completionTokens += u.completion_tokens || 0;
           this.sessionStats.rounds += 1;
           // v3.4.16: session-scoped sums (panel shows THESE, not the
           // lifetime cache-stats store).
-          this.sessionStats.inputTokens += u.prompt_tokens || 0;
+          this.sessionStats.inputTokens += this.contextSizeFromUsage(u);
           this.sessionStats.outputTokens += u.completion_tokens || 0;
           this.sessionStats.cachedTokens +=
             u.cache_read_input_tokens ?? u.prompt_cache_hit_tokens ?? u.cached_tokens ?? 0;
@@ -709,5 +793,7 @@ function firstLine(s: string): string {
  */
 export function effectiveContextLength(c: Config): number {
   const perModel = c.modelSettings?.[c.model]?.contextLength;
-  return perModel ?? c.contextLength ?? 50;
+  // v3.6.0: clamp — a hand-edited `contextLength: 0` used to reach the
+  // SessionManager verbatim (constructor had no clamp).
+  return SessionManager.clampMaxMessages(perModel ?? c.contextLength ?? 50);
 }

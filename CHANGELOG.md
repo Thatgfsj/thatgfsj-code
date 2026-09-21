@@ -4,6 +4,34 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.6.0] - 2026-09-21 - 上下文计算维护（专项调查驱动）
+
+> 专项调查确认 12 个问题（1 P0 / 5 P1 / 6 P2）：token 级自动压缩实为死代码、估算三处口径互相掩盖、窗口默认值两头错。本轮统一修复。271 → 282 用例。
+
+### Fixed
+
+- **token 级自动压缩复活（P0）**：压缩器的"消息条数闸门"曾让两个 token 触发器全部空转——50 条消息配 8k 工具截断永远够不到 108k 触发线；触发后 compact() 又因不足 50 条拒绝压缩，请求原样发往小窗口模型直接 400。现在 `compact({tokenPressure:true})` 越过条数闸门，真实值 ≥85% 与估算超线两条路径都能真正压缩
+- **估算口径统一（P1-6）**：preCall 此前双计系统提示（breakdown + 历史里的 system 消息各算一次）、estimateBreakdown 漏计 tool-instructions 段（~1178 token）、英文低估 1.3x——三错互相掩盖出 -12% 的"碰巧准"。现公式唯一：`currentContextEstimate()` = 全部 breakdown 段 + 历史消息（system 由 breakdown 代表，不重复计）
+- **estimateTokens 重校准（P2-7）**：实测 Qwen 中文 ≈0.6 token/字、英文 ≈3.0 字符/token；旧参数（1.0/字、4.0 字符/token）分别高估 1.66x / 低估 1.3x。新参数 0.75/字、3.4 字符/token，落在实测值的安全侧
+- **`/new`、`/resume`、`-c` 后计数重置（P1-2）**：sessionStats 此前永不重置，新会话的侧栏、/status、get_context_remaining 显示旧会话的用量，模型基于错误"剩余上下文"决策
+- **窗口默认值有据可依（P1-4）**：新增 `MODEL_CONTEXT_WINDOWS` 元数据表——内置 Qwen3.5-4B 真实 262,144（原按 128k 显示偏大约 2 倍）、step-1-8k/step-2-16k/doubao 32k/256k、1M 窗口旗舰档；未知模型仍回退 128k
+- **Anthropic 窗口占用口径（P1-5）**：Anthropic 的 prompt_tokens 不含缓存 token，作为"当前上下文大小"使 85% 压缩在长缓存会话里几乎永不触发；现按 wire 格式补加 cache_read/creation
+
+### Added
+
+- **`currentContextEstimate()`**：当前请求大小的唯一实时估算，get_context_remaining 与 TUI 侧栏共用（此前首轮报 `0/128,000 (0%)`、回合中滞后数千 token，且 TUI 首轮前后两套公式跳变 ~104%）
+- **压缩后复核**：token 压缩后重新估算，仍超触发线时明确提示 /new（此前压完不管，小窗口模型照样 400）
+
+### Changed
+
+- `/models` 对话框上下文 chip 回退到**全局**消息窗口（此前显示当前模型的 per-model 覆盖值，串台）
+- SessionManager 构造器对消息窗口做 5..1000 夹紧（此前只有 setMaxMessages 夹，手改 `contextLength: 0` 直接生效）
+- 删除两套无调用方的死代码估算实现（`shouldAutoCompact`、Compactor.estimateTokens），估算口径全库唯一
+
+### Tests
+
+- 271 → 282：估算边界（中/英文）、tokenPressure 语义、窗口元数据表、构造器夹紧四组回归
+
 ## [3.5.1] - 2026-09-21 - 二轮实测修复（补丁）
 
 > 二轮沙箱实测：15 条 3.5.0 声称中 13 条属实；本轮修复余下 4 项 + 2 个小瑕疵。

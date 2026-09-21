@@ -105,6 +105,9 @@ export function useCommands(app: App) {
       // v3.0.5: reset() keeps the system prompt — clear() used to wipe it,
       // leaving the model unprompted until restart.
       app.session.reset();
+      // v3.6.0 (P1-2): stale token counters from the old session used to
+      // linger in the sidebar and get_context_remaining after /new.
+      app.resetSessionStats();
       // v3.0.20: a new session means a new task — drop the plan panel too.
       planStore.clear();
       return { handled: true, output: '新会话已创建（系统提示已保留）。', action: 'clear' };

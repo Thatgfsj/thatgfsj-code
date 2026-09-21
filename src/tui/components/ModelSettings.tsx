@@ -415,7 +415,10 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
     if (input === 'b' || input === 'B') {
       if (!actionable(active) || !active.id || active.addProvider) { flash('请先选一个模型行', true); return; }
       const id = active.id;
-      const cur = app.config.get().modelSettings?.[id]?.contextLength ?? app.session.getMaxMessages();
+      // v3.6.0 (P2-10): the chip showed the CURRENT model's window for
+      // models that never set one — default to the GLOBAL message window.
+      const cfg = app.config.get();
+      const cur = cfg.modelSettings?.[id]?.contextLength ?? cfg.contextLength ?? 50;
       setSubmode({ type: 'context', value: String(cur) });
       return;
     }

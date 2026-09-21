@@ -118,6 +118,26 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
 
 // ==================== Model Catalogs ====================
 
+/**
+ * v3.6.0 (context-field-report): known context windows per model id. The
+ * blind 128k default was wrong in BOTH directions — the built-in
+ * Qwen3.5-4B is 262,144 (percentages displayed ~2x too big), while catalog
+ * entries like step-1-8k (8k) hit the real window 16x before any
+ * compaction fired → provider 400s. Models not listed keep the config
+ * default. Sources: vendor model cards / platform docs.
+ */
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'Qwen/Qwen3.5-4B': 262144, // built-in shared model
+  'step-1-8k': 8192,
+  'step-2-16k': 16384,
+  'doubao-1.5-pro-32k': 32768,
+  'doubao-1.5-lite-32k': 32768,
+  'doubao-pro-256k': 262144,
+  'gpt-6-astra': 1000000,
+  'kimi-k3': 1000000,
+  'glm-5.3': 1000000,
+};
+
 export const MODEL_CATALOGS: Record<ProviderName, ModelInfo[]> = {
   // 2026-09 目录更新（来源：各平台官方定价页/文档核实；baichuan/stepfun/doubao
   // 未查到可靠的 2026-09 现行清单，保留原目录取自其官方文档旧版）

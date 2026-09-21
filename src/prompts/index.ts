@@ -364,25 +364,32 @@ export class SystemPromptBuilder {
    * heuristic as everywhere else. Categories mirror the request anatomy:
    *   - systemPrompt: every prompt segment EXCEPT tool-instructions and
    *     skills (identity, AGENTS.md chain, environment, mode, NWT, date)
+   *   - toolInstructions: the how-to-call-tools segment. v3.6.0: counted
+   *     now — it rode the wire but was invisible to the breakdown, which
+   *     made preCall estimates run ~1200 tokens light (field-report P1-6).
    *   - systemTools: JSON schemas of built-in tools (what actually rides
    *     on the wire as the tools array, minus MCP tools)
    *   - mcpTools: JSON schemas of mcp__-prefixed tools
    *   - skills: the Active Skills segment
    * Message tokens are added by the caller (session lives outside here).
    */
-  estimateBreakdown(): { systemPrompt: number; systemTools: number; mcpTools: number; skills: number } {
+  estimateBreakdown(): {
+    systemPrompt: number; toolInstructions: number; systemTools: number; mcpTools: number; skills: number;
+  } {
     let systemPrompt = 0;
+    let toolInstructions = 0;
     let skills = 0;
     for (const s of this.buildSegments()) {
       const t = estimateTokens(s.content);
       if (s.name === 'skills') skills += t;
-      else if (s.name !== 'tool-instructions') systemPrompt += t;
+      else if (s.name === 'tool-instructions') toolInstructions += t;
+      else systemPrompt += t;
     }
     const schemaJson = (tools: Tool[]) => estimateTokens(JSON.stringify(
       tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters }))
     ));
     const builtin = this.config.tools.filter(t => !t.name.startsWith('mcp__'));
     const mcp = this.config.tools.filter(t => t.name.startsWith('mcp__'));
-    return { systemPrompt, systemTools: schemaJson(builtin), mcpTools: schemaJson(mcp), skills };
+    return { systemPrompt, toolInstructions, systemTools: schemaJson(builtin), mcpTools: schemaJson(mcp), skills };
   }
 }
