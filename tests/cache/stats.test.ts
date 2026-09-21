@@ -102,7 +102,10 @@ describe('CacheStatsStore', () => {
     expect(s.history).toEqual([]);
   });
 
-  it('history rolls over after HISTORY_LIMIT rounds', () => {
+  // 60 locked read-modify-write cycles; under full-suite load each cycle
+  // can take ~100ms+ on Windows (transient-lock retries), so the default
+  // 5s test timeout is too tight for this one.
+  it('history rolls over after HISTORY_LIMIT rounds', { timeout: 20000 }, () => {
     const store = new CacheStatsStore(statsPath);
     for (let i = 0; i < 60; i++) {
       store.record({

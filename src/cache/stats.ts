@@ -202,15 +202,19 @@ export class CacheStatsStore {
         try { writeSync(fh, String(Date.now()), 0, 'utf-8'); } finally { closeSync(fh); }
         return true;
       } catch (e: any) {
-        if (e?.code !== 'EEXIST') return false;
-        // Stale? (crashed holder, or an unlink that hit an EPERM window)
-        try {
-          const ts = Number(readFileSync(lockPath, 'utf-8').trim());
-          if (Number.isFinite(ts) && Date.now() - ts > staleMs) {
-            unlinkSync(lockPath);
-            continue;
-          }
-        } catch { /* fall through to spin */ }
+        // EPERM/EACCES/EBUSY on a fresh create are TRANSIENT on Windows
+        // (Defender/indexer scanning the new file) — retry like EEXIST.
+        // EEXIST → check for an abandoned lock, then spin.
+        if (e?.code !== 'EEXIST' && e?.code !== 'EPERM' && e?.code !== 'EACCES' && e?.code !== 'EBUSY') return false;
+        if (e?.code === 'EEXIST') {
+          try {
+            const ts = Number(readFileSync(lockPath, 'utf-8').trim());
+            if (Number.isFinite(ts) && Date.now() - ts > staleMs) {
+              unlinkSync(lockPath);
+              continue;
+            }
+          } catch { /* fall through to spin */ }
+        }
         if (Date.now() - start > timeoutMs) return false;
         const until = Date.now() + 20;
         while (Date.now() < until) { /* spin */ }
@@ -249,14 +253,21 @@ export class CacheStatsStore {
   }
 
   private save(): void {
-    // v3.5.3: atomic write (tmp + rename) — a concurrent reader must never
-    // observe a half-written stats file.
+    // v3.5.3: atomic write (tmp + rename), with retries — Windows can
+    // transiently EPERM a rename of a just-written file.
     let tmp: string | null = null;
     try {
       mkdirSync(dirname(this.path), { recursive: true });
       tmp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
       writeFileSync(tmp, JSON.stringify(this.stats, null, 2), 'utf-8');
-      renameSync(tmp, this.path);
+      for (let attempt = 0; ; attempt++) {
+        try { renameSync(tmp, this.path); break; }
+        catch (e: any) {
+          if (attempt >= 2 || (e?.code !== 'EPERM' && e?.code !== 'EACCES' && e?.code !== 'EBUSY')) throw e;
+          const until = Date.now() + 25;
+          while (Date.now() < until) { /* spin */ }
+        }
+      }
     } catch {
       try { if (tmp && existsSync(tmp)) unlinkSync(tmp); } catch { /* best-effort */ }
       // best-effort persistence; do not crash the chat loop on disk errors
