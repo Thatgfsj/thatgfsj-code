@@ -3,6 +3,15 @@
 > 本文档对应 v3.0.18 的实际代码结构。旧版（v0.x–v2.x，`src/core/ai-engine` /
 > `src/repl` 架构）的开发文档已废弃。
 
+## 版本号策略（必须遵守）
+
+**每次发版 patch 位 +1（数值 +0.01）：`3.5.0 → 3.5.1 → 3.5.2 → … → 3.5.20`。**
+
+- 无论是修 bug、新功能还是重构，一律 +0.01，**不做 minor 跳版**
+  （3.5.0 → 3.6.0 是错误示范；3.6.0 已废弃，内容由 3.5.2 取代）。
+- 发版命令：`npm version 3.5.N --no-git-tag-version`，tag 用 `v3.5.N`。
+- bump 前确认上一版本号：`npm view thatgfsj-code version`。
+
 ## 环境要求
 
 - Node.js >= 20.19（ink 7 / react 19 / vitest 4 的要求）

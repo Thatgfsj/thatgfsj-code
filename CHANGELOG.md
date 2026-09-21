@@ -4,9 +4,17 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [3.6.0] - 2026-09-21 - 上下文计算维护（专项调查驱动）
+> **版本号策略（维护者须知）**：每次发版一律 **patch 位 +1（数值 +0.01）**，
+> 如 3.5.0 → 3.5.1 → 3.5.2 → … → 3.5.20。不做 minor 跳版（3.5.0 → 3.6.0
+> 是错误示范，3.6.0 已废弃并由 3.5.2 取代，内容完全一致）。
+> 详见 `DEVELOPMENT.md` 的 Versioning 一节。
 
-> 专项调查确认 12 个问题（1 P0 / 5 P1 / 6 P2）：token 级自动压缩实为死代码、估算三处口径互相掩盖、窗口默认值两头错。本轮统一修复。271 → 282 用例。
+## [3.5.2] - 2026-09-21 - 上下文计算维护（专项调查驱动）
+
+> 发布说明：本版本内容与已废弃的 3.6.0 完全一致——那次误用了 minor 跳版，
+> 按项目版本号策略（每版 +0.01）改发 3.5.2。专项调查确认 12 个问题
+> （1 P0 / 5 P1 / 6 P2）：token 级自动压缩实为死代码、估算三处口径互相
+> 掩盖、窗口默认值两头错。本轮统一修复。271 → 282 用例。
 
 ### Fixed
 
