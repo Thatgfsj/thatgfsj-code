@@ -381,7 +381,7 @@ export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provid
         justifyContent={fullWidth ? 'space-between' : 'flex-end'}
         width={fullWidth ? '100%' : (width ?? 64)}
       >
-        <Text color={theme.textFaint}>enter 发送 · ↑↓ 翻页/移光标 · ←→ 移光标 · esc 取消</Text>
+        <Text color={theme.textFaint}>enter 发送 · ↑↓ 历史/移光标 · ←→ 移光标 · esc 取消</Text>
         <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
       </Box>
     </Box>

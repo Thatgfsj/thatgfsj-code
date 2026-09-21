@@ -1,7 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Box, Text } from 'ink';
-import { Markdown } from './Markdown.js';
 import { ToolCall, type ToolCallData } from './ToolCall.js';
 import { theme } from '../theme.js';
 import { estimateTokens, formatTokens } from '../../utils/tokens.js';
@@ -66,7 +65,10 @@ function AssistantMessage({ content, toolCalls, mode, model, tokens, width }: { 
             ▪ {mode ?? 'Build'}{model ? ` · ${model}` : ''}
             {tokens ? ` · ${formatTokens(tokens)}t` : ''}
           </Text>
-          <Markdown content={content} width={width} />
+          {/* v3.4.12: plain text, verbatim. Markdown rendering (marked-terminal)
+              caused the folded /help list, width bugs and the renderer shim —
+              the terminal wants literal lines, not a re-typeset document. */}
+          <Text color={theme.text}>{content}</Text>
         </Box>
       )}
     </Box>

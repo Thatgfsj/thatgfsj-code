@@ -131,16 +131,18 @@ program
         }
         try {
           const { TuiErrorBoundary } = await import('../tui/components/ErrorBoundary.js');
-          // v3.2.0: boundary catches React render errors (which never reach
-          // the process-level hooks) and writes last-error.log before exit.
+          // v3.4.12: INLINE rendering (no alternate screen). Committed
+          // messages go through Ink <Static> into the terminal's own
+          // scrollback — full history is always visible with native
+          // scrolling, which is what the user chose over the alt-screen
+          // pager window. The live region below the Static stays a fixed
+          // small block (streaming tail + status + input).
           const instance = render(
             <TuiErrorBoundary><TuiApp app={app} /></TuiErrorBoundary>,
-            { alternateScreen: process.stdout.isTTY },
           );
           await instance.waitUntilExit();
         } finally {
-          // Leave one blank line between the last frame and the next shell
-          // prompt (Ink has already restored the main buffer).
+          // Leave one blank line between the last frame and the next shell prompt.
           if (process.stdout.isTTY) process.stdout.write('\r\n');
         }
         return;

@@ -1,9 +1,8 @@
 /** @jsxImportSource react */
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Static, Text, useStdout } from 'ink';
 import chalk from 'chalk';
 import { ChatMessage } from './components/ChatMessage.js';
-import { Markdown } from './components/Markdown.js';
 import { Thinking } from './components/Thinking.js';
 import { UserInput } from './components/UserInput.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -12,11 +11,10 @@ import { ConfirmPrompt } from './components/ConfirmPrompt.js';
 import { Splash } from './components/Splash.js';
 import { PlanPanel } from './components/PlanPanel.js';
 import { PlanApproval } from './components/PlanApproval.js';
-import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import { planStore } from '../plan/store.js';
-import { buildWindow, estimateMsgLines, clipContentToRows, maxUsefulScroll } from './window.js';
+import { clipContentToRows } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
@@ -33,11 +31,12 @@ interface Props {
 type ViewMode = 'chat' | 'model_settings';
 
 /**
- * v3.0.8 (opencode-style full-screen layout): the app owns the whole
- * terminal (render fullscreen). First screen is a centered splash logo
- * with the input right under it; once the conversation starts, the chat
- * list fills the viewport and the input pins to the bottom. The version
- * sits in the bottom-right corner at all times.
+ * v3.4.12 (user mandate — 不要翻页): INLINE layout, the Claude Code /
+ * codex shape. Committed messages render ONCE through Ink <Static> and
+ * live in the terminal's own scrollback — nothing is ever clipped, the
+ * terminal's native scrolling IS the history. Below the Static sits a
+ * small live region (streaming tail, thinking, plan, status chip, input).
+ * ↑/↓ belong to input history again; the mouse wheel scrolls natively.
  */
 export function TuiApp({ app }: Props) {
   const { messages, isThinking, queuedMessage, streamingView, sendMessage, cancel, hydrateMessages, clearMessages } = useChat(app);
@@ -46,14 +45,9 @@ export function TuiApp({ app }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
-  // v3.2.2: fall back to 24 (Ink's own terminal-size default), never 30 —
-  // an over-guess made the frame taller than the real viewport.
-  const terminalRows = (stdout as any)?.rows || 24;
   /**
    * v3.0.8 fix (user report): maximizing the window left the layout at the
-   * old size — Ink replays the last computed frame on resize, but React
-   * never re-renders, so rows/columns went stale. Force a re-render when
-   * the terminal is resized.
+   * old size — force a re-render on resize.
    */
   const [, setResizeTick] = useState(0);
   useEffect(() => {
@@ -62,55 +56,20 @@ export function TuiApp({ app }: Props) {
     return () => { (stdout as any)?.off?.('resize', onResize); };
   }, [stdout]);
 
-  // v3.4.8: splash ⇄ chat layout switches repaint through Ink's line-diff,
-  // which leaves the previous layout's remnants on screen (splash art under
-  // chat text — the "/help 没反应" report). One frame at FULL viewport
-  // height makes Ink 7.1 full-clear + repaint everything; then we settle
-  // back to rows-1 (the anti-黑屏 height). The effect lives below, next to
-  // the splashMode declaration.
-  const [tallFrame, setTallFrame] = useState(false);
-
   const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
   const [resolvedTtl, setResolvedTtl] = useState<'5m' | '1h' | null>(app.resolvedTtl);
-  const configTtl = (app.config.get() as any).cache?.ttl as 'auto' | '5m' | '1h' | undefined;
   const thinking = app.getThinking();
   useEffect(() => {
     setCacheSnapshot(app.cacheStats.snapshot());
     setResolvedTtl(app.resolvedTtl);
   }, [messages.length]);
 
-  // v3.2.1: 1s heartbeat so the right-hand info column (plan + context
-  // panel) updates in real time even when nothing else re-renders the
-  // frame — the user asked for 要让 agent 及时更新.
+  // 1s heartbeat so the status chip stays live even when idle.
   const [, setHeartbeat] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setHeartbeat(h => h + 1), 1000);
     return () => clearInterval(t);
   }, []);
-
-  // v3.2.1: conversation pager (翻页). scroll = messages hidden from the
-  // bottom; null = live tail. ↑/↓ on an EMPTY input drive it — which also
-  // gives the mouse wheel paging, since terminals deliver wheel events as
-  // ↑/↓ inside the alternate screen (that used to recall old inputs).
-  const [scroll, setScroll] = useState<number | null>(null);
-  const allMessagesRef = useRef<MessageData[]>([]);
-  const scrollBy = useCallback((d: number) => {
-    setScroll(prev => {
-      const next = (prev ?? 0) + d;
-      // v3.4.1: clamp at the USEFUL ceiling — past it the window would only
-      // hide the newest messages without revealing anything older (at the
-      // old length-1 clamp the pager showed nothing but the first message).
-      const w = terminalWidth - 4 - (terminalWidth >= 100 ? 41 : 0);
-      const budget = Math.max(3, terminalRows - 11);
-      const max = maxUsefulScroll(allMessagesRef.current, w, budget);
-      if (max === 0) return null;
-      return next <= 0 ? null : Math.min(next, max);
-    });
-  }, [terminalWidth, terminalRows]);
-  // v3.2.2: new output no longer yanks a paged user back to the tail —
-  // paging must survive streaming (each 200ms flush used to reset scroll).
-  // The window recomputes by itself; scroll resets only explicitly:
-  // esc exits the pager (onCancel), and /new, /resume and sends below.
 
   const addMsg = useCallback((content: string) => {
     setSystemMessages(prev => [...prev, { role: 'assistant', content }]);
@@ -134,7 +93,7 @@ export function TuiApp({ app }: Props) {
       }, 60000);
       timer.unref?.();
       confirmTimerRef.current = timer;
-      confirmResolveRef.current = (v) => {
+      confirmResolveRef.current = (v: { allowed: boolean; always: boolean }) => {
         clearTimeout(timer);
         confirmTimerRef.current = null;
         setConfirmReq(null);
@@ -207,7 +166,6 @@ export function TuiApp({ app }: Props) {
         // v3.0.16: /new resets the session — reset the visible list too
         // (useChat messages are display-only now).
         clearMessages();
-        setScroll(null);
       }
 
       // v3.0.16: /browser — verifyLaunch is async (spawns Chromium), so
@@ -334,7 +292,6 @@ export function TuiApp({ app }: Props) {
         }
         setSystemMessages([]);
         hydrateMessages(visible);
-        setScroll(null);
         const model = file.model ? `（模型: ${file.model}）` : '';
         addMsg(`✓ 已恢复会话 ${summary.id.slice(0, 24)}…，共 ${visible.length} 条可见消息${model}。输入 /模型 <名称> 可切换模型。`);
       }
@@ -343,75 +300,28 @@ export function TuiApp({ app }: Props) {
     }
 
     sendMessage(input);
-    setScroll(null); // a fresh send always jumps back to the live tail
   }, [handleCommand, sendMessage, app, viewMode, addMsg, hydrateMessages, clearMessages]);
 
   const allMessages = [...systemMessages, ...messages];
-  allMessagesRef.current = allMessages;
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
-  // v3.4.8: see the tallFrame note above — one full-height frame forces
-  // Ink's whole-screen clear on splash ⇄ chat transitions.
-  const prevSplash = useRef<boolean | null>(null);
-  useEffect(() => {
-    if (prevSplash.current === null) { prevSplash.current = splashMode; return; }
-    if (prevSplash.current !== splashMode) {
-      prevSplash.current = splashMode;
-      setTallFrame(true);
-      const t = setTimeout(() => setTallFrame(false), 120);
-      return () => clearTimeout(t);
-    }
-  }, [splashMode]);
   const cfg = app.config.get();
 
-  // ── v3.2.1: right-hand info column (opencode parity) — plan ABOVE the
-  // context panel, both live. Widths reserve room for the divider.
-  const PANEL_WIDTH = 38;
-  const PANEL_RESERVE = PANEL_WIDTH + 3; // divider + padding + gap
-  const showContextPanel = terminalWidth >= 100;
-  // v3.2.2 viewport: the workspace shows a line-budgeted WINDOW of the
-  // conversation (alt buffer has no scrollback — the frame is all there
-  // is). scroll=null = live tail, >0 = pager looking back. The bottom
-  // reserve is MEASURED, not guessed: UserInput reports its real row count
-  // (multiline paste + completion popup included); modal prompts use their
-  // capped worst case. An under-estimate pushes the frame past the
-  // viewport → Ink full-clears → the 发送黑屏 this design exists to kill.
-  // Ink 7.1 on Windows also full-clears when the frame is exactly the
-  // viewport height, so the frame is rows-1 (FRAME_ROWS) — never rows.
-  const [inputRows, setInputRows] = useState(6);
-  const modalRows = confirmReq ? 17 : planApproval ? 7 : 0; // capped worst cases
-  const bottomReserve = modalRows > 0 ? modalRows
-    : inputRows + (isThinking ? 1 : 0) + (queuedMessage ? 1 : 0)
-      + (app.permissionMode !== 'ask' ? 1 : 0) // mode badge line
-      + (showContextPanel ? 0 : 10);           // PlanPanel fallback below the row
-  const workspaceRows = Math.max(3, terminalRows - 1 - bottomReserve);
-  const chatWidth = terminalWidth - 4 - (showContextPanel ? PANEL_RESERVE : 0);
-  // v3.4.11: the right column is a PEER of the chat window — its height
-  // must come out of the SAME budget. An unsized panel (up to ~25 rows with
-  // a plan active) stretched the frame past the viewport and smeared
-  // itself across the chat column (user screenshots).
-  const planActive = planStore.getSnapshot().length > 0;
-  const panelRows = showContextPanel
-    ? Math.max(8, Math.min(16, workspaceRows - (planActive ? 9 : 0)))
-    : 0;
-  // v3.3.0: the live streaming block shares the workspace budget — it is
-  // capped (tail-clipped) so a long answer can never push the frame past
-  // the viewport.
-  const STREAM_CAP = Math.min(14, Math.max(4, workspaceRows - 3));
+  // ── v3.4.12 live-region metrics (inline mode — no frame-height budget
+  // needed; the terminal scrollback holds the transcript). The streaming
+  // tail is capped so the live block stays compact; the status chip carries
+  // what the old right-hand panel showed.
+  const chatWidth = terminalWidth - 4;
   const streamView = streamingView
-    ? clipContentToRows(streamingView, chatWidth, STREAM_CAP)
+    ? clipContentToRows(streamingView, chatWidth, 10)
     : null;
-  const streamEst = streamView ? estimateMsgLines({ role: 'assistant', content: streamView }, chatWidth) : 0;
-  const windowHeaderRows = scroll !== null ? 1 : 0;
-  const win = buildWindow(allMessages, scroll, chatWidth, workspaceRows - windowHeaderRows - 1 - streamEst);
-  const maxScroll = maxUsefulScroll(allMessages, chatWidth, workspaceRows - 2);
   const contextBreakdown = useMemo(() => {
     try {
       const bd = app.prompts.estimateBreakdown();
       let msgTokens = 0;
       for (const m of app.session.getMessages()) {
-        // v3.2.1 fix: the session stores the SYSTEM message too — counting
-        // it here double-counted the prompt (消息 showed an inflated 45%).
+        // the session stores the SYSTEM message too — counting it here
+        // double-counted the prompt (消息 showed an inflated 45%).
         if ((m as { role?: string }).role === 'system') continue;
         const c = (m as { content?: unknown }).content;
         msgTokens += estimateTokens(typeof c === 'string' ? c : JSON.stringify(c ?? '')) + 4;
@@ -419,52 +329,28 @@ export function TuiApp({ app }: Props) {
       return { ...bd, msgTokens };
     } catch { return null; }
   }, [app, allMessages.length, app.permissionMode]); // eslint-disable-line react-hooks/exhaustive-deps
-  const contextPanel = showContextPanel && contextBreakdown ? (() => {
-    const estSum = contextBreakdown.systemPrompt + contextBreakdown.systemTools
-      + contextBreakdown.mcpTools + contextBreakdown.skills + contextBreakdown.msgTokens;
-    const used = app.sessionStats.promptTokens > 0 ? app.sessionStats.promptTokens : estSum + 64;
-    return (
-      <ContextPanel
-        used={used}
-        window={app.getContextWindow()}
-        hitRate={cacheSnapshot.totalRequests > 0 ? cacheSnapshot.hitRate : null}
-        inTokens={cacheSnapshot.totalInputTokens}
-        outTokens={cacheSnapshot.totalOutputTokens}
-        width={PANEL_WIDTH}
-        maxMessages={app.session.getMaxMessages()}
-        maxRows={panelRows}
-        categories={[
-          { label: '系统工具', tokens: contextBreakdown.systemTools },
-          { label: '消息', tokens: contextBreakdown.msgTokens },
-          { label: '技能', tokens: contextBreakdown.skills },
-          { label: '系统提示词', tokens: contextBreakdown.systemPrompt },
-          { label: 'MCP 工具', tokens: contextBreakdown.mcpTools },
-        ]}
-      />
-    );
-  })() : null;
+  const usedTokens = contextBreakdown
+    ? (app.sessionStats.promptTokens > 0
+      ? app.sessionStats.promptTokens
+      : contextBreakdown.systemPrompt + contextBreakdown.systemTools
+        + contextBreakdown.mcpTools + contextBreakdown.skills
+        + contextBreakdown.msgTokens + 64)
+    : 0;
+  const ctxWin = app.getContextWindow();
+  const ctxPct = ctxWin > 0 ? Math.min(100, Math.round((usedTokens / ctxWin) * 100)) : 0;
+  const hitPct = cacheSnapshot.totalRequests > 0 ? Math.round(cacheSnapshot.hitRate * 100) : null;
 
-  // v3.0.18: no dynamic header/status live in the chat frame (the window
-  // above is the transcript). v3.0.11: chat mode input spans the full
-  // terminal width (opencode session view); splash keeps the centered
-  // fixed-width block.
+  // v3.0.11: chat mode input spans the full terminal width; splash keeps
+  // the centered fixed-width block.
   const inputArea = confirmReq ? (
     <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
   ) : planApproval ? (
     <PlanApproval onAnswer={onPlanApproval} />
   ) : (
-    // v3.4.2: the model_select / init_wizard branches here were dead code —
-    // both modes early-return the full-screen dialog below and never reach
-    // the input slot. Only the real input renders here now.
     <UserInput
       onSubmit={onSubmit}
-      // v3.2.2: UserInput only routes esc here when the input is EMPTY and
-      // no completion popup is open — clearing typed text must not abort a
-      // running turn. esc with the pager open exits the pager only.
-      onCancel={() => {
-        if (scroll !== null) { setScroll(null); return; }
-        cancel();
-      }}
+      // esc with empty input cancels the running turn (no pager anymore).
+      onCancel={() => { cancel(); }}
       disabled={false}
       mode={app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}
       provider={cfg.provider}
@@ -472,9 +358,6 @@ export function TuiApp({ app }: Props) {
       thinking={thinking}
       fullWidth={!splashMode}
       width={splashMode ? Math.min(terminalWidth - 4, 64) : undefined}
-      onEmptyUp={splashMode ? undefined : () => scrollBy(1)}
-      onEmptyDown={splashMode ? undefined : () => scrollBy(-1)}
-      onLayoutRows={setInputRows}
     />
   );
 
@@ -491,38 +374,37 @@ export function TuiApp({ app }: Props) {
     </Box>
   ) : null;
 
-  // v3.0.15 (borrowed from opencode ui/dialog.tsx): /models opens as a
-  // full-screen centered modal overlay, not squeezed into the input slot.
-  // The dialog floats in the middle of the terminal with blank space around
-  // it (opencode centers horizontally + offsets vertically from the top).
-  // v3.2.2: model_select and init_wizard join this full-screen treatment —
-  // ModelSelector (13+ rows) and the wizard blew the fixed bottom reserve
-  // and pushed the frame past the viewport.
+  // /models opens as a centered modal (live region). A pending permission
+  // confirm must win over the dialog.
   if (viewMode === 'model_settings') {
-    // A pending permission confirm must win over any dialog — rendering it
-    // here would swallow the prompt (the tool call would hang until the 60s
-    // timeout with nothing on screen). Same full-screen centered container.
     if (confirmReq) {
       return (
-        <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
+        <Box flexDirection="column" width={terminalWidth} justifyContent="center" alignItems="center">
           <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
         </Box>
       );
     }
     return (
-      <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
+      <Box flexDirection="column" width={terminalWidth} justifyContent="center" alignItems="center">
         <ModelSettings
           app={app}
           onClose={() => setViewMode('chat')}
           width={Math.min(terminalWidth - 2, 72)}
-          maxRows={Math.max(4, terminalRows - 12)}
         />
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="column" width={terminalWidth} paddingX={1} height={tallFrame ? terminalRows : terminalRows - 1}>
+    <Box flexDirection="column" width={terminalWidth} paddingX={1}>
+      {/* Committed transcript → terminal scrollback (rendered once each).
+          History is never clipped; the terminal's own scrolling is the pager. */}
+      <Static items={allMessages}>
+        {(m, i) => (
+          <ChatMessage key={`${i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
+        )}
+      </Static>
+
       {splashMode ? (
         <>
           <Splash />
@@ -545,51 +427,18 @@ export function TuiApp({ app }: Props) {
         </>
       ) : (
         <>
-          {/* v3.2.2 viewport workspace: a line-budgeted WINDOW of the
-              conversation renders inside the alt-screen frame. scroll
-              state (wheel/↑/↓) moves the window back; new output snaps
-              the window to the live tail. */}
-          <Box flexDirection="row" flexGrow={1} minHeight={0}>
-            <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={1}>
-              {scroll !== null && (
-                <Text color={theme.textFaint}>
-                  ── 翻页 {Math.min(scroll, maxScroll)}/{maxScroll} · ↑ 更早 · ↓ 返回 · esc 退出 ──
-                </Text>
-              )}
-              {win.messages.map((m, i) => (
-                <ChatMessage key={`${win.start + i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
-              ))}
-              {streamView && (
-                <Box flexDirection="column" marginBottom={1}>
-                  <Text color={theme.textFaint}>
-                    ▪ {app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}{cfg.model ? ` · ${cfg.model}` : ''}
-                  </Text>
-                  {/* v3.4.11: plain text while streaming — re-parsing the
-                      growing buffer through marked every 200ms flush was
-                      O(n²) and stuttered long replies. Committed messages
-                      still render as Markdown below. */}
-                  <Text>{streamView}</Text>
-                </Box>
-              )}
+          {streamView && (
+            <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
+              <Text color={theme.textFaint}>
+                ▪ {app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}{cfg.model ? ` · ${cfg.model}` : ''}（生成中…）
+              </Text>
+              {/* plain text while streaming; the full message joins the
+                  scrollback once the turn commits. */}
+              <Text>{streamView}</Text>
             </Box>
-            {contextPanel && (
-              <Box
-                flexDirection="column"
-                flexShrink={0}
-                borderLeft
-                borderStyle="single"
-                borderColor={theme.border}
-                paddingLeft={2}
-                height={workspaceRows}
-                overflow="hidden"
-              >
-                <PlanPanel width={PANEL_WIDTH} />
-                <Box marginTop={1}>{contextPanel}</Box>
-              </Box>
-            )}
-          </Box>
-          {!contextPanel && <PlanPanel width={terminalWidth - 4} />}
+          )}
           <Thinking active={isThinking} />
+          <PlanPanel width={chatWidth} />
           {queuedMessage && (
             <Box paddingLeft={1}>
               <Text color={theme.warning}>📎 已排队: </Text>
@@ -597,6 +446,14 @@ export function TuiApp({ app }: Props) {
             </Box>
           )}
           {modeBadge}
+          {/* status chip: the essence of the old right-hand panel */}
+          {!splashMode && (
+            <Box paddingLeft={1}>
+              <Text color={theme.textFaint} wrap="truncate-end">
+                ◇ 上下文 {fmtWan(usedTokens)}/{fmtWan(ctxWin)}（{ctxPct}%） · 缓存命中 {hitPct === null ? '—' : `${hitPct}%`} · ↑{fmtWan(cacheSnapshot.totalInputTokens)} ↓{fmtWan(cacheSnapshot.totalOutputTokens)} · 回合窗口 {app.session.getMaxMessages()} 条
+              </Text>
+            </Box>
+          )}
           {inputArea}
         </>
       )}
@@ -616,4 +473,13 @@ export function TuiApp({ app }: Props) {
       )}
     </Box>
   );
+}
+
+/** 33000 → "3.3万" (matches the old ContextPanel formatting). */
+function fmtWan(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n < 10000) return String(Math.round(n));
+  const w = n / 10000;
+  const s = w >= 100 ? String(Math.round(w)) : w.toFixed(1).replace(/\.0$/, '');
+  return `${s}万`;
 }
