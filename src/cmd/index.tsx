@@ -130,9 +130,11 @@ program
           process.stdout.write('\x1b]2;Thatgfsj\x07');
           // v3.4.13: clear the visible screen at startup (Claude Code
           // behavior) — a previous session's leftover live frame used to
-          // sit above the fresh one. Scrollback above is NOT purged, so
-          // old output stays reachable by scrolling up.
-          process.stdout.write('\x1b[2J\x1b[H');
+          // sit above the fresh one. v3.4.14: 2J alone SCROLLS the old
+          // visible content into scrollback on Windows Terminal (it stays
+          // glued right above the splash); 3J purges the scrollback so the
+          // session truly starts clean.
+          process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
         }
         try {
           const { TuiErrorBoundary } = await import('../tui/components/ErrorBoundary.js');
