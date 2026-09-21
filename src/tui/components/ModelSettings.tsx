@@ -36,7 +36,7 @@ interface Props {
  *
  * Keys:
  *   ↑/↓ 选择   enter 切换   a 添加模型   d 删除自定义
- *   b 上下文长度  w 上下文窗口  c 思考强度  k 当前服务商 API Key   esc 关闭
+ *   b 回合窗口  w 上下文窗口  c 思考强度  k 当前服务商 API Key   esc 关闭
  */
 
 /** CJK-aware truncation: never exceed `max` display columns. */
@@ -298,12 +298,12 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
       const tgt = active.id;
       const nv = parseInt(submode.value, 10);
       if (!Number.isFinite(nv) || nv < 5 || nv > 1000) {
-        setSubmode({ ...submode, error: '请输入 5-1000 的数字' });
+        setSubmode({ ...submode, error: '消息条数 5-1000（不是 tokens）' });
         return;
       }
       await app.setModelContextLength(tgt, nv);
       setSubmode(null);
-      flash(`${tgt} 上下文长度 → ${nv}`);
+      flash(`${tgt} 回合窗口 → ${nv} 条消息（并非 tokens）`);
     } else if (submode.type === 'window') {
       if (!actionable(active) || !active.id || active.addProvider) { setSubmode(null); flash('请先选一个模型行', true); return; }
       const tgt = active.id;
@@ -452,7 +452,7 @@ export function ModelSettings({ app, onClose, width, maxRows = 12 }: Props) {
       : submode?.type === 'key' ? `输入 ${PROVIDERS[submode.provider!]?.name || submode.provider} 的 API Key ❯ `
         : submode?.type === 'url' ? '输入中转站 Base URL ❯ '
           : submode?.type === 'window' ? `${truncateToWidth(active?.id || currentModel, 24)} 上下文窗口(tokens) ❯ `
-            : `${truncateToWidth(active?.id || currentModel, 24)} 上下文长度 ❯ `;
+            : `${truncateToWidth(active?.id || currentModel, 24)} 回合窗口(消息条数) ❯ `;
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} width={dialogWidth}>
