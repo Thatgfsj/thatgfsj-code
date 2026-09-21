@@ -38,15 +38,19 @@ import { MCPServerManager, type McpConfigFile } from '../mcp/client.js';
 import { createGetContextTool } from '../tools/context.js';
 import type { ChatMessage, ChatResponse, StreamChunk, Usage } from '../types.js';
 
-/** Read ~/.thatgfsj/mcp.json. Missing or corrupted file = no servers. */
+/** Read ~/.thatgfsj/mcp.json. Missing = no servers. Corrupt = warn loudly
+ * (v3.5.4 field report: a syntax error used to be silently treated as
+ * "not configured", leaving users wondering why their server never ran). */
 export function loadMcpConfig(): McpConfigFile {
   const p = join(homedir(), '.thatgfsj', 'mcp.json');
   if (!existsSync(p)) return {};
   try {
     const data = JSON.parse(readFileSync(p, 'utf-8'));
     if (data && typeof data === 'object') return data as McpConfigFile;
+    process.stderr.write(`[mcp] ${p} 内容不是 JSON 对象，已忽略（MCP 未加载）。请修正该文件。\n`);
     return {};
-  } catch {
+  } catch (e: any) {
+    process.stderr.write(`[mcp] ${p} 解析失败（${e.message}），已忽略（MCP 未加载）。请修正该文件。\n`);
     return {};
   }
 }
@@ -644,6 +648,15 @@ export class App {
   preCallContextCheck(msgs: ChatMessage[]): ChatMessage[] | null {
     const win = this.getContextWindow();
     if (win <= 0) return null;
+
+    // v3.5.4 (field report P1): the message-window autocompact ran inside
+    // session.addMessage, but the agent loop kept its own in-flight array —
+    // the wire never saw the compaction until a token trigger fired. Adopt
+    // the session's (possibly compacted) history whenever it is shorter.
+    if (this.session.getMessageCount() < msgs.length) {
+      return sanitizeLoadedMessages(this.session.getMessages());
+    }
+
     const est = this.currentContextEstimate();
     const cfg = (this.config.get() as any);
     const maxTokens = cfg.maxTokens ?? 4096;

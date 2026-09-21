@@ -168,7 +168,13 @@ export class SessionManager {
     this.maxMessages = SessionManager.clampMaxMessages(maxMessages);
     this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     this.createdAt = new Date();
-    this.compactor = new ContextCompactor({ maxMessages: this.maxMessages });
+    // v3.5.4 (field report P1): preserveRecent used to be a fixed 10, so a
+    // 5-message window kept 10 recent messages — the setting was dead. The
+    // recent budget now derives from the window.
+    this.compactor = new ContextCompactor({
+      maxMessages: this.maxMessages,
+      preserveRecent: Math.max(2, Math.min(10, this.maxMessages - 1)),
+    });
     this.onAutoCompact = options?.onAutoCompact;
   }
 

@@ -99,13 +99,23 @@ export class OpenAIProvider implements LLMProvider {
     let sawValidFrame = false;
 
     try {
-      const response = await this.doRequest(body, controller.signal);
-      resetIdle();
-
+      // v3.5.4 (field report P2): honor Retry-After on 429 — the report
+      // measured a 450ms blind failure against a server asking to wait.
+      // Wait up to 30s and retry once.
+      let response = await this.doRequest(body, controller.signal);
+      if (response.status === 429) {
+        const ra = Number(response.headers.get('retry-after'));
+        const waitSec = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 30) : 0;
+        if (waitSec > 0) {
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+          response = await this.doRequest(body, controller.signal);
+        }
+      }
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => '');
         throw new Error(`API error ${response.status}: ${text}`);
       }
+      resetIdle();
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();

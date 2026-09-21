@@ -114,6 +114,16 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
     envKeys: ['CUSTOM_API_KEY'],
     format: 'anthropic',
   },
+  // v3.5.4 (field report P1): Gemini-format relay users had no exit — the
+  // gemini provider's baseUrl is pinned to the official endpoint and there
+  // was no custom_gemini entry, unlike openai/anthropic.
+  custom_gemini: {
+    name: '自定义 Gemini 兼容 (中转站)',
+    baseUrl: '',
+    defaultModel: 'gemini-2.5-flash',
+    envKeys: ['CUSTOM_API_KEY'],
+    format: 'gemini',
+  },
 };
 
 // ==================== Model Catalogs ====================
@@ -136,6 +146,9 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-6-astra': 1000000,
   'kimi-k3': 1000000,
   'glm-5.3': 1000000,
+  // v3.5.4: same model, SiliconFlow's catalog id — users were getting the
+  // 128k fallback for a 1M-window model and compacting way too early.
+  'zai-org/GLM-5.3': 1000000,
 };
 
 export const MODEL_CATALOGS: Record<ProviderName, ModelInfo[]> = {
@@ -219,6 +232,10 @@ export const MODEL_CATALOGS: Record<ProviderName, ModelInfo[]> = {
     { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', desc: '默认模型，可自定义' },
     { id: 'claude-opus-5', name: 'Claude Opus 5', desc: '可自定义' },
   ],
+  custom_gemini: [
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', desc: '默认模型，可自定义' },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', desc: '可自定义' },
+  ],
 };
 
 // ==================== Helpers ====================
@@ -247,5 +264,5 @@ export function listProviders(): Array<{ key: ProviderName; name: string }> {
  * Check if a provider name is a custom/relay provider
  */
 export function isCustomProvider(provider: ProviderName): boolean {
-  return provider === 'custom_openai' || provider === 'custom_anthropic';
+  return provider === 'custom_openai' || provider === 'custom_anthropic' || provider === 'custom_gemini';
 }

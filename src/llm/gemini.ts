@@ -311,6 +311,14 @@ export class GeminiProvider implements LLMProvider {
       if (controller.signal.aborted && !upstream?.aborted) {
         throw new Error('Stream stalled: no data received for 120s');
       }
+      // v3.5.4 (field report P1): bare "fetch failed" gave relay users no
+      // path forward — name the two usual suspects.
+      if (error instanceof TypeError && /fetch/i.test(error.message || '')) {
+        throw new Error(
+          `Gemini request failed: ${error.message}. If you use a relay, its baseUrl must point at a Gemini-compatible endpoint ` +
+          '(configure it under the custom Gemini provider — the built-in gemini provider always calls the official endpoint).',
+        );
+      }
       throw error;
     }
 

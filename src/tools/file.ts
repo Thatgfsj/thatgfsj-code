@@ -11,9 +11,30 @@
  */
 
 import type { Tool, ToolResult, ToolContext } from './types.js';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, realpathSync } from 'fs';
 import { join, dirname, basename, extname, isAbsolute, resolve, sep } from 'path';
 import { DiffPreview } from '../utils/diff.js';
+
+/**
+ * v3.5.4 (field report P0): symlink-hardened containment. resolve() alone
+ * does not follow links, so `proj/link.txt -> /etc/target` slipped past a
+ * plain prefix check. Walk the deepest EXISTING ancestor with
+ * realpathSync and compare against the realpath of the root.
+ */
+function isInsideWorkspace(root: string, path: string): boolean {
+  const rootReal = (() => { try { return realpathSync(resolve(root)); } catch { return resolve(root); } })();
+  let cur = resolve(path);
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return real === rootReal || real.startsWith(rootReal + sep);
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return false;
+      cur = parent; // file may not exist yet — walk up to the first ancestor that does
+    }
+  }
+}
 
 export class FileTool implements Tool {
   name = 'file';
@@ -29,12 +50,10 @@ export class FileTool implements Tool {
    */
   private assertInsideWorkspace(action: string, path: string, ctx?: ToolContext): ToolResult | null {
     if (!ctx?.workingDirectory) return null;
-    const root = resolve(ctx.workingDirectory);
-    const abs = resolve(path);
-    if (abs === root || abs.startsWith(root + sep)) return null;
+    if (isInsideWorkspace(ctx.workingDirectory, path)) return null;
     return {
       success: false,
-      error: `[WORKSPACE] "${action}" may only touch files inside the project directory (${root}). Target was outside: ${path}. If this is genuinely required, ask the user or use the shell tool (it asks for confirmation).`,
+      error: `[WORKSPACE] "${action}" may only touch files inside the project directory (${ctx.workingDirectory}). Target was outside: ${path}. If this is genuinely required, ask the user or use the shell tool (it asks for confirmation).`,
     };
   }
 

@@ -30,8 +30,8 @@
  */
 
 import type { Tool, ToolResult, ToolContext } from './types.js';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, renameSync, mkdirSync, statSync } from 'fs';
-import { dirname, isAbsolute, relative, resolve } from 'path';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, renameSync, mkdirSync, statSync, realpathSync } from 'fs';
+import { dirname, isAbsolute, relative, resolve, sep, join, basename } from 'path';
 
 // ── types ──────────────────────────────────────────────────
 
@@ -437,6 +437,26 @@ export class ApplyPatchTool implements Tool {
       throw e;
     }
 
+    // v3.5.4 (field report P0): apply_patch had NO workspace fence — the
+    // same out-of-project write that the file tool rejects went straight
+    // through via `*** Add File: ../outside.txt`. Also symlink-hardened:
+    // resolve() alone does not see links, so the check walks the deepest
+    // EXISTING ancestor with realpathSync and compares against the
+    // realpath of the workspace root. Fail BEFORE confirmation/writes.
+    if (ctx?.workingDirectory) {
+      const rootReal = safeRealpath(resolve(ctx.workingDirectory));
+      const outside = planned
+        .flatMap(p => [p.finalPath, p.originalPath])
+        .filter((p, i, arr) => arr.indexOf(p) === i)
+        .filter(p => !isInsideReal(rootReal, p));
+      if (outside.length > 0) {
+        return {
+          success: false,
+          error: `[WORKSPACE] apply_patch may only touch files inside the project directory (${ctx.workingDirectory}). Targets outside: ${outside.join(', ')}. If this is genuinely required, ask the user or use the shell tool (it asks for confirmation).`,
+        };
+      }
+    }
+
     // Single confirmation over the WHOLE patch (Codex apply_patch approval).
     // Fail closed when no confirmation channel exists (headless without --yolo).
     if (ctx?.confirmAction) {
@@ -517,3 +537,21 @@ export class ApplyPatchTool implements Tool {
 
 // re-export for tests
 export { PatchParseError as _PatchParseError };
+
+/** v3.5.4: realpath of the deepest existing ancestor (file may not exist). */
+function safeRealpath(p: string): string {
+  let cur = resolve(p);
+  try {
+    return realpathSync(cur);
+  } catch {
+    const parent = dirname(cur);
+    if (parent === cur) return cur;
+    return join(safeRealpath(parent), basename(cur));
+  }
+}
+
+/** True when `target` (symlink-resolved) sits inside `rootReal`. */
+function isInsideReal(rootReal: string, target: string): boolean {
+  const t = safeRealpath(resolve(target));
+  return t === rootReal || t.startsWith(rootReal + sep);
+}

@@ -238,6 +238,12 @@ export class LLMService {
 
       let fullContent = '';
       let detectedToolCalls: ToolCall[] | undefined;
+      // v3.5.4 (field report P0): the 4B shared model leaked its own
+      // tool-template markup (<parameter=…>, </tool_call>) as plain text —
+      // evidence it "wanted" to call tools in the wrong channel. A
+      // corrective system note gets injected so the next round can recover.
+      let leakedTemplate = false;
+      let templateLeaks = 0;
 
       // Forward stream chunks from the provider. We collect text internally for
       // tool-call persistence but always re-emit the original chunks unchanged.
@@ -246,6 +252,7 @@ export class LLMService {
       for await (const chunk of stream) {
         if (chunk.type === 'text' && chunk.content) {
           fullContent += chunk.content;
+          if (/<\/tool_call>|<parameter=|<tool_call>/i.test(chunk.content)) leakedTemplate = true;
           yield chunk;
         } else if (chunk.type === 'tool_calls' && chunk.toolCalls) {
           detectedToolCalls = chunk.toolCalls;
@@ -358,13 +365,14 @@ export class LLMService {
             // as `notes` — headless consumers could not see the guard at
             // all before (field report).
             const runawayHit = runaway.track(toolCall.function.name, toolCall.function.arguments || '');
+            // v3.5.4 (field report P2): the reminder is collected here but
+            // pushed AFTER the tool result message — inserting a message
+            // between assistant(tool_calls) and its tool results breaks the
+            // pairing that strict OpenAI-compatible servers require.
+            let pendingReminder: string | null = null;
             if (runawayHit.remind) {
-              const reminder = `"${toolCall.function.name}" has now been called ${runawayHit.count} times with IDENTICAL arguments and produced the same outcome. Do not repeat it again: change the approach, use a different tool, or ask the user.`;
-              currentMessages.push({
-                role: 'system',
-                content: `[SYSTEM REMINDER] ${reminder}`,
-              });
-              roundNotes.push(reminder);
+              pendingReminder = `"${toolCall.function.name}" has now been called ${runawayHit.count} times with IDENTICAL arguments and produced the same outcome. Do not repeat it again: change the approach, use a different tool, or ask the user.`;
+              roundNotes.push(pendingReminder);
             }
 
             // v3.0.5 fix (found in live testing): validate required params
@@ -417,6 +425,15 @@ export class LLMService {
             mirror(currentMessages[currentMessages.length - 1]);
 
             callResults.push({ name: toolCall.function.name, ok: result.success, output });
+
+            // v3.5.4: reminder lands AFTER the tool result (see above).
+            if (pendingReminder) {
+              currentMessages.push({
+                role: 'system',
+                content: `[SYSTEM REMINDER] ${pendingReminder}`,
+              });
+              mirror(currentMessages[currentMessages.length - 1]);
+            }
 
             if (!result.success) {
               // v3.5.0: a cancellation is a permission decision, not a tool
@@ -490,6 +507,21 @@ export class LLMService {
             };
           }
         }
+        continue;
+      }
+
+      // v3.5.4 (field report P0): template-fragment leakage with NO tool
+      // calls means the model tried to call tools as plain text. Correct
+      // it and give it another round (max 2 corrections per turn — then
+      // the text answer stands as-is).
+      if (leakedTemplate && !detectedToolCalls?.length && templateLeaks < 2) {
+        templateLeaks += 1;
+        const note =
+          '[TOOL_FORMAT] Your reply contained raw tool-call markup (<tool_call>, <parameter=...>). ' +
+          'That markup is not executable. Issue tool calls through the function-calling channel instead, ' +
+          'as proper JSON with EVERY required parameter filled (e.g. file write needs action, path AND content).';
+        currentMessages.push({ role: 'system', content: note });
+        mirror(currentMessages[currentMessages.length - 1]);
         continue;
       }
 

@@ -391,10 +391,11 @@ program
               '      (prevents hallucination loop — try your question again)'
             ));
           }
-          app.session.persist();
-
-          // v3.0.13: token-aware auto-compact (headless path).
+          // v3.5.4 (field report P1): compact BEFORE persisting — the disk
+          // session used to keep the UNCOMPRESSED history while the notice
+          // claimed compaction, so `-c` resumed 18 stale messages.
           const compactNotice = app.maybeAutoCompact(lastUsage);
+          app.session.persist();
           if (compactNotice) {
             process.stderr.write(`\n  ${compactNotice}\n`);
           }
@@ -443,7 +444,10 @@ program
             success: false,
             content: '',
             error: msg,
-            aborted: /AGENT_ABORTED/i.test(msg) || /Stream stalled|timeout/i.test(msg) ? true : undefined,
+            // v3.5.4 (field report P2): consistent semantics — any
+            // not-completed turn (provider error, stall, breaker) is
+            // aborted:true so consumers check one field.
+            aborted: true,
             stats: { rounds: 0, toolCalls: 0, denied: 0, failed: 0, abortedReason: msg },
           });
           process.exitCode = 1;
@@ -462,6 +466,11 @@ program
         process.exitCode = 1;
       } finally {
         process.removeListener('SIGINT', onSigInt);
+        // v3.5.4 (field report P0): connected MCP child stdio pipes kept the
+        // event loop alive forever — the single-prompt process hung after a
+        // perfectly successful result (240s kill to recover). Disconnecting
+        // the servers lets the loop drain and the process exit normally.
+        try { app.mcp.disconnectAll(); } catch { /* best-effort */ }
       }
     } catch (error: any) {
       console.error(chalk.red(`\n  ${error.message}`));

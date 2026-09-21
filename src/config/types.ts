@@ -17,7 +17,8 @@ export type ProviderName =
   | 'ollama'
   | 'ernie'
   | 'custom_openai'
-  | 'custom_anthropic';
+  | 'custom_anthropic'
+  | 'custom_gemini';
 
 export interface ProviderConfig {
   name: string;

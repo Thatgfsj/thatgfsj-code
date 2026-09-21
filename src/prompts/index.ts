@@ -143,7 +143,31 @@ export class SystemPromptBuilder {
       return `### ${t.name}\n${t.description}\n\nParameters:\n${params}`;
     }).join('\n\n');
 
-    return `## Tools\n\nYou have access to the following tools:\n\n${toolDescs}\n\nTo use a tool, respond with a tool call.`;
+    // v3.5.4 (field report P0): the built-in 4B model dropped the content
+    // parameter on 100% of file writes and leaked its own tool-template
+    // markup (<parameter=…>, </tool_call>) as plain text. Small models need
+    // the format spelled out with a concrete example, not just a parameter
+    // list.
+    const formatNote = tools.some(t => t.name === 'file')
+      ? `
+
+### Tool call format (strict)
+
+Tool calls are issued through the function-calling channel — never as text.
+Do NOT write markup like <tool_call>, <parameter=name>, or XML/Fenced blocks
+in your message: the runtime cannot execute those.
+
+Every parameter listed as required MUST be present with a non-empty value.
+Example — writing a file (content is mandatory):
+
+  file { "action": "write", "path": "notes/hello.txt", "content": "hello world" }
+
+Example — reading one (no content parameter at all):
+
+  file { "action": "read", "path": "notes/hello.txt" }`
+      : '';
+
+    return `## Tools\n\nYou have access to the following tools:\n\n${toolDescs}\n\nTo use a tool, respond with a tool call.${formatNote}`;
   }
 
   private buildEnvironment(): string {
