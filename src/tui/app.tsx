@@ -365,7 +365,8 @@ export function TuiApp({ app }: Props) {
         + (showSidebar ? 0 : 1) // PlanPanel fallback line when narrow
         + inputRows;
   const windowHeaderRows = scroll !== null ? 1 : 0;
-  const workspaceRows = Math.max(3, terminalRows - 1 - bottomStack);
+  // one spare line of slack — an off-by-one estimate must not stretch the row
+  const workspaceRows = Math.max(3, terminalRows - 2 - bottomStack);
   const win = buildWindow(allMessages, scroll, chatWidth, workspaceRows - windowHeaderRows);
   const maxScroll = maxUsefulScroll(allMessages, chatWidth, workspaceRows);
   const contextBreakdown = useMemo(() => {
@@ -491,9 +492,12 @@ export function TuiApp({ app }: Props) {
           </Box>
         </Box>
       ) : (
-        <Box flexDirection="row" flexGrow={1} minHeight={0}>
-          {/* LEFT: transcript viewport + pinned bottom stack */}
-          <Box flexDirection="column" flexGrow={1} minWidth={0}>
+        // v3.4.18: BOTH columns are pinned to the same explicit height with
+        // overflow hidden. The left column's real render height occasionally
+        // exceeded its estimate, stretched the row, and the unsized sidebar
+        // smeared into it (user screenshot). Fixed heights = fixed frame.
+        <Box flexDirection="row" width={terminalWidth} height={terminalRows - 1} overflow="hidden">
+          <Box flexDirection="column" width={chatWidth} height={terminalRows - 1} overflow="hidden">
             {scroll !== null && (
               <Text color={theme.textFaint}>
                 ── 滚动查看 {Math.min(scroll, maxScroll)}/{maxScroll} · ↑ 更早 · ↓ 返回 · esc 回到最新 ──
@@ -529,9 +533,9 @@ export function TuiApp({ app }: Props) {
             )}
             {inputArea}
           </Box>
-          {/* RIGHT: info sidebar, full height */}
+          {/* RIGHT: info sidebar, same pinned height as the left column */}
           {showSidebar && (
-            <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} paddingLeft={2} height={terminalRows - 1} overflow="hidden">
+            <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} paddingLeft={2} width={PANEL_WIDTH + 3} height={terminalRows - 1} overflow="hidden">
               <ContextPanel
                 used={usedTokens}
                 window={ctxWin}
