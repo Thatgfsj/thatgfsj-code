@@ -128,28 +128,22 @@ program
         if (process.stdout.isTTY) {
           // Terminal window/tab title.
           process.stdout.write('\x1b]2;Thatgfsj\x07');
-          // v3.4.13: clear the visible screen at startup (Claude Code
-          // behavior) — a previous session's leftover live frame used to
-          // sit above the fresh one. v3.4.14: 2J alone SCROLLS the old
-          // visible content into scrollback on Windows Terminal (it stays
-          // glued right above the splash); 3J purges the scrollback so the
-          // session truly starts clean.
-          process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
         }
         try {
           const { TuiErrorBoundary } = await import('../tui/components/ErrorBoundary.js');
-          // v3.4.12: INLINE rendering (no alternate screen). Committed
-          // messages go through Ink <Static> into the terminal's own
-          // scrollback — full history is always visible with native
-          // scrolling, which is what the user chose over the alt-screen
-          // pager window. The live region below the Static stays a fixed
-          // small block (streaming tail + status + input).
+          // v3.4.17: full-screen TUI (user mandate — opencode's three-zone
+          // layout: left transcript+input, right info sidebar, all pinned).
+          // Alternate screen: entering swaps buffers (clean start), exiting
+          // restores the shell screen exactly — the 复原 the user asked for.
+          // The wheel scrolls the transcript inside the app (↑/↓ on empty
+          // input), native scrollback is not involved.
           const instance = render(
             <TuiErrorBoundary><TuiApp app={app} /></TuiErrorBoundary>,
+            { alternateScreen: process.stdout.isTTY },
           );
           await instance.waitUntilExit();
         } finally {
-          // Leave one blank line between the last frame and the next shell prompt.
+          // Leave one blank line between the restored screen and the next prompt.
           if (process.stdout.isTTY) process.stdout.write('\r\n');
         }
         return;

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { Box, Static, Text, useStdout } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import chalk from 'chalk';
 import { ChatMessage } from './components/ChatMessage.js';
 import { Thinking } from './components/Thinking.js';
@@ -15,7 +15,7 @@ import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import { planStore } from '../plan/store.js';
-import { clipContentToRows } from './window.js';
+import { buildWindow, estimateMsgLines, clipContentToRows, maxUsefulScroll } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
 import type { MessageData } from './components/ChatMessage.js';
@@ -32,12 +32,14 @@ interface Props {
 type ViewMode = 'chat' | 'model_settings';
 
 /**
- * v3.4.12 (user mandate — 不要翻页): INLINE layout, the Claude Code /
- * codex shape. Committed messages render ONCE through Ink <Static> and
- * live in the terminal's own scrollback — nothing is ever clipped, the
- * terminal's native scrolling IS the history. Below the Static sits a
- * small live region (streaming tail, thinking, plan, status chip, input).
- * ↑/↓ belong to input history again; the mouse wheel scrolls natively.
+ * v3.4.17: full-screen three-zone TUI (user mandate — opencode parity):
+ *   left   transcript viewport (mouse wheel / ↑↓ scroll the full history)
+ *          with the streaming tail, plan, queue and input pinned to the
+ *          bottom of the column
+ *   right  info sidebar (context breakdown, ↑↓, cache, 回合窗口), full height
+ *   bottom input
+ * Alternate screen: entering swaps buffers (clean start), exiting restores
+ * the shell screen verbatim.
  */
 export function TuiApp({ app }: Props) {
   const { messages, isThinking, queuedMessage, streamingView, sendMessage, cancel, hydrateMessages, clearMessages } = useChat(app);
@@ -46,7 +48,6 @@ export function TuiApp({ app }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
-  // v3.4.15: rows are back (inline mode) — the splash centers vertically.
   const terminalRows = (stdout as any)?.rows || 24;
   /**
    * v3.0.8 fix (user report): maximizing the window left the layout at the
@@ -59,6 +60,12 @@ export function TuiApp({ app }: Props) {
     return () => { (stdout as any)?.off?.('resize', onResize); };
   }, [stdout]);
 
+  // v3.4.8: splash ⇄ chat switches repaint through Ink's line-diff and can
+  // leave the previous layout's remnants in the alt buffer. One frame at
+  // FULL viewport height forces Ink's whole-screen clear; then back to
+  // rows-1 (Ink 7.1 on Windows full-clears when frame == viewport height).
+  const [tallFrame, setTallFrame] = useState(false);
+
   const [cacheSnapshot, setCacheSnapshot] = useState(() => app.cacheStats.snapshot());
   const [resolvedTtl, setResolvedTtl] = useState<'5m' | '1h' | null>(app.resolvedTtl);
   const thinking = app.getThinking();
@@ -67,12 +74,28 @@ export function TuiApp({ app }: Props) {
     setResolvedTtl(app.resolvedTtl);
   }, [messages.length]);
 
-  // 1s heartbeat so the status chip stays live even when idle.
+  // 1s heartbeat so the sidebar/chip stays live even when idle.
   const [, setHeartbeat] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setHeartbeat(h => h + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // v3.4.17: transcript viewport scroll (mouse wheel delivers ↑/↓ in the
+  // alternate screen; also ↑/↓ on an empty input). Full-history window via
+  // buildWindow, clamped at the useful ceiling.
+  const [scroll, setScroll] = useState<number | null>(null);
+  const allMessagesRef = useRef<MessageData[]>([]);
+  const scrollBy = useCallback((d: number) => {
+    setScroll(prev => {
+      const next = (prev ?? 0) + d;
+      const w = terminalWidth - 4 - (terminalWidth >= 100 ? 40 : 0);
+      const budget = Math.max(3, terminalRows - 11);
+      const max = maxUsefulScroll(allMessagesRef.current, w, budget);
+      if (max === 0) return null;
+      return next <= 0 ? null : Math.min(next, max);
+    });
+  }, [terminalWidth, terminalRows]);
 
   const addMsg = useCallback((content: string) => {
     setSystemMessages(prev => [...prev, { role: 'assistant', content }]);
@@ -306,18 +329,45 @@ export function TuiApp({ app }: Props) {
   }, [handleCommand, sendMessage, app, viewMode, addMsg, hydrateMessages, clearMessages]);
 
   const allMessages = [...systemMessages, ...messages];
+  allMessagesRef.current = allMessages;
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;
+  // v3.4.8: splash ⇄ chat full-height frame (alt-buffer remnant kill).
+  const prevSplash = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (prevSplash.current === null) { prevSplash.current = splashMode; return; }
+    if (prevSplash.current !== splashMode) {
+      prevSplash.current = splashMode;
+      setTallFrame(true);
+      const t = setTimeout(() => setTallFrame(false), 120);
+      return () => clearTimeout(t);
+    }
+  }, [splashMode]);
   const cfg = app.config.get();
 
-  // ── v3.4.12 live-region metrics (inline mode — no frame-height budget
-  // needed; the terminal scrollback holds the transcript). The streaming
-  // tail is capped so the live block stays compact; the status chip carries
-  // what the old right-hand panel showed.
-  const chatWidth = terminalWidth - 4;
+  // ── three-zone metrics: the frame is rows-1 (never rows — Ink 7.1 on
+  // Windows full-clears at exact viewport height). Bottom stack is
+  // measured where possible; the transcript window gets what remains.
+  const PANEL_WIDTH = 36;
+  const SIDEBAR_RESERVE = PANEL_WIDTH + 3; // divider + padding
+  const showSidebar = terminalWidth >= 100;
+  const [inputRows, setInputRows] = useState(6);
+  const chatWidth = terminalWidth - 4 - (showSidebar ? SIDEBAR_RESERVE : 0);
   const streamView = streamingView
-    ? clipContentToRows(streamingView, chatWidth, 10)
+    ? clipContentToRows(streamingView, chatWidth, 8)
     : null;
+  const streamEst = streamView ? estimateMsgLines({ role: 'assistant', content: streamView }, chatWidth) + 2 : 0;
+  const modalRows = confirmReq ? 17 : planApproval ? 7 : 0;
+  const bottomStack =
+    modalRows > 0 ? modalRows
+      : streamEst + (isThinking ? 1 : 0) + (queuedMessage ? 1 : 0)
+        + (app.permissionMode !== 'ask' ? 1 : 0)
+        + (showSidebar ? 0 : 1) // PlanPanel fallback line when narrow
+        + inputRows;
+  const windowHeaderRows = scroll !== null ? 1 : 0;
+  const workspaceRows = Math.max(3, terminalRows - 1 - bottomStack);
+  const win = buildWindow(allMessages, scroll, chatWidth, workspaceRows - windowHeaderRows);
+  const maxScroll = maxUsefulScroll(allMessages, chatWidth, workspaceRows);
   const contextBreakdown = useMemo(() => {
     try {
       const bd = app.prompts.estimateBreakdown();
@@ -345,10 +395,9 @@ export function TuiApp({ app }: Props) {
   // "你好" with ↑107万. /cache keeps the lifetime view.
   const sStats = app.sessionStats;
   const sessHit = sStats.inputTokens > 0 ? sStats.cachedTokens / sStats.inputTokens : null;
-  const showSidebar = terminalWidth >= 100;
 
-  // v3.0.11: chat mode input spans the full terminal width; splash keeps
-  // the centered fixed-width block.
+  // v3.0.11: chat mode input spans the left column; splash keeps the
+  // centered fixed-width block.
   const inputArea = confirmReq ? (
     <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
   ) : planApproval ? (
@@ -356,8 +405,11 @@ export function TuiApp({ app }: Props) {
   ) : (
     <UserInput
       onSubmit={onSubmit}
-      // esc with empty input cancels the running turn (no pager anymore).
-      onCancel={() => { cancel(); }}
+      // esc: exit the transcript scroll first, else cancel the turn.
+      onCancel={() => {
+        if (scroll !== null) { setScroll(null); return; }
+        cancel();
+      }}
       disabled={false}
       mode={app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}
       provider={cfg.provider}
@@ -365,6 +417,9 @@ export function TuiApp({ app }: Props) {
       thinking={thinking}
       fullWidth={!splashMode}
       width={splashMode ? Math.min(terminalWidth - 4, 64) : undefined}
+      onEmptyUp={splashMode ? undefined : () => scrollBy(1)}
+      onEmptyDown={splashMode ? undefined : () => scrollBy(-1)}
+      onLayoutRows={setInputRows}
     />
   );
 
@@ -381,44 +436,32 @@ export function TuiApp({ app }: Props) {
     </Box>
   ) : null;
 
-  // /models opens as a centered modal (live region). A pending permission
+  // /models opens as a centered modal over the frame. A pending permission
   // confirm must win over the dialog.
   if (viewMode === 'model_settings') {
     if (confirmReq) {
       return (
-        <Box flexDirection="column" width={terminalWidth} justifyContent="center" alignItems="center">
+        <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
           <ConfirmPrompt message={confirmReq.message} onAnswer={onConfirmAnswer} />
         </Box>
       );
     }
     return (
-      <Box flexDirection="column" width={terminalWidth} justifyContent="center" alignItems="center">
+      <Box flexDirection="column" height={terminalRows - 1} width={terminalWidth} justifyContent="center" alignItems="center">
         <ModelSettings
           app={app}
           onClose={() => setViewMode('chat')}
           width={Math.min(terminalWidth - 2, 72)}
+          maxRows={Math.max(4, terminalRows - 12)}
         />
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="column" width={terminalWidth} paddingX={1}>
-      {/* Committed transcript → terminal scrollback (rendered once each).
-          History is never clipped; the terminal's own scrolling is the pager. */}
-      <Static items={allMessages}>
-        {(m, i) => (
-          <ChatMessage key={`${i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
-        )}
-      </Static>
-
+    <Box flexDirection="column" width={terminalWidth} paddingX={1} height={tallFrame ? terminalRows : terminalRows - 1}>
       {splashMode ? (
-        <>
-          {/* v3.4.15: center the splash block vertically in the viewport
-              (the startup clear leaves the cursor at row 1). The block is
-              ~16 rows; the pad lives in the live region and disappears
-              with the splash once the conversation starts. */}
-          <Box height={Math.max(0, Math.floor((terminalRows - 16) / 2))} />
+        <Box flexDirection="column" flexGrow={1} justifyContent="center">
           <Splash />
           {modeBadge}
           <Box justifyContent="center">{inputArea}</Box>
@@ -429,22 +472,37 @@ export function TuiApp({ app }: Props) {
             </Text>
           </Box>
           {app.usingBuiltinModel && (
-            <Box justifyContent="center" paddingBottom={1}>
+            <Box justifyContent="center" paddingTop={1}>
               <Text color={theme.textFaint}>
                 <Text color={theme.info}>ℹ </Text>
                 未配置 API Key · 正在使用内置共享模型 Qwen/Qwen3.5-4B（共享额度） · gfcode init 配置自己的
               </Text>
             </Box>
           )}
-        </>
+          <StatusBar
+            messageCount={allMessages.length}
+            skills={activeSkills}
+            provider={cfg.provider}
+            model={cfg.model}
+          />
+          <Box justifyContent="space-between" width="100%">
+            <Text color={theme.textFaint}>~</Text>
+            <Text color={theme.textFaint}>v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
+          </Box>
+        </Box>
       ) : (
-        // v3.4.16: the live region fills exactly ONE viewport and pins its
-        // content to the BOTTOM (opencode parity) — the input is always at
-        // the bottom of the screen, and the opencode-style sidebar sits at
-        // the right on wide terminals. The transcript above lives in the
-        // terminal scrollback.
-        <Box flexDirection="row" width={terminalWidth} height={terminalRows} overflow="hidden">
-          <Box flexDirection="column" flexGrow={1} minWidth={0} justifyContent="flex-end">
+        <Box flexDirection="row" flexGrow={1} minHeight={0}>
+          {/* LEFT: transcript viewport + pinned bottom stack */}
+          <Box flexDirection="column" flexGrow={1} minWidth={0}>
+            {scroll !== null && (
+              <Text color={theme.textFaint}>
+                ── 滚动查看 {Math.min(scroll, maxScroll)}/{maxScroll} · ↑ 更早 · ↓ 返回 · esc 回到最新 ──
+              </Text>
+            )}
+            {win.messages.map((m, i) => (
+              <ChatMessage key={`${win.start + i}-${m.role}-${m.content.slice(0, 8)}`} message={m} width={chatWidth} />
+            ))}
+            <Box flexGrow={1} />
             {streamView && (
               <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
                 <Text color={theme.textFaint}>
@@ -465,14 +523,15 @@ export function TuiApp({ app }: Props) {
             {!showSidebar && (
               <Box paddingLeft={1}>
                 <Text color={theme.textFaint} wrap="truncate-end">
-                  ◇ 上下文 {fmtWan(usedTokens)}/{fmtWan(ctxWin)}（{ctxPct}%） · 缓存命中 {sessHit === null ? '—' : `${Math.round(sessHit * 100)}%`} · ↑{fmtWan(sStats.inputTokens)} ↓{fmtWan(sStats.outputTokens)} · 回合窗口 {app.session.getMaxMessages()} 条
+                  ◇ 上下文 {fmtWan(usedTokens)}/{fmtWan(ctxWin)}（{ctxPct ?? 0}%） · 缓存命中 {sessHit === null ? '—' : `${Math.round(sessHit * 100)}%`} · ↑{fmtWan(sStats.inputTokens)} ↓{fmtWan(sStats.outputTokens)} · 回合窗口 {app.session.getMaxMessages()} 条
                 </Text>
               </Box>
             )}
             {inputArea}
           </Box>
+          {/* RIGHT: info sidebar, full height */}
           {showSidebar && (
-            <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} height={terminalRows} overflow="hidden">
+            <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} paddingLeft={2} height={terminalRows - 1} overflow="hidden">
               <ContextPanel
                 used={usedTokens}
                 window={ctxWin}
@@ -480,8 +539,8 @@ export function TuiApp({ app }: Props) {
                 inTokens={sStats.inputTokens}
                 outTokens={sStats.outputTokens}
                 maxMessages={app.session.getMaxMessages()}
-                width={36}
-                title={`${new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(/\//g, '-')}`}
+                width={PANEL_WIDTH}
+                title={new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(/\//g, '-')}
                 categories={[
                   { label: '系统工具', tokens: contextBreakdown?.systemTools ?? 0 },
                   { label: '消息', tokens: contextBreakdown?.msgTokens ?? 0 },
@@ -491,34 +550,20 @@ export function TuiApp({ app }: Props) {
                 ]}
               />
               <Box flexGrow={1} />
-              <PlanPanel width={36} />
-              <Box>
+              <PlanPanel width={PANEL_WIDTH} />
+              <Box justifyContent="space-between" width={PANEL_WIDTH}>
                 <Text color={theme.textFaint}>~</Text>
-                <Text color={theme.textFaint}>                                     v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
+                <Text color={theme.textFaint}>v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
               </Box>
             </Box>
           )}
-        </Box>
-      )}
-      {splashMode && (
-        <StatusBar
-          messageCount={allMessages.length}
-          skills={activeSkills}
-          provider={cfg.provider}
-          model={cfg.model}
-        />
-      )}
-      {splashMode && (
-        <Box justifyContent="space-between" width="100%">
-          <Text color={theme.textFaint}>~</Text>
-          <Text color={theme.textFaint}>v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
         </Box>
       )}
     </Box>
   );
 }
 
-/** 33000 → "3.3万" (matches the old ContextPanel formatting). */
+/** 33000 → "3.3万" (sidebar/chip formatting). */
 function fmtWan(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
   if (n < 10000) return String(Math.round(n));
