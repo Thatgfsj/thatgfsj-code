@@ -11,6 +11,7 @@ import { ConfirmPrompt } from './components/ConfirmPrompt.js';
 import { Splash } from './components/Splash.js';
 import { PlanPanel } from './components/PlanPanel.js';
 import { PlanApproval } from './components/PlanApproval.js';
+import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
 import { planStore } from '../plan/store.js';
@@ -340,7 +341,11 @@ export function TuiApp({ app }: Props) {
     : 0;
   const ctxWin = app.getContextWindow();
   const ctxPct = ctxWin > 0 ? Math.min(100, Math.round((usedTokens / ctxWin) * 100)) : 0;
-  const hitPct = cacheSnapshot.totalRequests > 0 ? Math.round(cacheSnapshot.hitRate * 100) : null;
+  // v3.4.16: SESSION sums (↑↓/cache) — the lifetime store confused a fresh
+  // "你好" with ↑107万. /cache keeps the lifetime view.
+  const sStats = app.sessionStats;
+  const sessHit = sStats.inputTokens > 0 ? sStats.cachedTokens / sStats.inputTokens : null;
+  const showSidebar = terminalWidth >= 100;
 
   // v3.0.11: chat mode input spans the full terminal width; splash keeps
   // the centered fixed-width block.
@@ -433,36 +438,67 @@ export function TuiApp({ app }: Props) {
           )}
         </>
       ) : (
-        <>
-          {streamView && (
-            <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
-              <Text color={theme.textFaint}>
-                ▪ {app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}{cfg.model ? ` · ${cfg.model}` : ''}（生成中…）
-              </Text>
-              {/* plain text while streaming; the full message joins the
-                  scrollback once the turn commits. */}
-              <Text>{streamView}</Text>
+        // v3.4.16: the live region fills exactly ONE viewport and pins its
+        // content to the BOTTOM (opencode parity) — the input is always at
+        // the bottom of the screen, and the opencode-style sidebar sits at
+        // the right on wide terminals. The transcript above lives in the
+        // terminal scrollback.
+        <Box flexDirection="row" width={terminalWidth} height={terminalRows} overflow="hidden">
+          <Box flexDirection="column" flexGrow={1} minWidth={0} justifyContent="flex-end">
+            {streamView && (
+              <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
+                <Text color={theme.textFaint}>
+                  ▪ {app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}{cfg.model ? ` · ${cfg.model}` : ''}（生成中…）
+                </Text>
+                <Text>{streamView}</Text>
+              </Box>
+            )}
+            <Thinking active={isThinking} />
+            {!showSidebar && <PlanPanel width={chatWidth} />}
+            {queuedMessage && (
+              <Box paddingLeft={1}>
+                <Text color={theme.warning}>📎 已排队: </Text>
+                <Text color={theme.textDim}>{queuedMessage}</Text>
+              </Box>
+            )}
+            {modeBadge}
+            {!showSidebar && (
+              <Box paddingLeft={1}>
+                <Text color={theme.textFaint} wrap="truncate-end">
+                  ◇ 上下文 {fmtWan(usedTokens)}/{fmtWan(ctxWin)}（{ctxPct}%） · 缓存命中 {sessHit === null ? '—' : `${Math.round(sessHit * 100)}%`} · ↑{fmtWan(sStats.inputTokens)} ↓{fmtWan(sStats.outputTokens)} · 回合窗口 {app.session.getMaxMessages()} 条
+                </Text>
+              </Box>
+            )}
+            {inputArea}
+          </Box>
+          {showSidebar && (
+            <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} height={terminalRows} overflow="hidden">
+              <ContextPanel
+                used={usedTokens}
+                window={ctxWin}
+                hitRate={sessHit}
+                inTokens={sStats.inputTokens}
+                outTokens={sStats.outputTokens}
+                maxMessages={app.session.getMaxMessages()}
+                width={36}
+                title={`${new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(/\//g, '-')}`}
+                categories={[
+                  { label: '系统工具', tokens: contextBreakdown?.systemTools ?? 0 },
+                  { label: '消息', tokens: contextBreakdown?.msgTokens ?? 0 },
+                  { label: '技能', tokens: contextBreakdown?.skills ?? 0 },
+                  { label: '系统提示词', tokens: contextBreakdown?.systemPrompt ?? 0 },
+                  { label: 'MCP 工具', tokens: contextBreakdown?.mcpTools ?? 0 },
+                ]}
+              />
+              <Box flexGrow={1} />
+              <PlanPanel width={36} />
+              <Box>
+                <Text color={theme.textFaint}>~</Text>
+                <Text color={theme.textFaint}>                                     v{getVersion()}{app.permissionMode === 'accept' ? ' · yolo' : ''}</Text>
+              </Box>
             </Box>
           )}
-          <Thinking active={isThinking} />
-          <PlanPanel width={chatWidth} />
-          {queuedMessage && (
-            <Box paddingLeft={1}>
-              <Text color={theme.warning}>📎 已排队: </Text>
-              <Text color={theme.textDim}>{queuedMessage}</Text>
-            </Box>
-          )}
-          {modeBadge}
-          {/* status chip: the essence of the old right-hand panel */}
-          {!splashMode && (
-            <Box paddingLeft={1}>
-              <Text color={theme.textFaint} wrap="truncate-end">
-                ◇ 上下文 {fmtWan(usedTokens)}/{fmtWan(ctxWin)}（{ctxPct}%） · 缓存命中 {hitPct === null ? '—' : `${hitPct}%`} · ↑{fmtWan(cacheSnapshot.totalInputTokens)} ↓{fmtWan(cacheSnapshot.totalOutputTokens)} · 回合窗口 {app.session.getMaxMessages()} 条
-              </Text>
-            </Box>
-          )}
-          {inputArea}
-        </>
+        </Box>
       )}
       {splashMode && (
         <StatusBar

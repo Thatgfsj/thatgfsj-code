@@ -89,8 +89,10 @@ export class App {
    * v3.0.13: session-wide token accounting, surfaced in the status bar.
    * promptTokens keeps the LAST round's value (= current context size);
    * completionTokens accumulates across rounds.
+   * v3.4.16: session-scoped ↑↓/cache sums — the TUI panel used to show the
+   * LIFETIME cache-stats store, so a fresh session claimed ↑107万 tokens.
    */
-  sessionStats = { promptTokens: 0, completionTokens: 0, rounds: 0 };
+  sessionStats = { promptTokens: 0, completionTokens: 0, rounds: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   /**
    * v3.0.5: permission mode. 'ask' requires confirmation for write/execute
    * tool actions; 'accept' (--yolo) allows everything.
@@ -611,6 +613,12 @@ export class App {
           if (u.prompt_tokens > 0) this.sessionStats.promptTokens = u.prompt_tokens;
           this.sessionStats.completionTokens += u.completion_tokens || 0;
           this.sessionStats.rounds += 1;
+          // v3.4.16: session-scoped sums (panel shows THESE, not the
+          // lifetime cache-stats store).
+          this.sessionStats.inputTokens += u.prompt_tokens || 0;
+          this.sessionStats.outputTokens += u.completion_tokens || 0;
+          this.sessionStats.cachedTokens +=
+            u.cache_read_input_tokens ?? u.prompt_cache_hit_tokens ?? u.cached_tokens ?? 0;
         } catch { /* best-effort */ }
         if (debugUsage) {
           process.stderr.write(
