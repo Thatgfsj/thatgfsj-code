@@ -52,7 +52,7 @@
     "marked": "15.0.12",
     "marked-terminal": "7.3.0",
     "playwright-core": "^1.63.0",
-    "react": "19.2.7",
+    "react": "19.3.0",
     "undici": "^7.29.1"
   },
   "devDependencies": {
