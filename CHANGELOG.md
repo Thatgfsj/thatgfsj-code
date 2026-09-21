@@ -9,6 +9,22 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 > 是错误示范，3.6.0 已废弃并由 3.5.2 取代，内容完全一致）。
 > 详见 `DEVELOPMENT.md` 的 Versioning 一节。
 
+## [3.5.3] - 2026-09-21 - 三路子代理测试修复
+
+> 三路隔离沙箱子代理（约 290 次工具调用，mock LLM 精确驱动）汇总：patch 工具链与会话持久化质量最高；本轮修复其发现的全部重要问题。282 → 290 用例。
+
+### Fixed
+
+- **patch 回滚失败如实上报（最重要）**：多文件 patch 的回滚循环中"恢复已存在文件"本身失败时，旧实现静默中断整个回滚并谎称 "ROLLED BACK (no files changed)"（金丝雀文件残留在磁盘）。现逐项独立恢复、失败项逐一列进错误消息（"Rollback PARTIALLY FAILED — these paths may still hold patched content: …"）
+- **200 + 垃圾响应体不再假成功**：openai/anthropic/gemini 三个 provider 的流解析此前把无法解析的行全部静默吞掉——HTTP 200 + 非 SSE 垃圾 body 会走到"空回复 = 成功"（result success:true、content:""、退出码 0）。现在三个 provider 都跟踪有效 SSE 帧计数，零有效帧即抛出明确的提供方错误，走熔断与失败契约
+- **工具抛异常计入 stats.failed**：计划期 EBUSY 等裸异常此前不计入失败统计（监控显示 failed=0），熔断也感知不到；现与软失败同样计数
+- **file 工具工作区边界**：write/delete/mkdir 此前接受任意绝对路径；现限制在项目目录内（经 ctx.workingDirectory 注入），越界返回 [WORKSPACE] 错误并指引 shell 逃生门；read/list/exists 保持不限制（读外部包属正常调研）。测试/直调不传 workingDirectory 时边界不生效（向后兼容）
+- **cache-stats 并发丢账**："启动快照 + 整文件回写、最后写者胜"在 3 进程并发下丢 67% 的轮次。record() 现在持有 wx 独占创建自旋锁（含陈旧锁抢占与 Windows unlink EPERM 重试）重读磁盘最新值再累加；stats 文件改原子写。单进程逐 token 精确的既有行为不变
+- **`-c` 会话回退**：最新会话文件损坏时不再整体放弃并误报"目录为空"——按最新优先遍历前 10 个，取第一个可解析的，并在恢复提示中注明跳过了几个损坏文件；全部损坏才报错（报错如实）
+- **崩溃零进度缓解**：agent 循环每轮工具结果完整镜像后回调持久化（onRoundComplete → session.persist），强杀最多丢当前一轮；失败任务（500/429/断连）的 catch 路径同样落盘，`-c` 可续接（加载期 sanitize 自愈兜底悬空工具对）
+- **`--json` result 增加 `aborted: true` 顶层标志**：消费方无需解析 stats 即可识别熔断/中止
+- **file read 大文件按行对齐截断**（此前硬切字符会把行切成半行，诱导模型去"修复"残缺尾行）；**file delete 对目录**给出明确指引而非裸 EPERM
+
 ## [3.5.2] - 2026-09-21 - 上下文计算维护（专项调查驱动）
 
 > 发布说明：本版本内容与已废弃的 3.6.0 完全一致——那次误用了 minor 跳版，

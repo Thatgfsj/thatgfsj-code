@@ -12,12 +12,31 @@
 
 import type { Tool, ToolResult, ToolContext } from './types.js';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync } from 'fs';
-import { join, dirname, basename, extname } from 'path';
+import { join, dirname, basename, extname, isAbsolute, resolve, sep } from 'path';
 import { DiffPreview } from '../utils/diff.js';
 
 export class FileTool implements Tool {
   name = 'file';
-  description = 'Perform file operations: read, write, list, delete, etc.';
+  description = 'Perform file operations: read, write, list, delete, etc. Write/delete are confined to the project directory.';
+
+  /**
+   * v3.5.3 (field report A-2): the tool accepted any absolute path, so a
+   * model could be steered into writing OUTSIDE the project directory.
+   * Mutating actions are now confined to ctx.workingDirectory (the
+   * project root, injected by App). Read-class actions stay unrestricted —
+   * reading an installed package or a user file is legitimate research.
+   * No ctx (tests, direct use) skips the fence.
+   */
+  private assertInsideWorkspace(action: string, path: string, ctx?: ToolContext): ToolResult | null {
+    if (!ctx?.workingDirectory) return null;
+    const root = resolve(ctx.workingDirectory);
+    const abs = resolve(path);
+    if (abs === root || abs.startsWith(root + sep)) return null;
+    return {
+      success: false,
+      error: `[WORKSPACE] "${action}" may only touch files inside the project directory (${root}). Target was outside: ${path}. If this is genuinely required, ask the user or use the shell tool (it asks for confirmation).`,
+    };
+  }
 
   inputSchema = {
     type: 'object' as const,
@@ -63,16 +82,25 @@ export class FileTool implements Tool {
       switch (action) {
         case 'read':
           return this.readFile(path);
-        case 'write':
+        case 'write': {
+          const fence = this.assertInsideWorkspace('write', path, ctx);
+          if (fence) return fence;
           return await this.writeFile(path, content as string, ctx);
+        }
         case 'list':
           return this.listDir(path);
-        case 'delete':
+        case 'delete': {
+          const fence = this.assertInsideWorkspace('delete', path, ctx);
+          if (fence) return fence;
           return await this.deleteFile(path, ctx);
+        }
         case 'exists':
           return this.checkExists(path);
-        case 'mkdir':
+        case 'mkdir': {
+          const fence = this.assertInsideWorkspace('mkdir', path, ctx);
+          if (fence) return fence;
           return this.mkdir(path);
+        }
         default:
           return { success: false, error: `Unknown action: ${action}` };
       }
@@ -108,10 +136,15 @@ export class FileTool implements Tool {
       content = buffer.toString('latin1');
     }
 
-    // Truncate large files
+    // Truncate large files. v3.5.3: cut at a LINE boundary — the old hard
+    // character slice served half a line, and models tried to "fix" the
+    // broken tail.
     const MAX_SIZE = 8000;
     if (content.length > MAX_SIZE) {
-      content = content.slice(0, MAX_SIZE) + '\n\n... [truncated, file too large]';
+      let head = content.slice(0, MAX_SIZE);
+      const lastNewline = head.lastIndexOf('\n');
+      if (lastNewline > MAX_SIZE * 0.5) head = head.slice(0, lastNewline + 1);
+      content = head + '\n\n... [truncated at a line boundary, file too large]';
     }
     // v3.5.0: an empty file must SAY it is empty — the model used to get
     // output:"" (truthy-falsy nowhere), never learning its write failed.
@@ -182,6 +215,14 @@ export class FileTool implements Tool {
   private async deleteFile(path: string, ctx?: ToolContext): Promise<ToolResult> {
     if (!existsSync(path)) {
       return { success: false, error: `Path not found: ${path}` };
+    }
+    // v3.5.3: a directory used to surface as a raw EPERM crash — say what
+    // happened and what to do instead.
+    if (statSync(path).isDirectory()) {
+      return {
+        success: false,
+        error: `Refused: ${path} is a directory. file delete only removes single files; use the shell tool with "rm -r" (it will ask for confirmation).`,
+      };
     }
 
     // v3.0.5: delete is destructive — always ask, fail closed without a channel.

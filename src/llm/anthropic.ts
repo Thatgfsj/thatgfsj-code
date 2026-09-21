@@ -150,6 +150,9 @@ export class AnthropicProvider implements LLMProvider {
     let currentBlockType = '';
     // Anthropic attaches usage info to the trailing message_delta event.
     let capturedUsage: Usage | undefined;
+    // v3.5.3 (field report): garbage 200 bodies must fail loudly, not
+    // masquerade as an empty-but-successful answer.
+    let sawValidFrame = false;
 
     try {
       const response = await this.doRequest(body, controller.signal);
@@ -179,6 +182,7 @@ export class AnthropicProvider implements LLMProvider {
 
             try {
               const data = JSON.parse(trimmed.slice(6));
+              if (data && typeof data === 'object') sawValidFrame = true;
 
               // content_block_start: track block types
               if (data.type === 'content_block_start') {
@@ -262,6 +266,13 @@ export class AnthropicProvider implements LLMProvider {
 
     if (toolCalls.length > 0) {
       yield { type: 'tool_calls', toolCalls };
+    }
+
+    // v3.5.3: garbage 200 body (no valid SSE frames) fails loudly.
+    if (!sawValidFrame) {
+      throw new Error(
+        'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
+      );
     }
 
     if (capturedUsage) {

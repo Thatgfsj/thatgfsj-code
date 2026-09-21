@@ -112,23 +112,31 @@ program
         await app.setModelThinking(app.config.get().model, thinking, !oneShot);
       }
 
-      // v3.5.0: -c/--continue resumes the most recent persisted session.
+      // v3.5.3 (field report C-3): -c used to load ONLY the newest file and
+      // give up if that one was corrupt. Walk newest-first, take the first
+      // session that parses, and say how many corrupt files were skipped.
       if (options.continue) {
-        const latest = SessionManager.list(1)[0];
-        if (!latest) {
+        const candidates = SessionManager.list(10);
+        if (candidates.length === 0) {
           console.error(chalk.yellow('\n  没有可恢复的会话（~/.thatgfsj/sessions/ 为空）。'));
           process.exit(1);
         }
-        const file = SessionManager.load(latest.id);
+        let file: ReturnType<typeof SessionManager.load> = null;
+        let skipped = 0;
+        for (const cand of candidates) {
+          const f = SessionManager.load(cand.id);
+          if (f && Array.isArray(f.messages)) { file = f; break; }
+          skipped++;
+        }
         if (!file) {
-          console.error(chalk.red(`\n  会话 ${latest.id} 无法读取。\n`));
+          console.error(chalk.red(`\n  最近 ${candidates.length} 个会话文件均无法读取（损坏或格式错误）。可删除损坏文件后重试。\n`));
           process.exit(1);
         }
         app.session.loadFrom(file);
         // v3.6.0 (P1-2): restored session — stale counters must not leak.
         app.resetSessionStats();
         if (!jsonMode) {
-          console.log(chalk.gray(`  ↩ 已恢复会话 ${latest.id}（${latest.messageCount} 条消息）：${latest.preview}`));
+          console.log(chalk.gray(`  ↩ 已恢复会话 ${file.id}（${file.messages.length} 条消息）${skipped > 0 ? `（跳过 ${skipped} 个损坏文件）` : ''}`));
         }
       }
 
@@ -405,6 +413,9 @@ program
               type: 'result',
               success: ok,
               content: toPersist.trim(),
+              // v3.5.3: explicit flag so consumers don't have to dig into
+              // stats to detect an aborted loop.
+              ...(ok ? {} : { aborted: true }),
               ...(loopStats ? { stats: { ...loopStats } } : {}),
             });
             if (!ok) {
@@ -418,8 +429,12 @@ program
         }
       } catch (error: any) {
         const msg = error.message || String(error);
+        // v3.5.3 (field report C-4): a failed round still holds real work
+        // (user prompt + any completed tool rounds). Persist it — sanitized
+        // on load — so `-c` can resume instead of losing everything.
+        try { app.session.persist(); } catch { /* best-effort */ }
         if (jsonMode) {
-          // v3.5.1: emit result (success:false) in ADDITION to the error
+          // v3.5.3: emit result (success:false) in ADDITION to the error
           // event — headless consumers had to handle two failure shapes
           // (result-with-false vs bare-error) depending on WHERE it broke.
           emit({ type: 'error', message: msg });
@@ -428,6 +443,7 @@ program
             success: false,
             content: '',
             error: msg,
+            aborted: /AGENT_ABORTED/i.test(msg) || /Stream stalled|timeout/i.test(msg) ? true : undefined,
             stats: { rounds: 0, toolCalls: 0, denied: 0, failed: 0, abortedReason: msg },
           });
           process.exitCode = 1;

@@ -28,7 +28,7 @@
  * billable invoice.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, writeSync, existsSync, mkdirSync, openSync, closeSync, unlinkSync, renameSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import type { Usage } from '../types.js';
@@ -112,6 +112,12 @@ export class CacheStatsStore {
    * OpenAI-compatible automatic-prefix-caching shape
    * (cached_tokens — zhipu / SiliconFlow / OpenAI / vLLM). A provider that
    * reports none of them still updates the request counter.
+   *
+   * v3.5.3 (field report C-2): this used to be "load at startup, blind
+   * whole-file rewrite at save" — concurrent gfc processes silently
+   * overwrote each other's rounds (measured 67% loss with 3 processes).
+   * The increment now re-reads the file UNDER the lock and merges into
+   * the freshest on-disk state; the in-memory copy follows the disk.
    */
   record(usage: Usage): void {
     const read = usage.cache_read_input_tokens
@@ -123,20 +129,32 @@ export class CacheStatsStore {
     const input = usage.prompt_tokens ?? 0;
     const output = usage.completion_tokens ?? 0;
 
-    this.stats.totalReadTokens += read;
-    this.stats.totalCreationTokens += creation;
-    this.stats.totalInputTokens += input;
-    this.stats.totalOutputTokens += output;
-    this.stats.totalRequests += 1;
+    const bump = (s: CacheStats): CacheStats => {
+      s.totalReadTokens += read;
+      s.totalCreationTokens += creation;
+      s.totalInputTokens += input;
+      s.totalOutputTokens += output;
+      s.totalRequests += 1;
+      const hitRate = input > 0 ? read / input : 0;
+      s.history.push({ ts: Date.now(), read, creation, input, output, hitRate });
+      if (s.history.length > HISTORY_LIMIT) {
+        s.history.splice(0, s.history.length - HISTORY_LIMIT);
+      }
+      return s;
+    };
 
-    // Per-round snapshot (for /cache command history view).
-    const hitRate = input > 0 ? read / input : 0;
-    this.stats.history.push({ ts: Date.now(), read, creation, input, output, hitRate });
-    if (this.stats.history.length > HISTORY_LIMIT) {
-      this.stats.history.splice(0, this.stats.history.length - HISTORY_LIMIT);
+    // v3.5.3 (field report C-2): the old "load at startup, blind whole-file
+    // rewrite" lost 67% of rounds with 3 concurrent processes (last-writer-
+    // wins). Re-read the file UNDER the lock and merge into the freshest
+    // on-disk state; the in-memory copy mirrors the disk.
+    const locked = CacheStatsStore.acquireLock(this.lockPath());
+    try {
+      const disk = this.load();
+      this.stats = bump(disk);
+      this.save();
+    } finally {
+      if (locked) CacheStatsStore.releaseLock(this.lockPath());
     }
-
-    this.save();
   }
 
   /**
@@ -164,6 +182,51 @@ export class CacheStatsStore {
   /** Direct accessor for tests. */
   get raw(): CacheStats { return this.stats; }
 
+  // -- cross-process locking (wx exclusive-create spinlock) --
+
+  private lockPath(): string {
+    return this.path + '.lock';
+  }
+
+  /**
+   * v3.5.3: wx exclusive-create spinlock. On Windows, unlink of a freshly
+   * closed file can transiently fail (EPERM), leaving a stale lock behind;
+   * a lock carrying an old timestamp is therefore treated as abandoned and
+   * stolen after STALE_MS.
+   */
+  private static acquireLock(lockPath: string, timeoutMs = 5000, staleMs = 10000): boolean {
+    const start = Date.now();
+    for (;;) {
+      try {
+        const fh = openSync(lockPath, 'wx'); // EEXIST when someone else holds it
+        try { writeSync(fh, String(Date.now()), 0, 'utf-8'); } finally { closeSync(fh); }
+        return true;
+      } catch (e: any) {
+        if (e?.code !== 'EEXIST') return false;
+        // Stale? (crashed holder, or an unlink that hit an EPERM window)
+        try {
+          const ts = Number(readFileSync(lockPath, 'utf-8').trim());
+          if (Number.isFinite(ts) && Date.now() - ts > staleMs) {
+            unlinkSync(lockPath);
+            continue;
+          }
+        } catch { /* fall through to spin */ }
+        if (Date.now() - start > timeoutMs) return false;
+        const until = Date.now() + 20;
+        while (Date.now() < until) { /* spin */ }
+      }
+    }
+  }
+
+  private static releaseLock(lockPath: string): void {
+    // Windows can transiently EPERM on unlink right after close — retry.
+    for (let i = 0; i < 3; i++) {
+      try { unlinkSync(lockPath); return; } catch (e: any) {
+        if (e?.code !== 'EPERM' && e?.code !== 'EBUSY') return;
+      }
+    }
+  }
+
   // -- I/O --
 
   private load(): CacheStats {
@@ -186,10 +249,16 @@ export class CacheStatsStore {
   }
 
   private save(): void {
+    // v3.5.3: atomic write (tmp + rename) — a concurrent reader must never
+    // observe a half-written stats file.
+    let tmp: string | null = null;
     try {
       mkdirSync(dirname(this.path), { recursive: true });
-      writeFileSync(this.path, JSON.stringify(this.stats, null, 2), 'utf-8');
+      tmp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.stats, null, 2), 'utf-8');
+      renameSync(tmp, this.path);
     } catch {
+      try { if (tmp && existsSync(tmp)) unlinkSync(tmp); } catch { /* best-effort */ }
       // best-effort persistence; do not crash the chat loop on disk errors
     }
   }

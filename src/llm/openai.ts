@@ -91,6 +91,12 @@ export class OpenAIProvider implements LLMProvider {
     // Some providers attach usage only on the last chunk (DeepSeek / OpenAI with
     // stream_options.include_usage). We capture it here and yield at the end.
     let capturedUsage: ChatResponse['usage'] | undefined;
+    // v3.5.3 (field report): a 200 response whose body is garbage (non-SSE
+    // HTML, truncated JSON, an error page) used to parse to NOTHING while
+    // every invalid line was silently skipped — the agent loop then treated
+    // the empty result as a successful completion (success:true, content:"").
+    // Track whether at least one valid SSE frame arrived.
+    let sawValidFrame = false;
 
     try {
       const response = await this.doRequest(body, controller.signal);
@@ -122,6 +128,7 @@ export class OpenAIProvider implements LLMProvider {
 
             try {
               const data = JSON.parse(trimmed.slice(6));
+              if (data && typeof data === 'object') sawValidFrame = true;
               const delta = data.choices?.[0]?.delta;
 
               // Text content
@@ -177,6 +184,14 @@ export class OpenAIProvider implements LLMProvider {
           function: { name: buf.name, arguments: buf.arguments },
         });
       }
+    }
+
+    // v3.5.3: fail loudly on an empty/garbage body instead of reporting an
+    // empty success.
+    if (!sawValidFrame) {
+      throw new Error(
+        'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
+      );
     }
 
     if (toolCalls.length > 0) {

@@ -236,6 +236,8 @@ export class GeminiProvider implements LLMProvider {
     let buffer = '';
     const functionCalls: ToolCall[] = [];
     let capturedUsage: Usage | undefined;
+    // v3.5.3: garbage 200 bodies must fail loudly, not read as success.
+    let sawValidFrame = false;
 
     try {
       const response = await fetch(url, {
@@ -270,6 +272,7 @@ export class GeminiProvider implements LLMProvider {
 
             try {
               const data = JSON.parse(trimmed.slice(6));
+              if (data && typeof data === 'object') sawValidFrame = true;
               if (data.usageMetadata) {
                 capturedUsage = this.normalizeUsage(data.usageMetadata);
               }
@@ -309,6 +312,13 @@ export class GeminiProvider implements LLMProvider {
         throw new Error('Stream stalled: no data received for 120s');
       }
       throw error;
+    }
+
+    // v3.5.3: garbage 200 body (no valid SSE frames) fails loudly.
+    if (!sawValidFrame) {
+      throw new Error(
+        'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
+      );
     }
 
     if (functionCalls.length > 0) {

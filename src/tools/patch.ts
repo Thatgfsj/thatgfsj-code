@@ -479,16 +479,30 @@ export class ApplyPatchTool implements Tool {
       }
     } catch (error: any) {
       // v3.4.0: roll back everything this patch touched, newest first.
-      try {
-        for (let i = journal.length - 1; i >= 0; i--) {
-          const j = journal[i];
+      // v3.5.3 (field report): a failure mid-rollback used to abort the
+      // whole loop silently while the message still claimed
+      // "ROLLED BACK (no files changed)" — worse than no claim. Every
+      // journal entry is now restored independently; whatever cannot be
+      // restored is named in the error.
+      const unrestored: string[] = [];
+      for (let i = journal.length - 1; i >= 0; i--) {
+        const j = journal[i];
+        try {
           if (j.existed && j.content !== null) {
             writeFileSync(j.path, j.content);
-          } else if (!j.existed) {
-            try { unlinkSync(j.path); } catch { /* wasn't created */ }
+          } else if (!j.existed && existsSync(j.path)) {
+            unlinkSync(j.path);
           }
+        } catch {
+          unrestored.push(j.path);
         }
-      } catch { /* rollback is best-effort; report both failures */ }
+      }
+      if (unrestored.length > 0) {
+        return {
+          success: false,
+          error: `Patch failed: ${error.message}. Rollback PARTIALLY FAILED — these paths may still hold patched content: ${unrestored.join(', ')}. Restore them manually (journal ran newest-first).`,
+        };
+      }
       return { success: false, error: `Patch failed and was ROLLED BACK (no files changed): ${error.message}` };
     }
 

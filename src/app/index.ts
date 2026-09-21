@@ -690,6 +690,9 @@ export class App {
       beforeRound: sessionMode
         ? async (cur) => this.preCallContextCheck(cur) ?? undefined
         : undefined,
+      onRoundComplete: sessionMode
+        ? () => this.session.persist()
+        : undefined,
     });
     const debugUsage = !!process.env.GFCODE_DEBUG_USAGE;
     // v3.0.3: read TTL the LLMService resolved this round (sticky per session).

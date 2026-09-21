@@ -164,6 +164,15 @@ export class LLMService {
        * pre-call context compaction); the loop adopts it for the request.
        */
       beforeRound?: (msgs: ChatMessage[]) => Promise<ChatMessage[] | void> | ChatMessage[] | void;
+      /**
+       * v3.5.3 (field report C-4): fired after EVERY agent round has fully
+       * mirrored its tool results into the session. The App layer persists
+       * there, so a hard kill mid-task loses at most the current round —
+       * previously the whole conversation was only on disk after the final
+       * round, and a crash meant zero recoverable progress. Safe because
+       * sanitizeLoadedMessages heals any dangling tool pair on load.
+       */
+      onRoundComplete?: () => void;
     }
   ): AsyncGenerator<StreamChunk, ChatResponse> {
     if (!this.hasApiKey()) throw new Error(this.getNoKeyMessage());
@@ -426,6 +435,10 @@ export class LLMService {
             }
           } catch (error: any) {
             const errMsg = `Error: ${error.message}`;
+            // v3.5.3: a thrown tool counts as a real failure too — the
+            // stats used to report failed=0 while a tool crashed (planning
+            // EBUSY etc.), skewing monitoring and the circuit breaker.
+            loopStats.failed += 1;
             currentMessages.push({
               role: 'tool',
               content: errMsg,
@@ -454,6 +467,10 @@ export class LLMService {
           results: callResults,
           ...(roundNotes.length > 0 ? { notes: [...roundNotes] } : {}),
         };
+
+        // v3.5.3: persist the session after every fully mirrored round —
+        // a hard kill used to mean zero on-disk progress.
+        try { options?.onRoundComplete?.(); } catch { /* persistence must not break the loop */ }
 
         // v3.5.0: circuit breaker — when EVERY call of a round failed or was
         // denied, one more identical attempt is unlikely to help. Stop after
