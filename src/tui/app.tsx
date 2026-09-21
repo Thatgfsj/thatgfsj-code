@@ -15,6 +15,7 @@ import { PlanApproval } from './components/PlanApproval.js';
 import { ContextPanel } from './components/ContextPanel.js';
 import { useChat } from './hooks/useChat.js';
 import { useCommands } from './hooks/useCommands.js';
+import { planStore } from '../plan/store.js';
 import { buildWindow, estimateMsgLines, clipContentToRows, maxUsefulScroll } from './window.js';
 import type { App, ConfirmRequest } from '../app/index.js';
 import { SessionManager } from '../session/index.js';
@@ -385,6 +386,14 @@ export function TuiApp({ app }: Props) {
       + (showContextPanel ? 0 : 10);           // PlanPanel fallback below the row
   const workspaceRows = Math.max(3, terminalRows - 1 - bottomReserve);
   const chatWidth = terminalWidth - 4 - (showContextPanel ? PANEL_RESERVE : 0);
+  // v3.4.11: the right column is a PEER of the chat window — its height
+  // must come out of the SAME budget. An unsized panel (up to ~25 rows with
+  // a plan active) stretched the frame past the viewport and smeared
+  // itself across the chat column (user screenshots).
+  const planActive = planStore.getSnapshot().length > 0;
+  const panelRows = showContextPanel
+    ? Math.max(8, Math.min(16, workspaceRows - (planActive ? 9 : 0)))
+    : 0;
   // v3.3.0: the live streaming block shares the workspace budget — it is
   // capped (tail-clipped) so a long answer can never push the frame past
   // the viewport.
@@ -422,6 +431,8 @@ export function TuiApp({ app }: Props) {
         inTokens={cacheSnapshot.totalInputTokens}
         outTokens={cacheSnapshot.totalOutputTokens}
         width={PANEL_WIDTH}
+        maxMessages={app.session.getMaxMessages()}
+        maxRows={panelRows}
         categories={[
           { label: '系统工具', tokens: contextBreakdown.systemTools },
           { label: '消息', tokens: contextBreakdown.msgTokens },
@@ -553,12 +564,25 @@ export function TuiApp({ app }: Props) {
                   <Text color={theme.textFaint}>
                     ▪ {app.permissionMode === 'plan' ? 'Plan' : app.permissionMode === 'accept' ? 'YOLO' : 'Build'}{cfg.model ? ` · ${cfg.model}` : ''}
                   </Text>
-                  <Markdown content={streamView} width={chatWidth} />
+                  {/* v3.4.11: plain text while streaming — re-parsing the
+                      growing buffer through marked every 200ms flush was
+                      O(n²) and stuttered long replies. Committed messages
+                      still render as Markdown below. */}
+                  <Text>{streamView}</Text>
                 </Box>
               )}
             </Box>
             {contextPanel && (
-              <Box flexDirection="column" flexShrink={0} borderLeft borderStyle="single" borderColor={theme.border} paddingLeft={2}>
+              <Box
+                flexDirection="column"
+                flexShrink={0}
+                borderLeft
+                borderStyle="single"
+                borderColor={theme.border}
+                paddingLeft={2}
+                height={workspaceRows}
+                overflow="hidden"
+              >
                 <PlanPanel width={PANEL_WIDTH} />
                 <Box marginTop={1}>{contextPanel}</Box>
               </Box>

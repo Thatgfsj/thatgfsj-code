@@ -22,6 +22,10 @@ interface Props {
   /** Ordered categories; 「其他」 (remainder to `used`) is appended here. */
   categories: ContextCategory[];
   width?: number;
+  /** Session message window (the /models 上下文长度 setting), shown live. */
+  maxMessages?: number;
+  /** v3.4.11: max body rows — the panel must never stretch the frame. */
+  maxRows?: number;
 }
 
 /** 33000 → "3.3万", 200000 → "20万", 950 → "950" (万 units, opencode-style). */
@@ -47,13 +51,20 @@ function fmtPct(ratio: number): string {
  * the rolling cache hit rate. NO cost/money line (user explicitly removed
  * it). Pure display — numbers are computed by the caller.
  */
-export function ContextPanel({ used, window: win, hitRate, inTokens, outTokens, categories, width = 38 }: Props) {
+export function ContextPanel({ used, window: win, hitRate, inTokens, outTokens, categories, width = 38, maxMessages, maxRows = 16 }: Props) {
   const total = Math.max(0, used);
   const sumKnown = categories.reduce((a, c) => a + Math.max(0, c.tokens), 0);
   const rows: ContextCategory[] = [
     ...categories,
     { label: '其他', tokens: Math.max(0, total - sumKnown) },
   ];
+  // v3.4.11: cap the body so header+bar+categories+rule+stats ≤ maxRows —
+  // an over-tall panel used to stretch the frame past the viewport and
+  // smear itself across the chat column.
+  const statsRows = maxMessages === undefined ? 3 : 4;
+  const catBudget = Math.max(2, maxRows - 5 - statsRows);
+  const shown: ContextCategory[] = rows.slice(0, catBudget);
+  const hiddenCats = rows.length - shown.length;
   const ratio = win > 0 ? Math.min(1, total / win) : 0;
   const barWidth = width - 2;
   const filled = Math.max(0, Math.min(barWidth, Math.round(ratio * barWidth)));
@@ -68,12 +79,15 @@ export function ContextPanel({ used, window: win, hitRate, inTokens, outTokens, 
         <Text color={theme.accent}>{'━'.repeat(filled)}</Text>
         <Text color={theme.border}>{'━'.repeat(barWidth - filled)}</Text>
       </Box>
-      {rows.map(c => (
+      {shown.map(c => (
         <Box key={c.label} justifyContent="space-between">
           <Text color={theme.textDim}>● {c.label}</Text>
           <Text color={theme.textDim}>{fmtPct(total > 0 ? c.tokens / total : 0)}</Text>
         </Box>
       ))}
+      {hiddenCats > 0 && (
+        <Text color={theme.textFaint}>  … {hiddenCats} 类</Text>
+      )}
       <Box marginTop={1}>
         <Text color={theme.border}>{'─'.repeat(width - 2)}</Text>
       </Box>
@@ -89,6 +103,12 @@ export function ContextPanel({ used, window: win, hitRate, inTokens, outTokens, 
         <Text color={theme.textDim}>平均缓存命中率</Text>
         <Text color={theme.textDim}>{hitRate === null ? '—' : `${Math.round(hitRate * 100)}%`}</Text>
       </Box>
+      {maxMessages !== undefined && (
+        <Box justifyContent="space-between">
+          <Text color={theme.textDim}>回合窗口</Text>
+          <Text color={theme.textDim}>{maxMessages} 条</Text>
+        </Box>
+      )}
     </Box>
   );
 }

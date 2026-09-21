@@ -32,7 +32,9 @@ export function formatToolLabel(name: string, args: string): { title: string; de
       case 'file':
         return { title: `${obj.action || 'file'}`, detail: obj.path || '' };
       case 'shell':
-        return { title: 'shell', detail: obj.command?.slice(0, 70) || '' };
+        // v3.4.11: users must see WHAT runs — show the full command (the
+        // chat column wraps it); 70 chars hid everything but `cd /d ...`.
+        return { title: 'shell', detail: obj.command?.slice(0, 400) || '' };
       case 'git':
         return { title: `git ${obj.action || ''}`.trim(), detail: obj.message ? `"${String(obj.message).slice(0, 50)}"` : (obj.args || '') };
       case 'search':
@@ -114,11 +116,13 @@ export function ToolCall({ tool }: Props) {
 
   return (
     <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
-      <Box>
-        <Text color={theme.toolMark}>⎿ </Text>
-        <Text color={theme.accentDim}>{title}</Text>
-        {detail && <Text color={theme.textDim}> {detail}</Text>}
-        {running && <Text color={theme.textFaint}> ⟳</Text>}
+      <Box flexDirection="column">
+        <Text>
+          <Text color={theme.toolMark}>⎿ </Text>
+          <Text color={theme.accentDim}>{title}</Text>
+          {detail && <Text color={theme.textDim}> {detail}</Text>}
+          {running && <Text color={theme.textFaint}> ⟳</Text>}
+        </Text>
       </Box>
       {resultLine && (
         <Box paddingLeft={2}>
