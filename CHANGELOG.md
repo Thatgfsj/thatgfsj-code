@@ -4,6 +4,23 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.5.1] - 2026-09-21 - 二轮实测修复（补丁）
+
+> 二轮沙箱实测：15 条 3.5.0 声称中 13 条属实；本轮修复余下 4 项 + 2 个小瑕疵。
+
+### Fixed
+
+- **GBK 解码真正生效**：v3.5.0 的"严格 UTF-8 先行"在 936 控制台上仍产出乱码——GBK 中文（如"系统找不到指定的文件"）的字节序列恰好也是合法 UTF-8，严格解码"成功"地解出了垃圾。现改为**控制台代码页解码先行**（`chcp` 探测，936→GBK 等），仅当结果含替换符时才回退 UTF-8（覆盖 node 等自产 UTF-8 的子进程）
+- **shell 失败回执不再混入 Node 的 mojibake**：`error.message` 里是 Node 按 UTF-8 二次解码的 stderr（锟斤拷来源），现改为自建 `Command failed (exit N): <命令>` 头 + 我方按代码页解码的输出
+- **`--json` 失败契约统一**：连接失败/提供方异常路径此前只发裸 `error` 事件，headless 消费方要写两套失败处理——现在 catch 路径同样补发 `result success:false`（含 error 与 stats）+ 退出码 1
+- **`result.stats` 全路径携带**：正常完成、信号中断、熔断、耗尽轮次四条 return 路径都带 loopStats（此前只有熔断/耗尽有，成功的 result 没有 stats 字段）
+- **`file.content` 必收回撤到运行时**：schema 级必填误伤了 read/exists（4B 模型给它们也塞 `content:""`，导致连续 [PARAM_ERROR] 空转）；校验改回 execute 内仅对 `action=write` 生效，0 字节写入的防线不变
+- **`gfc usage` 计数自洽**：此前读的键名不存在（显示 requests: 0 配非零 token）；改读 `totalRequests/totalReadTokens/totalInputTokens/totalOutputTokens`，旧统计文件缺 requests 字段时从 history 推断
+
+### Added
+
+- **runaway 提醒对 headless 可见**：守卫触发时提醒文本挂到 tool_calls 事件的 `notes` 字段（此前只注入模型消息，--json 事件流里完全看不到守卫是否工作）
+
 ## [3.5.0] - 2026-09-21 - 诚实失败与 headless 契约修复（沙箱实测驱动）
 
 > 本轮修复全部来自一次隔离沙箱实测（对照 opencode）：写文件整条链路静默失败、被拒任务烧光 10 轮 token 仍报成功、`-m` 一次性参数永久污染配置等。254 → 265 用例。

@@ -138,6 +138,13 @@ export type ToolCallResult = { name: string; ok: boolean; output: string };
 
 export type StreamChunk =
   | { type: 'text'; content: string }
-  | { type: 'tool_calls'; toolCalls: ToolCall[]; results?: ToolCallResult[]; pending?: boolean }
+  | {
+      type: 'tool_calls';
+      toolCalls: ToolCall[];
+      results?: ToolCallResult[];
+      pending?: boolean;
+      /** v3.5.1: runaway-guard reminders surfaced for headless consumers. */
+      notes?: string[];
+    }
   | { type: 'thinking'; content: string }
   | { type: 'usage'; usage: Usage };

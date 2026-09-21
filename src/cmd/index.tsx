@@ -417,7 +417,18 @@ program
       } catch (error: any) {
         const msg = error.message || String(error);
         if (jsonMode) {
+          // v3.5.1: emit result (success:false) in ADDITION to the error
+          // event — headless consumers had to handle two failure shapes
+          // (result-with-false vs bare-error) depending on WHERE it broke.
           emit({ type: 'error', message: msg });
+          emit({
+            type: 'result',
+            success: false,
+            content: '',
+            error: msg,
+            stats: { rounds: 0, toolCalls: 0, denied: 0, failed: 0, abortedReason: msg },
+          });
+          process.exitCode = 1;
         } else if (msg.includes('401') || msg.includes('403') || msg.includes('Unauthorized')) {
           console.error(chalk.red('\n  ❌ API key invalid or expired.'));
           console.log(chalk.gray('  Run ') + chalk.cyan('gfcode init') + chalk.gray(' to reconfigure.\n'));
@@ -480,12 +491,14 @@ program
   .action(async () => {
     const store = new CacheStatsStore();
     const s = (store as any).stats || {};
-    const requests = s.requestCount ?? s.requests ?? 0;
-    const input = s.inputTokens ?? s.totalInputTokens ?? 0;
-    const cached = s.cachedTokens ?? s.totalCachedTokens ?? 0;
-    const output = s.outputTokens ?? s.totalOutputTokens ?? 0;
-    const total = input + cached;
-    const rate = total > 0 ? ((cached / total) * 100).toFixed(1) : '0.0';
+    // v3.5.1: real field names (CacheStats) — the old guesses read
+    // nonexistent keys and showed requests: 0 next to nonzero tokens.
+    // Older stats files predate totalRequests; infer from history.
+    const requests = s.totalRequests || (s.history ? s.history.length : 0) || 0;
+    const input = s.totalInputTokens ?? 0;
+    const cached = s.totalReadTokens ?? 0;
+    const output = s.totalOutputTokens ?? 0;
+    const rate = input > 0 ? ((cached / input) * 100).toFixed(1) : '0.0';
     console.log(`requests:      ${requests}`);
     console.log(`input tokens:  ${input}`);
     console.log(`cached tokens: ${cached} (${rate}% hit)`);

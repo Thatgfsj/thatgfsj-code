@@ -62,8 +62,20 @@ describe('file tool: silent-write-failure regressions', () => {
     expect(r.output).toContain('0 bytes');
   });
 
-  it('schema marks content as required so the agent loop pre-validates', () => {
-    expect(tool.inputSchema.required).toContain('content');
-    expect(tool.parameters.find(p => p.name === 'content')?.required).toBe(true);
+  it('schema keeps content optional for read/exists, write guard stays in execute', () => {
+    // v3.5.1: schema-level requirement rejected read/exists calls that a
+    // weak model padded with content:"" — the guard lives in execute and
+    // applies to action=write only.
+    expect(tool.inputSchema.required).toEqual(['action', 'path']);
+    expect(tool.parameters.find(p => p.name === 'content')?.required).toBe(false);
+  });
+
+  it('read and exists accept calls without content (no PARAM_ERROR loop)', async () => {
+    const p = join(dir, 'whatever.txt');
+    writeFileSync(p, 'x', 'utf-8');
+    const r1 = await tool.execute({ action: 'read', path: p }, ctx);
+    expect(r1.success).toBe(true);
+    const r2 = await tool.execute({ action: 'exists', path: p }, ctx);
+    expect(r2.success).toBe(true);
   });
 });

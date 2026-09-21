@@ -214,7 +214,7 @@ export class LLMService {
       // in-flight fetch, so an esc during tool execution still ran every
       // remaining tool of the round AND started the next round.
       if (options?.signal?.aborted) {
-        return { content: '[已中断]', role: 'assistant', usage: lastUsage };
+        return { content: '[已中断]', role: 'assistant', usage: lastUsage, loopStats };
       }
       iterations++;
       // v3.3.0: pre-round hook — the App layer uses this to compact the
@@ -256,6 +256,7 @@ export class LLMService {
         loopStats.rounds += 1;
         loopStats.toolCalls += detectedToolCalls.length;
         let roundHadSuccess = false;
+        const roundNotes: string[] = [];
         // v3.0.16 (tool_start pre-launch): announce the calls BEFORE running
         // them. The TUI prints `⎿ name(args) ⟳` immediately instead of
         // waiting for execution to finish (long browser/file tools used to
@@ -316,7 +317,7 @@ export class LLMService {
           if (options?.signal?.aborted) {
             abortedMidGroup();
             yield { type: 'tool_calls', toolCalls: detectedToolCalls, results: callResults };
-            return { content: '[已中断]', role: 'assistant', usage: lastUsage };
+            return { content: '[已中断]', role: 'assistant', usage: lastUsage, loopStats };
           }
           const tool = this.tools.get(toolCall.function.name);
 
@@ -344,12 +345,17 @@ export class LLMService {
             const parsed = JSON.parse(toolCall.function.arguments || '{}');
             // v3.3.0 runaway guard: the same call repeating is the model
             // spinning — remind it to change approach (soft nudge only).
+            // v3.5.1: the reminder text also rides on the tool_calls chunk
+            // as `notes` — headless consumers could not see the guard at
+            // all before (field report).
             const runawayHit = runaway.track(toolCall.function.name, toolCall.function.arguments || '');
             if (runawayHit.remind) {
+              const reminder = `"${toolCall.function.name}" has now been called ${runawayHit.count} times with IDENTICAL arguments and produced the same outcome. Do not repeat it again: change the approach, use a different tool, or ask the user.`;
               currentMessages.push({
                 role: 'system',
-                content: `[SYSTEM REMINDER] "${toolCall.function.name}" has now been called ${runawayHit.count} times with IDENTICAL arguments and produced the same outcome. Do not repeat it again: change the approach, use a different tool, or ask the user.`,
+                content: `[SYSTEM REMINDER] ${reminder}`,
               });
+              roundNotes.push(reminder);
             }
 
             // v3.0.5 fix (found in live testing): validate required params
@@ -441,7 +447,13 @@ export class LLMService {
         // Emit one tool_calls chunk for this iteration, with per-tool results
         // attached (index-aligned). TUI / headless render outcomes from here.
         // (The pre-execution `pending: true` announcement went out above.)
-        yield { type: 'tool_calls', toolCalls: detectedToolCalls, results: callResults };
+        // v3.5.1: `notes` surfaces runaway-guard reminders to headless logs.
+        yield {
+          type: 'tool_calls',
+          toolCalls: detectedToolCalls,
+          results: callResults,
+          ...(roundNotes.length > 0 ? { notes: [...roundNotes] } : {}),
+        };
 
         // v3.5.0: circuit breaker — when EVERY call of a round failed or was
         // denied, one more identical attempt is unlikely to help. Stop after
@@ -464,11 +476,14 @@ export class LLMService {
         continue;
       }
 
-      // No tool calls - done. Return final response (with usage if we have it).
+      // No tool calls - done. Return final response (with usage if we have
+      // it). v3.5.1: loopStats rides along on SUCCESS too, so headless
+      // consumers always get the per-turn tool accounting.
       return {
         content: fullContent,
         role: 'assistant',
         usage: lastUsage,
+        loopStats,
       };
     }
 

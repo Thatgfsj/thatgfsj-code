@@ -24,23 +24,25 @@ export class FileTool implements Tool {
     properties: {
       action: { type: 'string', description: 'Action: read, write, list, delete, exists, mkdir' },
       path: { type: 'string', description: 'File or directory path' },
-      content: { type: 'string', description: 'Content to write (for write action)' }
+      content: { type: 'string', description: 'Content to write (REQUIRED for write action; omit entirely for read/list/exists/delete/mkdir)' }
     },
-    // v3.5.0: content is REQUIRED for write. It used to be optional, so a
-    // model omitting it silently wrote a 0-byte file and reported success.
-    required: ['action', 'path', 'content']
+    // v3.5.1: content stays OUT of the schema-level required list. Making it
+    // schema-required rejected read/exists calls too (weak models pad
+    // content:"" everywhere) and sent them into PARAM_ERROR retry loops.
+    // The write guard below enforces it at runtime for action=write only.
+    required: ['action', 'path']
   };
 
   metadata = {
     permissions: ['read', 'write'] as ('read' | 'write' | 'execute' | 'network')[],
     tags: ['file', 'filesystem'],
-    version: '1.1.0'
+    version: '1.1.1'
   };
 
   parameters = [
     { name: 'action', type: 'string', description: 'Action to perform: read, write, list, delete, exists', required: true },
     { name: 'path', type: 'string', description: 'File or directory path', required: true },
-    { name: 'content', type: 'string', description: 'Content to write (for write action)', required: true }
+    { name: 'content', type: 'string', description: 'Content to write (required for write; do not pass for other actions)', required: false }
   ];
 
   async execute(params: Record<string, any>, ctx?: ToolContext): Promise<ToolResult> {

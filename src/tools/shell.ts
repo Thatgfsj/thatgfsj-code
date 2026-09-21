@@ -42,16 +42,37 @@ function consoleDecoderLabel(): string {
   return cachedDecoderLabel;
 }
 
+/**
+ * v3.5.1: decode order matters. GBK Chinese text is USUALLY valid UTF-8
+ * (GBK lead 0x81-0xFE + trail 0x40-0xFE overlap the UTF-8 lead/continuation
+ * ranges), so strict-UTF-8-first "succeeded" with mojibake on a 936
+ * console. Decode with the CONSOLE code page first; only fall back to
+ * UTF-8 when that produced replacement characters (the child was a
+ * UTF-8-native tool like node running on a 936 console).
+ */
 export function decodeConsoleOutput(buf: Buffer): string {
+  if (buf.length === 0) return '';
+  const isWin = process.platform === 'win32';
+  const label = consoleDecoderLabel();
+  if (isWin && label !== 'utf-8') {
+    const byCodePage = safeDecode(buf, label);
+    if (!/[\uFFFD]/.test(byCodePage)) return byCodePage;
+    // Code page hit unmappable bytes — the child probably emitted UTF-8.
+    const asUtf8 = safeDecode(buf, 'utf-8');
+    if (!/[\uFFFD]/.test(asUtf8)) return asUtf8;
+    return byCodePage;
+  }
+  if (isWin) {
+    return safeDecode(buf, 'utf-8');
+  }
+  return safeDecode(buf, 'utf-8');
+}
+
+function safeDecode(buf: Buffer, label: string): string {
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    return new TextDecoder(label, { fatal: false }).decode(buf);
   } catch {
-    // Not valid UTF-8 — decode with the console's code page.
-    try {
-      return new TextDecoder(consoleDecoderLabel()).decode(buf);
-    } catch {
-      return buf.toString('latin1');
-    }
+    return buf.toString('latin1');
   }
 }
 
@@ -305,17 +326,20 @@ export class ShellTool implements Tool {
       if (error.killed) {
         return { success: false, error: 'Command timed out' };
       }
-      // Non-zero exit: return the partial output alongside the error so the
-      // model can see what happened before the failure (Codex reports
-      // exit code + aggregated output the same way).
+      // Non-zero exit: report exit code + OUR decoded output. Node's own
+      // error.message embeds the stderr re-decoded as UTF-8 (mojibake on
+      // GBK consoles), so it is deliberately NOT used here.
       const partial = [
         error.stdout ? decodeConsoleOutput(error.stdout) : '',
         error.stderr ? decodeConsoleOutput(error.stderr) : '',
       ].filter(Boolean).join('\n[stderr]: ');
       const detail = truncateOutput(partial.trim());
+      const header = error.code != null
+        ? `Command failed (exit ${error.code}): ${trimmed}`
+        : `Command failed: ${trimmed}`;
       return {
         success: false,
-        error: detail ? `${error.message}\n${detail}` : (error.message || 'Command execution failed'),
+        error: detail ? `${header}\n${detail}` : header,
       };
     }
   }

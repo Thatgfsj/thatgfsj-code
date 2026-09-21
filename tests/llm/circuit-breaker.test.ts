@@ -146,4 +146,57 @@ describe('agent loop: failure circuit breaker + loopStats', () => {
     }
     expect(toolContent).toBe('(no output)');
   });
+
+  it('v3.5.1: successful completion carries loopStats too', async () => {
+    const ok: Tool = {
+      name: 'ok',
+      description: 'succeeds',
+      parameters: [{ name: 'x', type: 'string', description: 'x', required: true }],
+      async execute() {
+        return { success: true, output: 'fine' };
+      },
+    };
+    const svc = svcWith([ok]);
+    (svc as any).provider = fakeProvider([
+      [{ type: 'tool_calls', toolCalls: [toolCall('ok', '{"x":"1"}')] } as StreamChunk],
+      [{ type: 'text', content: 'all done' } as StreamChunk],
+    ]);
+
+    const iter = svc.chatStream([{ role: 'user', content: 'go' }] as ChatMessage[]);
+    let next = await iter.next();
+    while (!next.done) next = await iter.next();
+    const final = next.value as any;
+
+    expect(final.loopStats).toBeDefined();
+    expect(final.loopStats.rounds).toBe(1);
+    expect(final.loopStats.toolCalls).toBe(1);
+    expect(final.loopStats.abortedReason).toBeUndefined();
+  });
+
+  it('v3.5.1: runaway reminders surface as notes on the tool_calls chunk', async () => {
+    const svc = svcWith([writeTool]);
+    const rounds: StreamChunk[][] = [];
+    for (let i = 0; i < 5; i++) {
+      rounds.push([{
+        type: 'tool_calls',
+        toolCalls: [toolCall('denywrite', '{"path":"note.txt"}')],
+      } as StreamChunk]);
+    }
+    (svc as any).provider = fakeProvider(rounds);
+
+    const iter = svc.chatStream([{ role: 'user', content: 'go' }] as ChatMessage[]);
+    let next = await iter.next();
+    let sawNotes: string[] | undefined;
+    while (!next.done) {
+      const v = next.value;
+      if (v.type === 'tool_calls' && !v.pending && (v as any).notes) {
+        sawNotes = (v as any).notes;
+      }
+      next = await iter.next();
+    }
+    // REMIND_EVERY=3: the third identical call triggers the first reminder,
+    // and its text must be visible to headless consumers.
+    expect(sawNotes).toBeDefined();
+    expect(sawNotes!.some(n => n.includes('3 times with IDENTICAL arguments'))).toBe(true);
+  });
 });
