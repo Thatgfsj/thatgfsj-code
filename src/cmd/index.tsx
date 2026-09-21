@@ -25,8 +25,12 @@ import { WelcomeScreen } from '../tui/welcome.js';
 import { compressThinking, summarizeThinking, splitThinking } from '../utils/thinking.js';
 import { reportCrash } from '../utils/crash.js';
 import { getVersion } from '../version.js';
+import { SessionManager } from '../session/index.js';
+import { ConfigManager } from '../config/index.js';
+import { MODEL_CATALOGS } from '../config/providers.js';
+import { CacheStatsStore } from '../cache/stats.js';
 import type { ConfirmRequest } from '../app/index.js';
-import type { ToolCallResult } from '../types.js';
+import type { ChatResponse, ToolCallResult } from '../types.js';
 
 process.on('uncaughtException', (error) => {
   reportCrash('uncaughtException', error);
@@ -57,22 +61,32 @@ program
   .description('Thatgfsj Code - AI Coding Assistant')
   .version(getVersion())
   .argument('[prompt]', 'Task to execute (omit to start interactive mode)')
-  .option('-m, --model <model>', 'Specify model')
+  .option('-m, --model <model>', 'Specify model (one-shot: this run only; with no prompt it becomes the default)')
+  .option('-c, --continue', 'Continue the most recent session')
   .option('-i, --interactive', 'Force interactive mode')
   .option('--show-thinking', 'Show full <think>...</think> reasoning blocks (default: compress to one-line summary)')
   .option('--json', 'Headless JSON output: line-delimited events on stdout, human text on stderr')
-  .option('--yolo', 'Allow all tool actions without confirmation')
-  .option('-t, --thinking <level>', 'Reasoning effort for thinking-capable models: off|low|medium|high', (v: string) => {
-    if (!['off', 'low', 'medium', 'high'].includes(v)) {
-      throw new Error('--thinking 只接受 off | low | medium | high');
-    }
-    return v as 'off' | 'low' | 'medium' | 'high';
-  })
+  // v3.5.0: honest wording — read-only commands NEVER ask (v3.0.20 graded
+  // approval); --yolo only removes the ask for write/execute actions.
+  .option('--yolo', 'Auto-accept write/execute tool actions (read-only commands always run without asking)')
+  .option('-t, --thinking <level>', 'Reasoning effort for thinking-capable models: off|low|medium|high')
   .action(async (prompt: string | undefined, options: {
-    model?: string; interactive?: boolean; showThinking?: boolean; json?: boolean; yolo?: boolean; thinking?: 'off' | 'low' | 'medium' | 'high';
+    model?: string; interactive?: boolean; showThinking?: boolean; json?: boolean; yolo?: boolean; thinking?: string; continue?: boolean;
   }) => {
     try {
       const jsonMode = !!options.json;
+      // v3.5.0: validate --thinking here (the option parser used to throw,
+      // surfacing as an uncaughtException with a full Node stack).
+      const thinkingLevels = ['off', 'low', 'medium', 'high'] as const;
+      let thinking: 'off' | 'low' | 'medium' | 'high' | undefined;
+      if (options.thinking !== undefined) {
+        const t = options.thinking.toLowerCase();
+        if (!thinkingLevels.includes(t as any)) {
+          console.error(chalk.red(`\n  Error: --thinking 只接受 off | low | medium | high（收到 "${options.thinking}"）\n`));
+          process.exit(1);
+        }
+        thinking = t as 'off' | 'low' | 'medium' | 'high';
+      }
       if (!jsonMode && process.stdout.isTTY) {
         ensureUtf8Console();
       }
@@ -80,8 +94,40 @@ program
       const app = await App.create();
       app.setYolo(!!options.yolo);
 
-      if (options.thinking) {
-        await app.setModelThinking(app.config.get().model, options.thinking);
+      // v3.4.20 field report: -m/-t used to PERSIST through config.save(),
+      // permanently poisoning later sessions (fake model, useBuiltin off).
+      // One-shot runs now apply them in memory only; the interactive
+      // launch path (no prompt) keeps the old persist-to-default behavior.
+      const oneShot = !!prompt && !options.interactive;
+      if (options.model) {
+        if (oneShot) {
+          app.config.setTransient({ model: options.model });
+          await app.reloadModel();
+        } else {
+          await app.config.save({ model: options.model });
+          await app.reloadModel();
+        }
+      }
+      if (thinking) {
+        await app.setModelThinking(app.config.get().model, thinking, !oneShot);
+      }
+
+      // v3.5.0: -c/--continue resumes the most recent persisted session.
+      if (options.continue) {
+        const latest = SessionManager.list(1)[0];
+        if (!latest) {
+          console.error(chalk.yellow('\n  没有可恢复的会话（~/.thatgfsj/sessions/ 为空）。'));
+          process.exit(1);
+        }
+        const file = SessionManager.load(latest.id);
+        if (!file) {
+          console.error(chalk.red(`\n  会话 ${latest.id} 无法读取。\n`));
+          process.exit(1);
+        }
+        app.session.loadFrom(file);
+        if (!jsonMode) {
+          console.log(chalk.gray(`  ↩ 已恢复会话 ${latest.id}（${latest.messageCount} 条消息）：${latest.preview}`));
+        }
       }
 
       // Check if API key is configured
@@ -95,11 +141,6 @@ program
         } else {
           process.stderr.write('[builtin] using built-in shared model Qwen/Qwen3.5-4B (no API key configured)\n');
         }
-      }
-
-      if (options.model) {
-        await app.config.save({ model: options.model });
-        await app.reloadModel();
       }
 
       // v3.0.13: first-run browser (Playwright) setup — interactive only,
@@ -187,12 +228,15 @@ program
       const onSigInt = () => { abortCtrl.abort(); };
       process.once('SIGINT', onSigInt);
       const showThinking = !!options.showThinking;
+      let builtinCacheNoted = false;
 
       const emit = (obj: any) => process.stdout.write(JSON.stringify(obj) + '\n');
 
       try {
         if (jsonMode) {
-          emit({ type: 'start', prompt, provider: app.config.get().provider, model: app.config.get().model });
+          // v3.5.0: the session id rides on start so script consumers can
+          // keep it and later resume with --continue.
+          emit({ type: 'start', prompt, provider: app.config.get().provider, model: app.config.get().model, session: app.session.getId() });
         } else {
           console.log(chalk.cyan.bold('\n  ⚡ THATGFSJ CODE\n'));
           console.log(chalk.gray('  You'));
@@ -206,9 +250,13 @@ program
         let fullResponse = '';
         let lastUsage: any = null;
 
-        const stream = app.streamResponse(undefined, { signal: abortCtrl.signal });
-
-        for await (const chunk of stream) {
+        // v3.5.0: iterate manually so the generator's RETURN value (the
+        // final ChatResponse with loopStats) is captured — the agent loop
+        // can now abort early, and the result event must say so.
+        const iterator = app.streamResponse(undefined, { signal: abortCtrl.signal });
+        let next = await iterator.next();
+        while (!next.done) {
+          const chunk = next.value;
           if (abortCtrl.signal.aborted) break;
 
           switch (chunk.type) {
@@ -271,7 +319,15 @@ program
                 const u = chunk.usage;
                 const hit = u.prompt_cache_hit_tokens || u.cache_read_input_tokens || 0;
                 const miss = u.prompt_cache_miss_tokens || u.cache_creation_input_tokens || (u.prompt_tokens - hit);
-                if (hit > 0 || miss > 0) {
+                // v3.5.0: the built-in shared model never reports cache
+                // hits — printing "cache: 0.0% hit" every round read like
+                // a broken promise. Say it once, honestly, instead.
+                if (app.usingBuiltinModel) {
+                  if (!builtinCacheNoted) {
+                    builtinCacheNoted = true;
+                    console.log(chalk.gray('  ⚡ 内置共享模型不启用 prompt 缓存；配置个人 key 后生效'));
+                  }
+                } else if (hit > 0 || miss > 0) {
                   const total = hit + miss;
                   const rate = total > 0 ? ((hit / total) * 100).toFixed(1) : '0.0';
                   console.log(chalk.gray(`  ⚡ cache: ${rate}% hit (${hit} / ${total} tokens)`));
@@ -280,7 +336,11 @@ program
               break;
             }
           }
+          next = await iterator.next();
         }
+        const finalResponse = next.done ? (next.value as ChatResponse | undefined) : undefined;
+        const loopStats = finalResponse?.loopStats;
+        const agentAborted = !!loopStats?.abortedReason;
 
         if (!jsonMode) {
           // Post-process thinking blocks (see v2.2.5 notes): print the
@@ -329,8 +389,29 @@ program
             process.stderr.write(`\n  ${compactNotice}\n`);
           }
 
+          // v3.5.0: honest result semantics. The loop can now abort early
+          // (all tool calls denied/failing, or maxIterations) — reporting
+          // success:true for those made every headless consumer blind to
+          // failure. success is false whenever the agent loop aborted, with
+          // the reason and per-outcome counts attached.
           if (jsonMode) {
-            emit({ type: 'result', success: true, content: toPersist.trim() });
+            if (toPersist.trim()) {
+              emit({ type: 'text_final', content: toPersist.trim() });
+            }
+            const ok = !agentAborted;
+            emit({
+              type: 'result',
+              success: ok,
+              content: toPersist.trim(),
+              ...(loopStats ? { stats: { ...loopStats } } : {}),
+            });
+            if (!ok) {
+              process.exitCode = 1;
+              process.stderr.write(`\n  ⚠ 任务未完成：${loopStats?.abortedReason}\n`);
+            }
+          } else if (agentAborted) {
+            process.stderr.write(chalk.yellow(`\n  ⚠ 任务未完成：${loopStats?.abortedReason}\n`));
+            process.exitCode = 1;
           }
         }
       } catch (error: any) {
@@ -361,11 +442,110 @@ program
 
 program
   .command('init')
-  .description('Configure API key and model')
+  .description('Configure API key and model (interactive terminal required)')
   .action(async () => {
+    // v3.5.0: same TTY guard as the main program — the wizard used to
+    // render half a screen and hang on a pipe (field-report finding).
+    if (!process.stdin.isTTY && !process.env.GFCODE_FORCE_TUI) {
+      console.error(chalk.yellow('\n  gfcode init 需要交互式终端（TTY）才能打开配置向导。'));
+      console.error(chalk.gray('  请在交互终端中直接运行: gfc init\n'));
+      process.exit(1);
+    }
     ensureUtf8Console();
     await WelcomeScreen.interactiveSetup();
   });
+
+program
+  .command('models')
+  .description('List configured provider, current model, and catalog')
+  .action(async () => {
+    const config = await ConfigManager.load();
+    const c = config.get();
+    const pc = (await import('../config/providers.js')).PROVIDERS[c.provider];
+    console.log(`provider:  ${c.provider}${pc ? ` (${pc.name})` : ''}`);
+    console.log(`model:     ${c.model}${config.getAIConfig().usingBuiltinKey ? '  [内置共享模型]' : ''}`);
+    console.log(`apiKey:    ${config.hasApiKey() ? '已配置' : '未配置（开箱将使用内置共享模型）'}`);
+    const catalog = MODEL_CATALOGS[c.provider] || [];
+    if (catalog.length > 0) {
+      console.log(`catalog:   ${catalog.map(m => m.id).join(', ')}`);
+    }
+    if ((c.customModels || []).length > 0) {
+      console.log(`custom:    ${c.customModels!.join(', ')}`);
+    }
+  });
+
+program
+  .command('usage')
+  .description('Show lifetime token / prompt-cache statistics')
+  .action(async () => {
+    const store = new CacheStatsStore();
+    const s = (store as any).stats || {};
+    const requests = s.requestCount ?? s.requests ?? 0;
+    const input = s.inputTokens ?? s.totalInputTokens ?? 0;
+    const cached = s.cachedTokens ?? s.totalCachedTokens ?? 0;
+    const output = s.outputTokens ?? s.totalOutputTokens ?? 0;
+    const total = input + cached;
+    const rate = total > 0 ? ((cached / total) * 100).toFixed(1) : '0.0';
+    console.log(`requests:      ${requests}`);
+    console.log(`input tokens:  ${input}`);
+    console.log(`cached tokens: ${cached} (${rate}% hit)`);
+    console.log(`output tokens: ${output}`);
+  });
+
+program
+  .command('mcp')
+  .description('Show MCP server connection status (reads ~/.thatgfsj/mcp.json)')
+  .action(async () => {
+    const { App } = await import('../app/index.js');
+    const app = await App.create();
+    console.log(app.mcpStatusText());
+    app.mcp.disconnectAll();
+  });
+
+// v3.5.0 (field report): a typo'd subcommand used to be swallowed as the
+// prompt positional and burned a full LLM round ("gfc inti" → the model
+// asking what the user means). Near-misses of real commands are stopped
+// with a clean hint; anything else is a legitimate prompt.
+const KNOWN_COMMANDS = ['init', 'models', 'usage', 'mcp'];
+
+function levenshtein1(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length === b.length) {
+    // Adjacent transposition counts as one edit (init → inti).
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) {
+        diff++;
+        if (diff > 2) return false;
+      }
+    }
+    if (diff === 1) return true;
+    if (diff === 2) {
+      const i = a.split('').findIndex((ch, idx) => ch !== b[idx]);
+      return a[i] === b[i + 1] && a[i + 1] === b[i];
+    }
+    return false;
+  }
+  const [short, long] = a.length < b.length ? [a, b] : [b, a];
+  for (let i = 0; i < long.length; i++) {
+    if (long.slice(0, i) + long.slice(i + 1) === short) return true;
+  }
+  return false;
+}
+
+const firstArg = process.argv[2];
+if (firstArg && !firstArg.startsWith('-')) {
+  const lower = firstArg.toLowerCase();
+  if (!KNOWN_COMMANDS.includes(lower)) {
+    const near = KNOWN_COMMANDS.find(k => levenshtein1(k, lower));
+    if (near) {
+      console.error(chalk.red(`\n  未知命令 "${firstArg}" —— 你是想执行 "gfc ${near}" 吗？`));
+      console.error(chalk.gray(`  如果 "${firstArg}" 是要发送给 AI 的任务，请加引号: gfc "${firstArg}"\n`));
+      process.exit(1);
+    }
+  }
+}
 
 program.parse(process.argv);
 

@@ -4,6 +4,7 @@
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join, dirname, resolve, parse } from 'path';
+import * as os from 'os';
 import { estimateTokens } from '../utils/tokens.js';
 import type { Tool } from '../tools/types.js';
 
@@ -146,7 +147,26 @@ export class SystemPromptBuilder {
   }
 
   private buildEnvironment(): string {
-    return `## Environment\n\nWorking directory: ${this.config.cwd}`;
+    // v3.5.0 (field report): the model used to open with `ls -la` on a
+    // Chinese Windows CMD box and waste a round. Tell it the OS, the
+    // shell, and the local command dialect up front.
+    const platform = process.platform;
+    const release = os.release();
+    const comspec = (process.env.ComSpec || 'cmd.exe').split(/[\\/]/).pop();
+    const lines = [
+      '## Environment',
+      '',
+      `Working directory: ${this.config.cwd}`,
+      `OS: ${platform} ${release}`,
+    ];
+    if (platform === 'win32') {
+      lines.push(
+        `Shell: ${comspec || 'cmd.exe'} (Windows — use dir/type/where, not ls/cat/which; paths use backslashes)`,
+      );
+    } else {
+      lines.push(`Shell: ${process.env.SHELL?.split('/').pop() || 'bash'} (POSIX)`);
+    }
+    return lines.join('\n');
   }
 
   private buildPermissionMode(): string {

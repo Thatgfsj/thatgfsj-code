@@ -4,6 +4,36 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.5.0] - 2026-09-21 - 诚实失败与 headless 契约修复（沙箱实测驱动）
+
+> 本轮修复全部来自一次隔离沙箱实测（对照 opencode）：写文件整条链路静默失败、被拒任务烧光 10 轮 token 仍报成功、`-m` 一次性参数永久污染配置等。254 → 265 用例。
+
+### Fixed
+
+- **写文件静默失败链路（P0）**：`file` 工具的 `content` 改为 write 必填（schema + 运行时双重校验，缺失即返回 PARAM_ERROR 修复信号而非写 0 字节文件）；成功写入返回字节数（`File written: x (N bytes)`）；读取空文件返回 `(empty file, 0 bytes)` 而非空串，模型从此能拿到"文件是空的"关键信号；工具空输出统一兜底为 `(no output)`，杜绝 `content: undefined` 的 tool 消息
+- **失败熔断 + 诚实 result（P0）**：agent 循环新增连续失败熔断——连续 4 轮全部工具调用失败/被拒即终止（此前一个被拒任务会烧满 10 轮约 5 万 token）；循环提前终止或耗尽轮次时返回 `[AGENT_ABORTED]`；`--json` 的 `result` 事件携带 `stats: {rounds, toolCalls, denied, failed, abortedReason}`，任务未完成时 `success:false` 且退出码为 1（此前永远 success:true，调用方完全无法察觉失败）
+- **`-m`/`-t` 一次性参数不再持久化**：单次任务模式经内存生效（`config.setTransient`），不再改写 config.json（此前 `gfc -m fake/model` 会永久改掉默认模型并关闭内置共享模式，污染后续所有会话）；交互启动（无 prompt）保持原有持久化行为
+- **`-t ultra` 不再糊脸堆栈**：非法值在 action 内干净报错并退出 1（原先 option 解析函数 throw 冒泡成 uncaughtException + 完整 Node 堆栈）
+- **中文 Windows 下 shell 输出乱码**：子进程输出改按原始字节接收，严格 UTF-8 失败后按 `chcp` 活动代码页解码（GBK/936 等），最后兜底 latin1——stderr 的 GBK 字节不再变成替换符污染模型上下文与 TUI/--json 显示
+- **系统提示告知 OS/shell**：Environment 段新增 OS 版本与 shell 类型，Windows 下明确提示用 dir/type 而非 ls/cat（此前模型第一轮 `ls -la` 必然失败浪费一轮）
+- **`init` 非 TTY 友好拒绝**：与主程序一致的 TTY 守卫（此前管道下渲染半截向导挂住）
+- **no-key 报错点名模型**：`-m` 指定的模型不可用时，报错明示"该模型来自 -m 参数"（此前报"未配置 API Key"绝口不提真正变量）
+
+### Added
+
+- **`gfc models`**：列出当前服务商、模型、key 状态与目录
+- **`gfc usage`**：累计 token 与 prompt 缓存命中统计
+- **`gfc mcp`**：MCP 服务器连接状态（src/mcp 此前完全没有 CLI 入口）
+- **`-c / --continue`**：恢复最近一次会话
+- **`--json` start 事件携带 `session` id**，脚本消费方可关联续接；result 前新增 `text_final` 聚合事件（此前 text 按 token 碎片输出且无完成信号）
+- **`.nwt/` 首建提示与退出开关**：首次在项目内自动建立过程记忆时打印一行说明并建议加入 .gitignore；`config.json` 设 `"nwt": false` 可完全关闭
+- **错拼子命令拦截**：`gfc inti`/`gfc modles` 等给出"你是想执行 gfc init 吗"的干净提示（此前未知首词被原样发给 LLM 烧掉一轮）
+- 内置共享模型下不再每轮打印 `cache: 0.0% hit`（该模型不启用缓存），改为一次性说明；`--yolo` 帮助文案改为如实描述分级审批（只读命令本就免确认）
+
+### Tests
+
+- 254 → 265：新增空写拒绝/字节数/空文件信号（file）、熔断与 loopStats（agent loop，mock provider）、transient 配置（-m 不落盘）三组回归
+
 ## [3.4.0] - 2026-09-20  - 全面测试与维护（成熟 CLI 实践对标）
 
 > 本轮为维护版本：三个子代理分别对标成熟 CLI 工程实践（MiniMax mcode）、执行完整验证（build/tsc/242 用例/63 项冒烟/e2e/依赖审计）、逐项核实遗留技术债后统一修复。

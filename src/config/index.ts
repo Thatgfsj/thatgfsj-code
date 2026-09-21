@@ -306,6 +306,25 @@ export class ConfigManager {
   }
 
   /**
+   * v3.5.0: apply updates to the IN-MEMORY config only — nothing is
+   * written to config.json. Used by one-shot CLI flags (`-m`, `-t`), which
+   * used to persist through save() and poison every later session (the
+   * field report: `gfc -m fake/model` permanently rewrote config.json and
+   * switched useBuiltin off).
+   */
+  setTransient(updates: Partial<Config>): void {
+    this.config = { ...this.config, ...updates };
+    if (updates.provider !== undefined && updates.baseUrl === undefined) {
+      delete this.config.baseUrl;
+    }
+    // Mirror save()'s rule: an explicit model choice leaves shared-model
+    // mode — but only for this process.
+    if (updates.useBuiltin !== undefined) this.config.useBuiltin = updates.useBuiltin;
+    else if (updates.model !== undefined) this.config.useBuiltin = false;
+    this.config = ConfigManager.resolveProvider(this.config);
+  }
+
+  /**
    * Check if an API key is configured
    */
   hasApiKey(): boolean {

@@ -187,10 +187,20 @@ export class App {
     // Register tools with LLM service (after MCP tools joined the registry)
     llm.registerTools(tools.list());
 
-    // Auto-init NWT timeline
+    // Auto-init NWT timeline.
+    // v3.5.0: opt-out via config.nwt === false, and the FIRST creation in a
+    // project now says so (a silent .nwt/ directory appearing in any
+    // project looked like pollution — field-report finding) plus a
+    // .gitignore hint.
+    const nwtEnabled = config.get().nwt !== false;
     const nwtTool = tools.get('nwt');
-    if (nwtTool) {
+    if (nwtEnabled && nwtTool) {
+      const nwtDir = join(process.cwd(), '.nwt');
+      const preexisting = existsSync(nwtDir);
       await nwtTool.execute({ action: 'init' });
+      if (!preexisting) {
+        appLog(`已在 ${nwtDir} 建立项目时间线（gfc 过程记忆）。不需要可设 config "nwt": false，并建议把 .nwt/ 加入 .gitignore`);
+      }
     }
 
     // Build system prompt with the FULL tool list (including MCP tools)
@@ -428,11 +438,17 @@ export class App {
     return c.modelSettings?.[id]?.thinking ?? 'off';
   }
 
-  async setModelThinking(modelId: string, thinking: 'off' | 'low' | 'medium' | 'high'): Promise<void> {
+  async setModelThinking(
+    modelId: string,
+    thinking: 'off' | 'low' | 'medium' | 'high',
+    /** v3.5.0: false = this process only (one-shot -t flag must not persist). */
+    persist: boolean = true,
+  ): Promise<void> {
     const c = this.config.get();
     const ms = { ...(c.modelSettings || {}) };
     ms[modelId] = { ...ms[modelId], thinking };
-    await this.config.save({ modelSettings: ms });
+    if (persist) await this.config.save({ modelSettings: ms });
+    else this.config.setTransient({ modelSettings: ms });
   }
 
   async setModelContextLength(modelId: string, n: number): Promise<void> {

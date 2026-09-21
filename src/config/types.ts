@@ -96,6 +96,12 @@ export interface Config {
    * that join the provider's catalog in the model picker.
    */
   customModels?: string[];
+  /**
+   * v3.5.0: set to false to stop gfc from auto-creating the NWT process
+   * timeline (.nwt/) in every project it runs in. Default: enabled. The
+   * first creation in a project also prints a one-line notice.
+   */
+  nwt?: boolean;
 }
 
 export interface AIConfig {

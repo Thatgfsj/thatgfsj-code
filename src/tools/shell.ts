@@ -4,10 +4,56 @@
  */
 
 import type { Tool, ToolResult, ToolContext } from './types.js';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+
+/**
+ * v3.5.0 (field report): on a Chinese Windows install the child process
+ * speaks the ANSI code page (GBK/936), but promisify(exec) decodes bytes
+ * as UTF-8 — every non-ASCII char turned into U+FFFD garbage, polluting
+ * both the model context and the TUI/--json output. Decode from the raw
+ * bytes instead: strict UTF-8 first (git, node, chcp 65001 consoles),
+ * then the console's code page, then latin1 as the lossless last resort.
+ */
+const CODEPAGE_DECODERS: Record<number, string> = {
+  936: 'gbk', 950: 'big5', 932: 'shift_jis', 949: 'euc-kr',
+  1250: 'windows-1250', 1251: 'windows-1251', 1252: 'windows-1252',
+  65001: 'utf-8', 850: 'ibm850', 437: 'ibm437',
+};
+
+let cachedDecoderLabel: string | null = null;
+
+function consoleDecoderLabel(): string {
+  if (cachedDecoderLabel) return cachedDecoderLabel;
+  cachedDecoderLabel = 'windows-1252'; // reasonable fallback
+  if (process.platform === 'win32') {
+    try {
+      const out = execSync('chcp', { encoding: 'utf8', windowsHide: true, timeout: 3000 });
+      const m = out.match(/(\d+)/);
+      if (m) cachedDecoderLabel = CODEPAGE_DECODERS[Number(m[1])] || 'windows-1252';
+    } catch {
+      // keep fallback
+    }
+  } else {
+    cachedDecoderLabel = 'utf-8';
+  }
+  return cachedDecoderLabel;
+}
+
+export function decodeConsoleOutput(buf: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    // Not valid UTF-8 — decode with the console's code page.
+    try {
+      return new TextDecoder(consoleDecoderLabel()).decode(buf);
+    } catch {
+      return buf.toString('latin1');
+    }
+  }
+}
 
 // Dangerous command patterns - blocked immediately, regardless of mode
 const DANGEROUS_PATTERNS = [
@@ -180,7 +226,7 @@ export class ShellTool implements Tool {
 
   metadata = {
     permissions: ['execute', 'write', 'network'] as ('read' | 'write' | 'execute' | 'network')[],
-    tags: ['shell', 'system', 'dangerous'],
+    tags: ['shell', 'system', 'dangerous'],
     version: '1.0.0',
   };
 
@@ -245,12 +291,13 @@ export class ShellTool implements Tool {
       const options: any = {
         timeout: timeout * 1000,
         maxBuffer: 10 * 1024 * 1024, // 10MB
+        encoding: 'buffer', // v3.5.0: decode ourselves (code-page aware)
       };
       if (cwd) options.cwd = cwd;
 
       const { stdout, stderr } = await execAsync(command, options);
-      const stdoutStr = stdout?.toString() || '';
-      const stderrStr = stderr?.toString() || '';
+      const stdoutStr = decodeConsoleOutput(stdout || Buffer.alloc(0));
+      const stderrStr = decodeConsoleOutput(stderr || Buffer.alloc(0));
       const output = stdoutStr + (stderrStr ? `\n[stderr]: ${stderrStr}` : '');
 
       return { success: true, output: truncateOutput(output.trim()) || '(command executed successfully with no output)' };
@@ -261,8 +308,10 @@ export class ShellTool implements Tool {
       // Non-zero exit: return the partial output alongside the error so the
       // model can see what happened before the failure (Codex reports
       // exit code + aggregated output the same way).
-      const partial = [error.stdout?.toString(), error.stderr?.toString()]
-        .filter(Boolean).join('\n[stderr]: ');
+      const partial = [
+        error.stdout ? decodeConsoleOutput(error.stdout) : '',
+        error.stderr ? decodeConsoleOutput(error.stderr) : '',
+      ].filter(Boolean).join('\n[stderr]: ');
       const detail = truncateOutput(partial.trim());
       return {
         success: false,

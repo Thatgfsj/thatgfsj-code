@@ -80,6 +80,19 @@ export interface ChatResponse {
   usage?: Usage;
   tool_calls?: ToolCall[];
   reasoning_content?: string;
+  /**
+   * v3.5.0: agent-loop bookkeeping for the current turn, so headless
+   * consumers can tell a genuinely completed task from one that spun on
+   * denied/failed tool calls (which used to report success:true with an
+   * empty result). abortedReason is set when the loop stopped early.
+   */
+  loopStats?: {
+    rounds: number;
+    toolCalls: number;
+    denied: number;
+    failed: number;
+    abortedReason?: string;
+  };
 }
 
 export interface ChatOptions {

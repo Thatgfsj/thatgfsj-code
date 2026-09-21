@@ -27,6 +27,8 @@ export class LLMService {
   private provider: LLMProvider;
   private tools: Map<string, Tool> = new Map();
   private apiKey: string;
+  /** v3.5.0: current model id, for actionable error messages. */
+  private model: string;
   /**
    * v3.0.5: execution context handed to every tool (confirmAction, abort
    * signal, working directory). Previously tools were called with no
@@ -34,9 +36,10 @@ export class LLMService {
    */
   private toolCtx: ToolContext = {};
 
-  constructor(provider: LLMProvider, apiKey: string) {
+  constructor(provider: LLMProvider, apiKey: string, model = '') {
     this.provider = provider;
     this.apiKey = apiKey;
+    this.model = model;
   }
 
   /** v3.0.5: wire the execution context (confirm/signal/cwd) into tool calls. */
@@ -88,7 +91,7 @@ export class LLMService {
         provider = new OpenAIProvider(providerCfg);
     }
 
-    return new LLMService(provider, providerCfg.apiKey);
+    return new LLMService(provider, providerCfg.apiKey, providerCfg.model);
   }
 
   registerTools(tools: Tool[]): void {
@@ -196,6 +199,15 @@ export class LLMService {
     let iterations = 0;
     let lastUsage: ChatResponse['usage'] | undefined;
     const runaway = createRunawayGuard();
+    // v3.5.0: turn-level bookkeeping + failure circuit breaker. The old
+    // loop only nudged with a soft reminder and never stopped early, so a
+    // model retrying a denied call burned the full 10 rounds (~50k tokens
+    // in testing) and the caller still saw success.
+    const loopStats: NonNullable<ChatResponse['loopStats']> = {
+      rounds: 0, toolCalls: 0, denied: 0, failed: 0,
+    };
+    let consecutiveFailedRounds = 0;
+    const MAX_CONSECUTIVE_FAILED_ROUNDS = 4;
 
     while (iterations < maxIterations) {
       // v3.3.0: cooperative cancellation — the old loop only aborted the
@@ -241,6 +253,9 @@ export class LLMService {
 
       // If we got tool calls, execute them and loop
       if (detectedToolCalls && detectedToolCalls.length > 0) {
+        loopStats.rounds += 1;
+        loopStats.toolCalls += detectedToolCalls.length;
+        let roundHadSuccess = false;
         // v3.0.16 (tool_start pre-launch): announce the calls BEFORE running
         // them. The TUI prints `⎿ name(args) ⟳` immediately instead of
         // waiting for execution to finish (long browser/file tools used to
@@ -374,7 +389,9 @@ export class LLMService {
             // context so cancellation-aware tools (browser) can bail out
             // mid-flight — Ctrl+C no longer leaves a page.goto running.
             const result = await tool.execute(params, { ...this.toolCtx, signal: options?.signal });
-            const output = result.success ? (result.output || JSON.stringify(result.data)) : (result.error || 'Tool failed');
+            const output = result.success
+              ? (result.output || (result.data !== undefined ? JSON.stringify(result.data) : '') || '(no output)')
+              : (result.error || 'Tool failed');
 
             currentMessages.push({
               role: 'tool',
@@ -387,11 +404,19 @@ export class LLMService {
             callResults.push({ name: toolCall.function.name, ok: result.success, output });
 
             if (!result.success) {
+              // v3.5.0: a cancellation is a permission decision, not a tool
+              // fault — count it separately so the circuit breaker can tell
+              // "user refused everything" from "tools are broken".
+              if (/cancel/i.test(output)) loopStats.denied += 1;
+              else loopStats.failed += 1;
+              roundHadSuccess = false;
               // Soft failure: tool returned success=false. Same repair pattern.
               currentMessages.push({
                 role: 'system',
                 content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" returned success=false: ${output}. Consider correcting the arguments and retrying.`,
               });
+            } else {
+              roundHadSuccess = true;
             }
           } catch (error: any) {
             const errMsg = `Error: ${error.message}`;
@@ -417,6 +442,25 @@ export class LLMService {
         // attached (index-aligned). TUI / headless render outcomes from here.
         // (The pre-execution `pending: true` announcement went out above.)
         yield { type: 'tool_calls', toolCalls: detectedToolCalls, results: callResults };
+
+        // v3.5.0: circuit breaker — when EVERY call of a round failed or was
+        // denied, one more identical attempt is unlikely to help. Stop after
+        // MAX_CONSECUTIVE_FAILED_ROUNDS such rounds instead of burning the
+        // remaining iterations (a denied task used to spin all 10 rounds).
+        if (roundHadSuccess) {
+          consecutiveFailedRounds = 0;
+        } else {
+          consecutiveFailedRounds += 1;
+          if (consecutiveFailedRounds >= MAX_CONSECUTIVE_FAILED_ROUNDS) {
+            loopStats.abortedReason = `${consecutiveFailedRounds} consecutive rounds had all tool calls fail or be denied (${loopStats.denied} denied, ${loopStats.failed} failed this turn)`;
+            return {
+              content: `[AGENT_ABORTED] Stopping: ${loopStats.abortedReason}. The task was NOT completed — ask the user for help or different permissions instead of retrying.`,
+              role: 'assistant',
+              usage: lastUsage,
+              loopStats,
+            };
+          }
+        }
         continue;
       }
 
@@ -428,7 +472,16 @@ export class LLMService {
       };
     }
 
-    return { content: '[Agent loop exceeded maximum iterations]', role: 'assistant' };
+    // v3.5.0: exhausting the loop is an ABORT, not a successful answer —
+    // callers used to see this string as a normal assistant message with
+    // success:true.
+    loopStats.abortedReason = `agent loop exceeded maximum iterations (${maxIterations})`;
+    return {
+      content: `[AGENT_ABORTED] ${loopStats.abortedReason} without a final answer. The task was NOT completed.`,
+      role: 'assistant',
+      usage: lastUsage,
+      loopStats,
+    };
   }
 
   private truncateArgs(args: string): string {
@@ -446,16 +499,21 @@ export class LLMService {
   }
 
   private getNoKeyMessage(): string {
+    // v3.5.0: name the model. `gfc -m some/model` used to disable the
+    // built-in fallback and then blame the missing API key — without ever
+    // mentioning that the -m model was the variable that changed.
+    const model = this.model ? `模型 "${this.model}" ` : '';
     return [
-      '❌ 未配置 API Key，无法调用 AI。',
+      `❌ ${model || '调用 AI '}失败：当前服务商未配置 API Key。`,
       '',
+      model ? '（该模型来自 -m/--model 参数：确认模型名与所属服务商，或去掉 -m 用内置共享模型）' : '',
       '请先运行: gfcode init',
       '',
       '或设置环境变量:',
       '  export SILICONFLOW_API_KEY="sk-..."',
       '  export OPENAI_API_KEY="sk-..."',
       '  export DEEPSEEK_API_KEY="sk-..."',
-    ].join('\n');
+    ].filter(l => l !== undefined).join('\n');
   }
 }
 

@@ -26,30 +26,43 @@ export class FileTool implements Tool {
       path: { type: 'string', description: 'File or directory path' },
       content: { type: 'string', description: 'Content to write (for write action)' }
     },
-    required: ['action', 'path']
+    // v3.5.0: content is REQUIRED for write. It used to be optional, so a
+    // model omitting it silently wrote a 0-byte file and reported success.
+    required: ['action', 'path', 'content']
   };
 
   metadata = {
     permissions: ['read', 'write'] as ('read' | 'write' | 'execute' | 'network')[],
-    tags: ['file', 'filesystem'],
-    version: '1.0.0'
+    tags: ['file', 'filesystem'],
+    version: '1.1.0'
   };
 
   parameters = [
     { name: 'action', type: 'string', description: 'Action to perform: read, write, list, delete, exists', required: true },
     { name: 'path', type: 'string', description: 'File or directory path', required: true },
-    { name: 'content', type: 'string', description: 'Content to write (for write action)', required: false }
+    { name: 'content', type: 'string', description: 'Content to write (for write action)', required: true }
   ];
 
   async execute(params: Record<string, any>, ctx?: ToolContext): Promise<ToolResult> {
     const { action, path, content } = params;
+
+    // v3.5.0: double-guard the write path. The schema marks content as
+    // required (the agent loop rejects such calls before execution with a
+    // repair message), but a direct/legacy caller must not produce a
+    // 0-byte file either.
+    if (action === 'write' && (typeof content !== 'string' || content.length === 0)) {
+      return {
+        success: false,
+        error: `[PARAM_ERROR] action=write requires a non-empty 'content' string. Retry including the full content to write.`,
+      };
+    }
 
     try {
       switch (action) {
         case 'read':
           return this.readFile(path);
         case 'write':
-          return await this.writeFile(path, content || '', ctx);
+          return await this.writeFile(path, content as string, ctx);
         case 'list':
           return this.listDir(path);
         case 'delete':
@@ -98,6 +111,11 @@ export class FileTool implements Tool {
     if (content.length > MAX_SIZE) {
       content = content.slice(0, MAX_SIZE) + '\n\n... [truncated, file too large]';
     }
+    // v3.5.0: an empty file must SAY it is empty — the model used to get
+    // output:"" (truthy-falsy nowhere), never learning its write failed.
+    if (buffer.length === 0) {
+      return { success: true, output: `(empty file, 0 bytes): ${path}` };
+    }
     return { success: true, output: content };
   }
 
@@ -133,7 +151,10 @@ export class FileTool implements Tool {
     }
 
     writeFileSync(path, content, 'utf-8');
-    return { success: true, output: `File written: ${path}` };
+    // v3.5.0: report the byte count so "wrote something" is verifiable —
+    // a silent 0-byte success was the root of the empty-write bug class.
+    const bytes = Buffer.byteLength(content, 'utf-8');
+    return { success: true, output: `File written: ${path} (${bytes} bytes)` };
   }
 
   private listDir(path: string): ToolResult {
