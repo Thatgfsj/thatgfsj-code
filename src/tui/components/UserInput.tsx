@@ -376,14 +376,19 @@ export function UserInput({ onSubmit, onCancel, disabled, mode = 'Build', provid
         </Box>
       </Box>
       {/* v3.0.11: chat mode spans full width with split hints (opencode);
-          splash mode keeps hints right-aligned under the centered box */}
-      <Box
-        justifyContent={fullWidth ? 'space-between' : 'flex-end'}
-        width={fullWidth ? '100%' : (width ?? 64)}
-      >
-        <Text color={theme.textFaint}>enter 发送 · ↑↓ 历史/移光标 · ←→ 移光标 · esc 取消</Text>
-        <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
-      </Box>
+          splash mode stacks the hints under the centered box — the fixed
+          64-col width used to wrap the two lines into each other. */}
+      {fullWidth ? (
+        <Box justifyContent="space-between" width="100%">
+          <Text color={theme.textFaint}>enter 发送 · ↑↓ 历史/移光标 · ←→ 移光标 · esc 取消</Text>
+          <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
+        </Box>
+      ) : (
+        <Box flexDirection="column" alignItems="flex-end" width={width ?? 64}>
+          <Text color={theme.textFaint}>enter 发送 · ↑↓ 历史 · esc 取消</Text>
+          <Text color={theme.textFaint}>/help 命令 · /models 模型 · ctrl+c 退出</Text>
+        </Box>
+      )}
     </Box>
   );
 }
