@@ -36,10 +36,14 @@ export class LLMService {
    */
   private toolCtx: ToolContext = {};
 
-  constructor(provider: LLMProvider, apiKey: string, model = '') {
+  /** v3.5.4: true for keyless providers (ollama) — an empty key is fine. */
+  private keyless: boolean;
+
+  constructor(provider: LLMProvider, apiKey: string, model = '', keyless = false) {
     this.provider = provider;
     this.apiKey = apiKey;
     this.model = model;
+    this.keyless = keyless;
   }
 
   /** v3.0.5: wire the execution context (confirm/signal/cwd) into tool calls. */
@@ -91,7 +95,7 @@ export class LLMService {
         provider = new OpenAIProvider(providerCfg);
     }
 
-    return new LLMService(provider, providerCfg.apiKey, providerCfg.model);
+    return new LLMService(provider, providerCfg.apiKey, providerCfg.model, !!providerConfig.keyless);
   }
 
   registerTools(tools: Tool[]): void {
@@ -123,7 +127,12 @@ export class LLMService {
   }
 
   getProviderName(): string { return this.provider.name; }
-  hasApiKey(): boolean { return !!this.apiKey; }
+  hasApiKey(): boolean {
+    // v3.5.4 (field report): keyless providers (ollama) were dead code —
+    // ConfigManager.hasApiKey() said "configured" while this check saw the
+    // empty key string and threw before any request was made.
+    return this.keyless || !!this.apiKey;
+  }
 
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<ChatResponse> {
     if (!this.hasApiKey()) throw new Error(this.getNoKeyMessage());
@@ -244,6 +253,15 @@ export class LLMService {
       // corrective system note gets injected so the next round can recover.
       let leakedTemplate = false;
       let templateLeaks = 0;
+      // v3.5.4 (field report, round-5 data-loss case): a rename task became
+      // "delete target + write empty" and still reported success. After a
+      // failed file write, delete-like operations are blocked for the rest
+      // of the turn — irreversible actions must not follow a broken write.
+      let writeDenied = false;
+      const TOOL_FORMAT_NOTE =
+        '[TOOL_FORMAT] Your reply contained raw tool-call markup (<tool_call>, <parameter=...>). ' +
+        'That markup is not executable. Issue tool calls through the function-calling channel instead, ' +
+        'as proper JSON with EVERY required parameter filled (e.g. file write needs action, path AND content).';
 
       // Forward stream chunks from the provider. We collect text internally for
       // tool-call persistence but always re-emit the original chunks unchanged.
@@ -346,7 +364,7 @@ export class LLMService {
               role: 'system',
               content: `[TOOL_REPAIR] Previous tool_call "${toolCall.function.name}" (id=${toolCall.id}) failed: ${errMsg}. Available tools: ${[...this.tools.keys()].join(', ')}.`,
             });
-            currentMessages.push({
+            mirror(currentMessages[currentMessages.length - 1]);            currentMessages.push({
               role: 'tool',
               content: errMsg,
               tool_call_id: toolCall.id,
@@ -359,6 +377,27 @@ export class LLMService {
 
           try {
             const parsed = JSON.parse(toolCall.function.arguments || '{}');
+
+            // v3.5.4: data guard — after a failed/denied file write this
+            // turn, refuse delete-like operations (field report: a rename
+            // turned into "delete + empty write" = irreversible loss).
+            const isDeleteLike =
+              (toolCall.function.name === 'file' && parsed?.action === 'delete') ||
+              toolCall.function.name === 'apply_patch';
+            if (writeDenied && isDeleteLike) {
+              const guardMsg =
+                '[DATA_GUARD] A file write failed earlier in this turn (missing/empty content). Delete operations are blocked until a write succeeds, to prevent irreversible data loss. Re-issue the write with the full content first, then retry the delete.';
+              currentMessages.push({
+                role: 'tool',
+                content: guardMsg,
+                tool_call_id: toolCall.id,
+                name: toolCall.function.name,
+              });
+              mirror(currentMessages[currentMessages.length - 1]);
+              callResults.push({ name: toolCall.function.name, ok: false, output: guardMsg });
+              continue;
+            }
+
             // v3.3.0 runaway guard: the same call repeating is the model
             // spinning — remind it to change approach (soft nudge only).
             // v3.5.1: the reminder text also rides on the tool_calls chunk
@@ -403,7 +442,7 @@ export class LLMService {
                 role: 'system',
                 content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" was called with missing required parameters (${missing.join(', ')}). Re-issue the call and include them.`,
               });
-              callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
+            mirror(currentMessages[currentMessages.length - 1]);              callResults.push({ name: toolCall.function.name, ok: false, output: errMsg });
               continue;
             }
 
@@ -436,7 +475,9 @@ export class LLMService {
             }
 
             if (!result.success) {
-              // v3.5.0: a cancellation is a permission decision, not a tool
+              // v3.5.4: a failed/denied file write arms the delete guard.
+              if (toolCall.function.name === 'file' && parsed?.action === 'write') writeDenied = true;
+              // v3.5.3: a cancellation is a permission decision, not a tool
               // fault — count it separately so the circuit breaker can tell
               // "user refused everything" from "tools are broken".
               if (/cancel/i.test(output)) loopStats.denied += 1;
@@ -447,7 +488,10 @@ export class LLMService {
                 role: 'system',
                 content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" returned success=false: ${output}. Consider correcting the arguments and retrying.`,
               });
-            } else {
+            mirror(currentMessages[currentMessages.length - 1]);            } else {
+              // v3.5.4: a successful file write proves content handling works
+              // again — disarm the delete guard.
+              if (toolCall.function.name === 'file' && parsed?.action === 'write') writeDenied = false;
               roundHadSuccess = true;
             }
           } catch (error: any) {
@@ -471,7 +515,7 @@ export class LLMService {
               role: 'system',
               content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" threw an exception: ${errMsg}. Inspect the arguments and retry with a corrected call.`,
             });
-          }
+            mirror(currentMessages[currentMessages.length - 1]);          }
         }
 
         // Emit one tool_calls chunk for this iteration, with per-tool results
@@ -510,19 +554,24 @@ export class LLMService {
         continue;
       }
 
-      // v3.5.4 (field report P0): template-fragment leakage with NO tool
-      // calls means the model tried to call tools as plain text. Correct
-      // it and give it another round (max 2 corrections per turn — then
-      // the text answer stands as-is).
-      if (leakedTemplate && !detectedToolCalls?.length && templateLeaks < 2) {
+      // v3.5.4 (field report): template-fragment leakage means the model
+      // tried to call tools as plain text. Inject the corrective note
+      // WHETHER OR NOT tool calls also fired (round-5 finding: the leak
+      // always accompanied real calls, so the old no-calls-only condition
+      // never triggered). Max 2 notes per turn.
+      if (leakedTemplate && templateLeaks < 2) {
         templateLeaks += 1;
         const note =
-          '[TOOL_FORMAT] Your reply contained raw tool-call markup (<tool_call>, <parameter=...>). ' +
-          'That markup is not executable. Issue tool calls through the function-calling channel instead, ' +
-          'as proper JSON with EVERY required parameter filled (e.g. file write needs action, path AND content).';
+          TOOL_FORMAT_NOTE;
         currentMessages.push({ role: 'system', content: note });
         mirror(currentMessages[currentMessages.length - 1]);
-        continue;
+        if (!detectedToolCalls?.length) {
+          // The "call" was pure text — give the model another round to
+          // emit it properly instead of treating markup as the answer.
+          continue;
+        }
+        // With real tool calls: fall through — results were processed and
+        // the injected note rides into the next request.
       }
 
       // No tool calls - done. Return final response (with usage if we have

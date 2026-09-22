@@ -186,11 +186,15 @@ export class GeminiProvider implements LLMProvider {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`Gemini API error ${response.status}: ${text}`);
+      throw new Error(`Gemini API error ${response.status}: ${text.slice(0, 500)}`);
     }
 
     const data = await response.json();
     const candidate = data.candidates?.[0];
+    // v3.5.4: `candidates: []` used to parse to an empty success.
+    if (!candidate) {
+      throw new Error('Gemini API returned a malformed response (no candidates). This is a provider-side failure, not an empty answer.');
+    }
     const parts = candidate?.content?.parts || [];
     // v3.0.18: skip Gemini "thought" parts (extended-thinking summaries) —
     // leaking them into content corrupted the visible answer and got
@@ -238,6 +242,10 @@ export class GeminiProvider implements LLMProvider {
     let capturedUsage: Usage | undefined;
     // v3.5.3: garbage 200 bodies must fail loudly, not read as success.
     let sawValidFrame = false;
+    // v3.5.4: finishReason marks a complete stream — without it the answer
+    // was cut off mid-stream (MAX_TOKENS etc. still SET finishReason, so
+    // only a hard truncation fails here).
+    let sawFinish = false;
 
     try {
       const response = await fetch(url, {
@@ -250,7 +258,7 @@ export class GeminiProvider implements LLMProvider {
 
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => '');
-        throw new Error(`Gemini API error ${response.status}: ${text}`);
+        throw new Error(`Gemini API error ${response.status}: ${text.slice(0, 500)}`);
       }
 
       const reader = response.body.getReader();
@@ -273,6 +281,7 @@ export class GeminiProvider implements LLMProvider {
             try {
               const data = JSON.parse(trimmed.slice(6));
               if (data && typeof data === 'object') sawValidFrame = true;
+              if (data.candidates?.[0]?.finishReason) sawFinish = true;
               if (data.usageMetadata) {
                 capturedUsage = this.normalizeUsage(data.usageMetadata);
               }
@@ -323,9 +332,12 @@ export class GeminiProvider implements LLMProvider {
     }
 
     // v3.5.3: garbage 200 body (no valid SSE frames) fails loudly.
-    if (!sawValidFrame) {
+    // v3.5.4: valid frames but no finishReason = truncated mid-answer.
+    if (!sawValidFrame || !sawFinish) {
       throw new Error(
-        'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
+        sawValidFrame
+          ? 'Gemini stream ended without a finishReason (truncated response). This is a provider-side failure, not an empty answer.'
+          : 'Gemini API returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
       );
     }
 

@@ -215,7 +215,11 @@ if ($NoOpen) {
                     "5" { $config.provider = "gemini"; $config.model = "gemini-1.5-flash-8b" }
                 }
                 
-                $config | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
+                # v3.5.4 field report: PS5.1's -Encoding UTF8 writes a BOM,
+                # which gfc's JSON parser silently rejects — the key the
+                # wizard just configured was thrown away. Write BOM-less.
+                $json = $config | ConvertTo-Json
+                [System.IO.File]::WriteAllText($configFile, $json, (New-Object System.Text.UTF8Encoding($false)))
                 Write-Success "配置已保存到: $configFile"
             }
         }

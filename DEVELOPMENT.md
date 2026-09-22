@@ -12,6 +12,31 @@
 - 发版命令：`npm version 3.5.N --no-git-tag-version`，tag 用 `v3.5.N`。
 - bump 前确认上一版本号：`npm view thatgfsj-code version`。
 
+## 已知限制
+
+- **硬链接绕过工作区栅栏（file / apply_patch）**：工作区边界用
+  realpath 前缀比对，能拦软链接/junction（解析后落在 proj 外），但
+  **硬链接**的两个路径解析后就是同一个 inode 自身，file write 与
+  apply_patch 都能改写 proj 外的硬链接目标。彻底封堵需要在写入前做
+  `(dev, ino)` 与已知工作区文件的比对（`fs.stat`），成本与误伤未评估，
+  暂记为已知限制。缓解：破坏性动作仍受确认门与熔断约束。
+- **MCP server 启动挂起**：mcp.json 里配置的 server 若握手阶段挂起，
+  会拖慢每次启动至多一个超时周期（每条命令 +30s）；headless 已保证
+  结束时释放子进程，但启动期无预检。
+- **cache.enabled/ttl 对 openai 格式无 wire 效应**：只有 Anthropic 消费
+  cache_control 断点；OpenAI 兼容系（含 SiliconFlow）走服务端自动前缀
+  缓存，客户端没有可发的开关。
+- **MODEL 环境变量**：`MODEL=<模型id>` 可临时覆盖 config 的默认模型
+  （优先级高于 config.model，低于 -m/--model）；此前属隐藏功能，此处为
+  唯一文档。
+- **skills 仅 TUI 可管理**：headless 无法列出/启用 skills（
+  autoActivate 目前是死代码）。
+- **file 工具无 append/edit action**：部分修改请用 patch 工具。
+- **patch Add File 恒补结尾换行**，与 file write 的原样写入语义不一致。
+- **内置共享 4B 模型是写任务的能力下限**：实测其工具序列化 100% 丢失
+  content 参数；gfc 侧已有格式指引 / 泄漏纠正 / 数据保护三层缓解，
+  写任务仍建议配置个人 key 使用更大模型。
+
 ## 环境要求
 
 - Node.js >= 20.19（ink 7 / react 19 / vitest 4 的要求）
@@ -37,7 +62,7 @@ src/
 ├── app/index.ts    # App 单例：组装依赖、权限决策（requestConfirmation）、
 │                   #   reloadModel / applyTtl / MCP 接线 / streamResponse
 ├── version.ts      # 版本单一来源（运行时读 package.json）
-├── config/         # ConfigManager + 15 个 Provider 目录（providers.ts）
+├── config/         # ConfigManager + 16 个 Provider 目录（providers.ts）
 ├── llm/            # LLMService（agent loop）+ openai/anthropic/gemini 三协议
 ├── cache/          # Prompt caching：stableStringify、断点、smartModel TTL、统计
 ├── session/        # SessionManager（持久化/restore/自动压缩）+ compactor（原子组）
@@ -46,7 +71,7 @@ src/
 ├── tui/            # Ink 组件（app.tsx 组合 useChat/useCommands）
 ├── mcp/client.ts   # MCP stdio 客户端 + MCPServerManager
 ├── setup/          # browser-setup.ts：首次运行浏览器引导
-├── hooks/          # HookManager（事件点尚未接入主流程）
+├── plan/           # 计划模式的内存数据存储（planStore）
 ├── prompts/        # 系统提示分段构建（immutable prefix + volatile tail）
 └── utils/          # diff、thinking 压缩、stableStringify、project context
 ```

@@ -43,14 +43,19 @@ export function createGetContextTool(getState: () => ContextState): Tool {
       const win = Math.max(1, state.window || 128000);
       const pct = Math.min(100, Math.round((used / win) * 100));
       const remaining = Math.max(0, win - used);
+      // v3.5.4 (field report): capping the percent at 100 hid HOW FAR over
+      // the window an estimate was — show the overshoot explicitly.
+      const over = Math.max(0, used - win);
+      const overNote = over > 0 ? ` ⚠ 超出窗口 ${over.toLocaleString()} tokens。` : '';
       const advice =
-        pct >= 85 ? 'Auto-compact will fire soon — wrap up and hand off cleanly.'
+        used > win ? 'Estimate exceeds the window — the provider will likely reject this request. Wrap up or start a new session.'
+          : pct >= 85 ? 'Auto-compact will fire soon — wrap up and hand off cleanly.'
           : pct >= 60 ? 'Getting crowded — prefer targeted reads and smaller outputs.'
             : 'Plenty of room — continue normally.';
       return {
         success: true,
-        output: `Context: ${used.toLocaleString()}/${win.toLocaleString()} tokens used (${pct}%). Remaining ≈ ${remaining.toLocaleString()}. ${advice}`,
-        data: { used, window: win, remaining, percent: pct },
+        output: `Context: ${used.toLocaleString()}/${win.toLocaleString()} tokens used (${pct}%). Remaining ≈ ${remaining.toLocaleString()}.${overNote} ${advice}`,
+        data: { used, window: win, remaining, percent: pct, over },
       };
     },
   };

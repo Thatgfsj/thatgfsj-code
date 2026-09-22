@@ -38,19 +38,29 @@ import { MCPServerManager, type McpConfigFile } from '../mcp/client.js';
 import { createGetContextTool } from '../tools/context.js';
 import type { ChatMessage, ChatResponse, StreamChunk, Usage } from '../types.js';
 
+let mcpWarned = false;
+
 /** Read ~/.thatgfsj/mcp.json. Missing = no servers. Corrupt = warn loudly
  * (v3.5.4 field report: a syntax error used to be silently treated as
- * "not configured", leaving users wondering why their server never ran). */
+ * "not configured", leaving users wondering why their server never ran).
+ * v3.5.5: warn once per process — loadMcpConfig is called from several
+ * paths and the warning used to print 3 times. */
 export function loadMcpConfig(): McpConfigFile {
   const p = join(homedir(), '.thatgfsj', 'mcp.json');
   if (!existsSync(p)) return {};
   try {
     const data = JSON.parse(readFileSync(p, 'utf-8'));
     if (data && typeof data === 'object') return data as McpConfigFile;
-    process.stderr.write(`[mcp] ${p} 内容不是 JSON 对象，已忽略（MCP 未加载）。请修正该文件。\n`);
+    if (!mcpWarned) {
+      mcpWarned = true;
+      process.stderr.write(`[mcp] ${p} 内容不是 JSON 对象，已忽略（MCP 未加载）。请修正该文件。\n`);
+    }
     return {};
   } catch (e: any) {
-    process.stderr.write(`[mcp] ${p} 解析失败（${e.message}），已忽略（MCP 未加载）。请修正该文件。\n`);
+    if (!mcpWarned) {
+      mcpWarned = true;
+      process.stderr.write(`[mcp] ${p} 解析失败（${e.message}），已忽略（MCP 未加载）。请修正该文件。\n`);
+    }
     return {};
   }
 }
@@ -192,18 +202,21 @@ export class App {
     llm.registerTools(tools.list());
 
     // Auto-init NWT timeline.
-    // v3.5.0: opt-out via config.nwt === false, and the FIRST creation in a
-    // project now says so (a silent .nwt/ directory appearing in any
-    // project looked like pollution — field-report finding) plus a
-    // .gitignore hint.
+    // v3.5.4: opt-out via config.nwt === false. v3.5.4 field report: on a
+    // read-only project dir the init FAILS, yet the success notice printed
+    // on every start — report honestly instead.
     const nwtEnabled = config.get().nwt !== false;
     const nwtTool = tools.get('nwt');
     if (nwtEnabled && nwtTool) {
       const nwtDir = join(process.cwd(), '.nwt');
       const preexisting = existsSync(nwtDir);
-      await nwtTool.execute({ action: 'init' });
+      const r = await nwtTool.execute({ action: 'init' });
       if (!preexisting) {
-        appLog(`已在 ${nwtDir} 建立项目时间线（gfc 过程记忆）。不需要可设 config "nwt": false，并建议把 .nwt/ 加入 .gitignore`);
+        if (r.success) {
+          appLog(`已在 ${nwtDir} 建立项目时间线（gfc 过程记忆）。不需要可设 config "nwt": false，并建议把 .nwt/ 加入 .gitignore`);
+        } else {
+          appLog(`NWT 时间线初始化失败（${r.error}）——本会话不记录过程记忆`);
+        }
       }
     }
 
@@ -660,10 +673,20 @@ export class App {
     const est = this.currentContextEstimate();
     const cfg = (this.config.get() as any);
     const maxTokens = cfg.maxTokens ?? 4096;
-    const triggerAt = win - Math.max(16384, maxTokens + 2048);
+    // v3.5.4 (field report): on tiny windows (3k) `win - 16384` went
+    // NEGATIVE — the trigger fired before any content existed and every
+    // round re-compacted (cache death). Floor it at 60% of the window.
+    const triggerAt = Math.max(Math.round(win * 0.6), win - Math.max(16384, maxTokens + 2048));
     if (est <= triggerAt) return null;
     const r = this.session.compactNow({ tokenPressure: true });
-    if (!r) return null;
+    if (!r) {
+      // v3.5.4 (field report): "nothing compressible" used to silently
+      // PASS the oversized request through to the provider (400).
+      process.stderr.write(
+        `\n  ⚠️ 上下文估算 ${est} tokens 已超过触发线 ${triggerAt}（窗口 ${win}），但没有可压缩的内容——请求将被放行，可能被提供方拒绝。建议 /new 开新会话。\n`,
+      );
+      return null;
+    }
     const estAfter = this.currentContextEstimate();
     if (estAfter > triggerAt) {
       process.stderr.write(

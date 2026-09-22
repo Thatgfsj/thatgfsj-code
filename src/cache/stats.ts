@@ -247,7 +247,10 @@ export class CacheStatsStore {
         totalRequests: parsed.totalRequests ?? 0,
         history: Array.isArray(parsed.history) ? parsed.history : [],
       };
-    } catch {
+    } catch (e: any) {
+      // v3.5.4: say so — silent reset made users think the file was fine
+      // while every counter read 0. The next record() rewrites it clean.
+      process.stderr.write(`[cache] ${this.path} 损坏（${e.message}），统计已从零开始重建\n`);
       return { ...EMPTY_STATS, history: [] };
     }
   }

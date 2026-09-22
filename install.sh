@@ -62,10 +62,13 @@ INSTALL_DIR="$HOME/thatgfsj-code"
 if [ -d "$INSTALL_DIR" ]; then
     echo -e "${YELLOW}[*] 检测到已有安装，正在更新...${NC}"
     cd "$INSTALL_DIR"
-    git pull origin main 2>/dev/null || {
-        echo -e "${YELLOW}[*] 更新失败，重新克隆...${NC}"
-        rm -rf "$INSTALL_DIR"
-    }
+    # v3.5.4 field report: a failed `git pull` (offline, DNS, proxy hiccup)
+    # used to rm -rf the ENTIRE install dir — taking the user's local
+    # .nwt/ timeline and any local changes with it. Keep the directory and
+    # let the user retry; the code below still works with what's there.
+    if ! git pull origin main 2>/dev/null; then
+        echo -e "${YELLOW}[!] 更新失败（可能是网络问题），保留现有安装继续。稍后可重试: cd $INSTALL_DIR && git pull${NC}"
+    fi
 fi
 
 if [ ! -d "$INSTALL_DIR" ]; then

@@ -49,8 +49,10 @@ Thatgfsj Code 支持多种 AI 提供商，以下是各提供商 API Key 的获�
 
 ### 特点
 
-- ✅ Moonshot Kimi 系列模型
+- ✅ MiniMax（abab / M 系列）自研模型
 - ✅ Agent 能力强
+
+（Kimi 是 Moonshot AI 的模型，对应本目录第 6 节，不属于 MiniMax。）
 
 ---
 

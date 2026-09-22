@@ -76,10 +76,15 @@ function safeDecode(buf: Buffer, label: string): string {
   }
 }
 
-// Dangerous command patterns - blocked immediately, regardless of mode
+// Dangerous command patterns - blocked immediately, regardless of mode.
+// v3.5.4 (field report): the list was Unix-only — on Windows --yolo,
+// `shutdown /s` was actually EXECUTED. Windows power/data destructive
+// forms are now covered too.
 const DANGEROUS_PATTERNS = [
   /^rm\s+-rf\s+\//i,
   /^del\s+\/f\s+\/s\s+\/q/i,
+  /^rd\s+\/s(\s|$|\/)/i,
+  /^rmdir\s+\/s(\s|$|\/)/i,
   /^format\s+[a-z]:/i,
   /^mkfs/i,
   /^dd\s+if=/i,
@@ -92,6 +97,11 @@ const DANGEROUS_PATTERNS = [
   /^wget\s+.*\|.*sh/i,
   /^eval\s+/i,
   /base64\s+-d\s+.*\|/i,
+  /^shutdown(\.exe)?(\s|$|\/)/i,
+  /^taskkill(\.exe)?\s+\/f/i,
+  /^reg(\.exe)?\s+(add|delete|import|restore|unload)/i,
+  /^cipher\s+\/w/i,
+  /^wevtutil\s+cl/i,
 ];
 
 /**

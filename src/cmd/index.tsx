@@ -96,17 +96,17 @@ program
 
       // v3.4.20 field report: -m/-t used to PERSIST through config.save(),
       // permanently poisoning later sessions (fake model, useBuiltin off).
-      // One-shot runs now apply them in memory only; the interactive
-      // launch path (no prompt) keeps the old persist-to-default behavior.
+      // One-shot runs now apply them in memory only. The interactive path
+      // (no prompt) ALSO starts transient — v3.5.4 field report: the
+      // persist used to run before validation, so `gfc -m some/fake-model`
+      // on a pipe poisoned config.json even though the run immediately
+      // failed. It is committed later, right before the TUI starts.
       const oneShot = !!prompt && !options.interactive;
+      let persistModelBeforeTui = false;
       if (options.model) {
-        if (oneShot) {
-          app.config.setTransient({ model: options.model });
-          await app.reloadModel();
-        } else {
-          await app.config.save({ model: options.model });
-          await app.reloadModel();
-        }
+        app.config.setTransient({ model: options.model });
+        await app.reloadModel();
+        if (!oneShot) persistModelBeforeTui = true;
       }
       if (thinking) {
         await app.setModelThinking(app.config.get().model, thinking, !oneShot);
@@ -140,16 +140,23 @@ program
         }
       }
 
-      // Check if API key is configured
-      if (!app.config.hasApiKey()) {
-        // v3.1.2: a built-in shared SiliconFlow model (Qwen/Qwen3.5-4B) ships
-        // with the CLI, so a missing key no longer blocks startup — getAIConfig
-        // falls back to it. Just tell the user; `gfcode init` configures a
-        // personal key (and stops sharing the pooled quota).
+      // v3.5.4 (field report): the notice must match the REAL fallback
+      // decision (getAIConfig), not just "no key" — with an explicit setup
+      // and no key the old text promised the builtin model, then the
+      // request failed with "未配置 API Key". Both sides now agree.
+      if (app.usingBuiltinModel) {
         if (!jsonMode) {
           console.log(chalk.gray('  ℹ 未检测到 API Key，将使用内置共享模型 Qwen/Qwen3.5-4B（共享额度）。运行 gfcode init 配置自己的 key。'));
         } else {
           process.stderr.write('[builtin] using built-in shared model Qwen/Qwen3.5-4B (no API key configured)\n');
+        }
+      } else if (!app.config.hasApiKey()) {
+        const eff = app.config.getAIConfig();
+        const msg = `当前配置（${eff.provider} / ${eff.model}）没有可用的 API Key，请求会失败。运行 gfcode init 或 /服务商 配置；去掉自定义模型可回退内置共享模型。`;
+        if (!jsonMode) {
+          console.log(chalk.gray(`  ℹ ${msg}`));
+        } else {
+          process.stderr.write(`[config] ${msg}\n`);
         }
       }
 
@@ -161,6 +168,13 @@ program
       }
 
       if (!prompt || options.interactive) {
+        // v3.5.4 field report: `-c` with no task in headless mode used to
+        // fall into the TTY complaint — the real problem is that resuming
+        // needs something TO do. Say so.
+        if (options.continue && jsonMode) {
+          console.error(chalk.yellow('\n  -c 恢复会话需要一个新的任务：gfc -c "下一步任务" --json，或交互式运行 gfc -c\n'));
+          process.exit(1);
+        }
         // v3.0.9 fix (black-box finding): interactive TUI requires a TTY —
         // Ink's useInput needs raw mode and crashes with a stack trace on
         // piped stdin. Refuse gracefully; scripting should use --json.
@@ -168,6 +182,13 @@ program
           console.error(chalk.yellow('\n  gfcode 需要交互式终端（TTY）才能启动 TUI。'));
           console.error(chalk.gray('  脚本化调用请使用: gfcode "任务" --json\n'));
           process.exit(1);
+        }
+        // v3.5.4 (field report): commit the '-m sets the default' persist
+        // HERE — after the TTY check, right before the TUI starts. The old
+        // up-front persist wrote a typo'd model into config.json even when
+        // the run then failed validation.
+        if (persistModelBeforeTui) {
+          await app.config.save({ model: options.model });
         }
         // Interactive mode - Ink TUI via Ink's NATIVE alternate screen
         // (v3.2.2): the whole UI renders inside the fixed viewport, and
@@ -246,7 +267,11 @@ program
         if (jsonMode) {
           // v3.5.0: the session id rides on start so script consumers can
           // keep it and later resume with --continue.
-          emit({ type: 'start', prompt, provider: app.config.get().provider, model: app.config.get().model, session: app.session.getId() });
+          // v3.5.4 (field report): report the EFFECTIVE provider/model —
+          // when useBuiltin forces the shared model, showing the config's
+          // original provider/model lied to headless consumers.
+          const eff = app.config.getAIConfig();
+          emit({ type: 'start', prompt, provider: eff.provider, model: eff.model, session: app.session.getId(), ...(app.usingBuiltinModel ? { builtin: true } : {}) });
         } else {
           console.log(chalk.cyan.bold('\n  ⚡ THATGFSJ CODE\n'));
           console.log(chalk.gray('  You'));
@@ -310,6 +335,9 @@ program
                       arguments: tc.function.arguments,
                     })),
                     results,
+                    // v3.5.4: runaway-guard notes were dropped here —
+                    // headless could never observe the guard working.
+                    ...(chunk.notes ? { notes: chunk.notes } : {}),
                   });
                 } else {
                   for (const tc of chunk.toolCalls) {

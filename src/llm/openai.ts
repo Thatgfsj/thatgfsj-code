@@ -53,11 +53,16 @@ export class OpenAIProvider implements LLMProvider {
     // was silently parsed into an empty ChatResponse.
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`API error ${response.status}: ${text}`);
+      throw new Error(`API error ${response.status}: ${text.slice(0, 500)}`);
     }
 
     const data = await response.json();
     const choice = data.choices?.[0];
+    // v3.5.4 (field report): `choices: []` used to parse to an empty
+    // success.
+    if (!choice) {
+      throw new Error('Provider returned a malformed response (no choices). This is a provider-side failure, not an empty answer.');
+    }
 
     return {
       content: choice?.message?.content || '',
@@ -97,6 +102,9 @@ export class OpenAIProvider implements LLMProvider {
     // the empty result as a successful completion (success:true, content:"").
     // Track whether at least one valid SSE frame arrived.
     let sawValidFrame = false;
+    // v3.5.4 (field report): a stream with SOME valid frames but no finish
+    // frame (truncated mid-stream) also read as an empty success.
+    let sawFinish = false;
 
     try {
       // v3.5.4 (field report P2): honor Retry-After on 429 — the report
@@ -107,13 +115,18 @@ export class OpenAIProvider implements LLMProvider {
         const ra = Number(response.headers.get('retry-after'));
         const waitSec = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 30) : 0;
         if (waitSec > 0) {
+          // v3.5.5: say when the wait was capped, so a 120s request reading
+          // as 30s doesn't look like we ignored the server.
+          if (ra > 30) {
+            process.stderr.write(`[llm] 429 Retry-After 为 ${ra}s，超过 30s 上限——等待 30s 后重试一次（不保证成功）\n`);
+          }
           await new Promise(r => setTimeout(r, waitSec * 1000));
           response = await this.doRequest(body, controller.signal);
         }
       }
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => '');
-        throw new Error(`API error ${response.status}: ${text}`);
+        throw new Error(`API error ${response.status}: ${text.slice(0, 500)}`);
       }
       resetIdle();
 
@@ -138,7 +151,8 @@ export class OpenAIProvider implements LLMProvider {
 
             try {
               const data = JSON.parse(trimmed.slice(6));
-              if (data && typeof data === 'object') sawValidFrame = true;
+              if (Array.isArray(data.choices)) sawValidFrame = true;
+              if (data.choices?.[0]?.finish_reason) sawFinish = true;
               const delta = data.choices?.[0]?.delta;
 
               // Text content
@@ -198,9 +212,13 @@ export class OpenAIProvider implements LLMProvider {
 
     // v3.5.3: fail loudly on an empty/garbage body instead of reporting an
     // empty success.
-    if (!sawValidFrame) {
+    // v3.5.4: zero valid frames = garbage body; valid frames but no finish
+    // frame = truncated mid-stream. Neither is an "empty answer".
+    if (!sawValidFrame || !sawFinish) {
       throw new Error(
-        'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
+        sawValidFrame
+          ? 'Provider stream ended without a finish frame (truncated response). This is a provider-side failure, not an empty answer.'
+          : 'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
       );
     }
 

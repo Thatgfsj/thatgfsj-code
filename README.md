@@ -20,7 +20,7 @@ AI 编程助手 — 终端里的 AI 编程伙伴
 - **Prompt Caching** — Reasonix 式缓存架构：稳定序列化、Anthropic cache_control 断点、智能 TTL、命中率统计
 - **16 个内置 Skills** — 规划、调试、TDD、架构优化、代码审查等
 - **NeuroWeave Timeline** — 项目演进记忆（v0.2.0 融合：事件自动链式、importance、diff/compact、快照备份与 parent 重映射、归档不丢数据）
-- **多 Provider** — 15 个平台 + 自定义中转站，含 Ollama 本地模型
+- **多 Provider** — 16 个平台（含 OpenAI / Anthropic / Gemini 三种自定义中转格式）+ Ollama 本地模型
 - **消息队列** — AI 工作时输入补充说明，完成后自动处理
 - **中文命令** — `/模型` `/新建` `/压缩` `/技能` 等
 

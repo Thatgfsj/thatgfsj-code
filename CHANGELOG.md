@@ -9,6 +9,73 @@ All notable changes to **Thatgfsj Code** are documented here. The format follows
 > 是错误示范，3.6.0 已废弃并由 3.5.2 取代，内容完全一致）。
 > 详见 `DEVELOPMENT.md` 的 Versioning 一节。
 
+## [3.5.5] - 2026-09-22 - 六域实测修复（TUI 真终端 / 密钥面 / 静默失败家族）
+
+> 五路子代理七域覆盖（node-pty 真终端 123 断言、真实模型开箱量化）。上轮 12 项声称 10 项确认、2 项部分；本轮修新发现问题约 14 项。282 → 294 用例。
+
+### Fixed
+
+**静默失败家族（如实告知）**
+- **openai/anthropic/gemini 三协议的"半截流"假成功**：3.5.3 的"零有效帧"守卫漏了两种形态——`choices: []`/无 candidates 的 200 响应，以及"有有效帧但没有 finish 帧"的中途截断流。三 provider 现跟踪 finish（finish_reason / message_stop / finishReason），缺失即抛出明确提供方错误；`chat()` 空 choices 同样拒绝
+- **只读家目录 → 会话静默不落盘**：persist 失败改为每进程警告一次（"本会话将无法用 -c 恢复"）
+- **只读项目目录 → .nwt 每次启动谎报"已建立"**：init 结果现在被检查，失败如实报告
+- **USERPROFILE 指向不存在目录**：静默建树并回落内置模型改为显式警告
+- **install.ps1 BOM 自断安装链**：PS5.1 的 `Set-Content -Encoding UTF8` 写出带 BOM 的 config.json，gfc 拒收——装机向导刚配的 key 被静默丢弃；改为 BOM-less UTF-8 写入
+- **install.sh pull 失败 rm -rf 整个安装目录**（连带用户 .nwt/ 时间线与本地改动）：改为保留现有安装并提示重试
+- **cache-stats 损坏静默归零**：现警告损坏原因，并在下一次 record 时重写干净文件
+- **`gfc mcp` 路径下损坏 mcp.json 警告重复 3 次**：每进程只警告一次
+- **429 RA 截断无说明**：Retry-After 超 30s 上限时明确提示"已按 30s 等待"
+
+**模型管理与配置**
+- **ollama keyless 断链修复**：LLMService.hasApiKey 只看空字符串直接抛错，keyless 设计实为死代码；现识别 keyless provider 正常发请求
+- **legacy 顶层 apiKey 迁移**：手改 provider 时旧 key 会以新 provider 身份发出（串 key）；迁移现在显式警告"若刚手动改过 provider 请重配"
+- **非法 provider 清 key**：`provider: 42` 回退 siliconflow 时不再带着旧顶层 apiKey 真连云端（警告 + 清除）
+- **useBuiltin 布尔化**：`"yes"` 等任意 truthy 字符串曾劫持全部请求；load 期清洗为布尔并警告
+- **start 事件显示有效 provider/model**：useBuiltin 强制回退时 headless 不再被原 config 值蒙在鼓里；[builtin] 提示改按真实回退条件判定
+- **custom_openai 默认模型**追平自家 catalog（gpt-4o-mini → gpt-5.4-mini）
+
+**上下文与工具**
+- **preCall 漏兜**：压缩无戏时静默放行超限请求改为明确警告（含数值与建议）；**触发线增加 60% 窗口下限**（3k 小窗口下触发线曾为负，每轮重压缩毁缓存）
+- **nwt 输出上限**：唯一无回流量上限的入口（实测单次 618K 字符直上 wire）现按 8000 字符截断并提示缩小范围
+- **nwt auto-chain 防脏文件**：auto-chain 前校验最高编号文件可解析且非自身（防悬挂 parent 与自引用）
+- **[TOOL_REPAIR] 通道上线**：4 处修复系统消息补 mirror，session 模式下模型自修复信号不再丢失
+- **get_context_remaining 超窗显式化**：不再把百分比封顶在 100%，超出量直接显示
+- **checkpoint 文本质量**：目标行双连字符（"- - task"）修复；主题退化为 "various topics" 时回退取合并摘要中的主题
+- **DANGEROUS_PATTERNS 补 Windows**：shutdown、taskkill /f、rd/rmdir /s、reg add/delete/import、cipher /w、wevtutil cl（此前 Unix 视角，--yolo 下 `shutdown /s` 会被真实执行）
+
+### Added
+
+- `--json` tool_calls 事件透传 runaway `notes` 字段（此前守卫在 headless 完全不可观测）
+- `--json` start 事件显示**有效** provider/model（useBuiltin 回退时不再显示 config 原值），新增 `builtin: true` 标志
+- config 无 key 但显式配置时的提示与真实回退条件一致（不再自相矛盾）
+- `custom_gemini` provider（Gemini 格式中转出口）+ gemini 网络错误点名中转配置
+
+### Docs
+
+- DEVELOPMENT 补"已知限制"（硬链接栅栏盲区、MODEL 环境变量、openai 缓存开关无效应、4B 写任务下限等）与目录树勘误（删 src/hooks、补 plan/）
+- README Provider 数 15 → 16；docs/API_KEY_GUIDE 修正 MiniMax 节错挂 Kimi 模型的说明
+
+## [3.5.4] - 2026-09-22 - 第四轮实测修复（补 CHANGELOG 条目）
+
+> 补记：3.5.4 发布时遗漏了 CHANGELOG 条目，此处补上（内容与当时 commit 一致）。
+
+### Fixed
+
+- **MCP 挂死（P0）**：单 prompt 路径不释放 MCP server，子进程 stdio 管道让事件循环永不排空——headless 成功输出 result 后进程挂死（240s 强杀）。finally 中 disconnectAll；e2e 用常驻 mock server 验证正常退出
+- **apply_patch 工作区栅栏（P0）**：file 工具拒绝的同一越界写经 `*** Add File: ../outside.txt` 直通；且 resolve() 不感知软链接。全部计划路径在确认前做 realpath（最深现存祖先）校验；file.ts 栅栏同步升级
+- **4B 写任务适配（部分有效）**：工具说明补调用格式示例；模板碎片泄漏注入纠正 note（上轮实测条件过窄未触发过）；write 失败后同轮禁 delete（数据保护，防"删除+空写"假成功改名任务）
+- **轮末压缩先于持久化**：磁盘 session 保留压缩后历史，-c 不再续接未压缩版本
+- **条数压缩 wire 可见**：preCall 采纳 session 已压缩历史；preserveRecent 从窗口推导（含 setMaxMessages 热改路径）
+- **zai-org/GLM-5.3 入窗口表**（SiliconFlow 目录 1M 模型此前按 128k 提前压缩）
+- **custom_gemini 中转出口** + gemini fetch failed 错误点名配置原因
+- **429 尊重 Retry-After**（≤30s 等待重试一次）
+- **REMINDER 移至工具结果之后**（不再打断 assistant(tool_calls)↔tool 配对）
+- **catch 路径 result 统一 aborted:true**；损坏 mcp.json 警告
+
+### Tests
+
+- 290 → 294（patch 工作区栅栏 4 用例 + MCP 挂死 e2e 3 断言）
+
 ## [3.5.3] - 2026-09-21 - 三路子代理测试修复
 
 > 三路隔离沙箱子代理（约 290 次工具调用，mock LLM 精确驱动）汇总：patch 工具链与会话持久化质量最高；本轮修复其发现的全部重要问题。282 → 290 用例。

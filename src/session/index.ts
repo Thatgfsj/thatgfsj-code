@@ -257,7 +257,13 @@ export class SessionManager {
    */
   setMaxMessages(n: number): void {
     this.maxMessages = Math.max(5, Math.min(1000, Math.floor(n) || 50));
-    this.compactor = new ContextCompactor({ maxMessages: this.maxMessages });
+    // v3.5.4 (field report): the hot path rebuilt the compactor WITHOUT the
+    // derived preserveRecent, so a live window change silently reverted the
+    // recent budget to the fixed default of 10.
+    this.compactor = new ContextCompactor({
+      maxMessages: this.maxMessages,
+      preserveRecent: Math.max(2, Math.min(10, this.maxMessages - 1)),
+    });
   }
 
   getMaxMessages(): number {
@@ -317,7 +323,11 @@ export class SessionManager {
   truncate(maxMessages?: number): void {
     if (maxMessages) {
       this.maxMessages = maxMessages;
-      this.compactor = new ContextCompactor({ maxMessages });
+      // v3.5.4: keep the derived recent budget consistent here too.
+      this.compactor = new ContextCompactor({
+        maxMessages: this.maxMessages,
+        preserveRecent: Math.max(2, Math.min(10, this.maxMessages - 1)),
+      });
     }
     const { compacted } = this.compactor.compact(this.messages);
     this.messages = compacted;
@@ -368,9 +378,19 @@ export class SessionManager {
       }
       pruneSessions(20);
     } catch {
-      // best-effort
+      // v3.5.4 (field report): a read-only home silently meant the session
+      // was never saved — the task still "succeeded" and -c found nothing.
+      // Say it once per process.
+      if (!SessionManager.persistWarned) {
+        SessionManager.persistWarned = true;
+        process.stderr.write(
+          '[session] 会话未能保存到磁盘（目录只读或不可写？）——本会话将无法用 -c 恢复\n',
+        );
+      }
     }
   }
+
+  private static persistWarned = false;
 
   /**
    * Restore a previously persisted session into THIS manager (in place).

@@ -104,6 +104,21 @@ DO NOT log:
   ];
 
   async execute(params: Record<string, any>, ctx?: any): Promise<ToolResult> {
+    // v3.5.4 (field report): nwt was the only tool with NO output cap — a
+    // single 618K-char history dump went straight onto the wire and could
+    // blow the context window (provider 400). Cap like the shell tool.
+    const result = await this.executeInner(params, ctx);
+    if (result.success && typeof result.output === 'string' && result.output.length > 8000) {
+      const n = result.output.length;
+      result.output =
+        result.output.slice(0, 6000) +
+        `\n...[输出截断，省略 ${n - 7000} 字符；用 limit 参数缩小范围]...\n` +
+        result.output.slice(-1000);
+    }
+    return result;
+  }
+
+  private async executeInner(params: Record<string, any>, ctx?: any): Promise<ToolResult> {
     const cwd = ctx?.workingDirectory || process.cwd();
     const action = params.action;
 
@@ -210,7 +225,16 @@ DO NOT log:
       }
       parent = cand;
     } else if (maxId > 0) {
-      parent = maxId.toString().padStart(6, '0');
+      // v3.5.4: trust but verify — a corrupt/junk file can hold the highest
+      // number; chaining onto an unreadable event creates a dangling parent
+      // (and after a compact renumber, even a self-reference).
+      const cand = maxId.toString().padStart(6, '0');
+      try {
+        const raw = JSON.parse(readFileSync(join(eventsDir, `${cand}.json`), 'utf-8'));
+        if (raw && typeof raw.id === 'string' && raw.id !== nextId) parent = cand;
+      } catch {
+        parent = undefined;
+      }
     }
 
     // Validate importance

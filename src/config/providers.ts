@@ -103,7 +103,7 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
   custom_openai: {
     name: '自定义 OpenAI 兼容 (中转站)',
     baseUrl: '',
-    defaultModel: 'gpt-4o-mini',
+    defaultModel: 'gpt-5.4-mini',
     envKeys: ['CUSTOM_API_KEY'],
     format: 'openai',
   },

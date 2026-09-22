@@ -116,6 +116,10 @@ export class ConfigManager {
           const apiKeys = sanitizeApiKeys(parsed.apiKeys);
           if (!apiKeys && typeof parsed.apiKey === 'string' && parsed.apiKey) {
             parsed.apiKeys = { [String(parsed.provider || 'siliconflow')]: parsed.apiKey };
+            // v3.5.4 (field report): a hand-edited provider line means the
+            // legacy key may belong to the OLD provider — attributing it to
+            // the new one sent a foreign key across providers. Say so.
+            console.warn('[config] 检测到旧版顶层 apiKey，已按文件中的 provider 归档；若你刚手动改过 provider，请用 init 重配 key');
           }
           config = {
             ...config,
@@ -127,6 +131,13 @@ export class ConfigManager {
             browserSetup: mergeObject(DEFAULT_BROWSER_SETUP, parsed.browserSetup),
             customModels: sanitizeCustomModels(parsed.customModels),
           } as Config;
+          // v3.5.4 (field report): ANY truthy string ("yes", "1") used to
+          // hijack every request to the builtin model while the start event
+          // still displayed the configured provider/model. Booleans only.
+          if (parsed.useBuiltin !== undefined && typeof parsed.useBuiltin !== 'boolean') {
+            console.warn(`[config] useBuiltin 应为布尔值，已忽略非法值 ${JSON.stringify(parsed.useBuiltin)}`);
+            config.useBuiltin = undefined;
+          }
         }
       }
     } catch {
@@ -154,7 +165,11 @@ export class ConfigManager {
     const providerConfig = PROVIDERS[provider];
 
     if (!providerConfig) {
-      return { ...config, provider: 'siliconflow', baseUrl: PROVIDERS.siliconflow.baseUrl };
+      // v3.5.4 (field report): an invalid provider used to fall back to
+      // siliconflow while KEEPING the old top-level apiKey — which then
+      // really connected to the cloud with a foreign key. Drop it and say so.
+      console.warn(`[config] 未知 provider "${String((config as any).provider)}"，已回退 siliconflow；顶层 apiKey 已清除（请用 init 重配）`);
+      return { ...config, provider: 'siliconflow', baseUrl: PROVIDERS.siliconflow.baseUrl, apiKey: '' };
     }
 
     // Model: env MODEL > config > provider default

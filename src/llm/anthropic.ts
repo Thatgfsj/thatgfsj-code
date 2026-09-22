@@ -99,7 +99,7 @@ export class AnthropicProvider implements LLMProvider {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`Anthropic API error ${response.status}: ${text}`);
+      throw new Error(`Anthropic API error ${response.status}: ${text.slice(0, 500)}`);
     }
 
     const data = await response.json();
@@ -153,6 +153,9 @@ export class AnthropicProvider implements LLMProvider {
     // v3.5.3 (field report): garbage 200 bodies must fail loudly, not
     // masquerade as an empty-but-successful answer.
     let sawValidFrame = false;
+    // v3.5.4: message_stop / stop_reason marks a complete stream — valid
+    // frames without one mean the stream was truncated mid-answer.
+    let sawFinish = false;
 
     try {
       const response = await this.doRequest(body, controller.signal);
@@ -160,7 +163,7 @@ export class AnthropicProvider implements LLMProvider {
 
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => '');
-        throw new Error(`Anthropic API error ${response.status}: ${text}`);
+        throw new Error(`Anthropic API error ${response.status}: ${text.slice(0, 500)}`);
       }
 
       const reader = response.body.getReader();
@@ -183,6 +186,7 @@ export class AnthropicProvider implements LLMProvider {
             try {
               const data = JSON.parse(trimmed.slice(6));
               if (data && typeof data === 'object') sawValidFrame = true;
+              if (data.type === 'message_stop' || data.delta?.stop_reason) sawFinish = true;
 
               // content_block_start: track block types
               if (data.type === 'content_block_start') {
@@ -269,9 +273,12 @@ export class AnthropicProvider implements LLMProvider {
     }
 
     // v3.5.3: garbage 200 body (no valid SSE frames) fails loudly.
-    if (!sawValidFrame) {
+    // v3.5.4: valid frames but no message_stop = truncated mid-answer.
+    if (!sawValidFrame || !sawFinish) {
       throw new Error(
-        'Provider returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
+        sawValidFrame
+          ? 'Anthropic stream ended without a message_stop frame (truncated response). This is a provider-side failure, not an empty answer.'
+          : 'Anthropic API returned an empty or malformed response body (no valid SSE frames). This is a provider-side failure, not an empty answer.',
       );
     }
 
