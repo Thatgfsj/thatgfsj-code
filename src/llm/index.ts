@@ -381,6 +381,9 @@ export class LLMService {
             // v3.5.4: data guard — after a failed/denied file write this
             // turn, refuse delete-like operations (field report: a rename
             // turned into "delete + empty write" = irreversible loss).
+            const isFileWrite =
+              toolCall.function.name === 'write_file' ||
+              (toolCall.function.name === 'file' && parsed?.action === 'write');
             const isDeleteLike =
               (toolCall.function.name === 'file' && parsed?.action === 'delete') ||
               toolCall.function.name === 'apply_patch';
@@ -476,7 +479,7 @@ export class LLMService {
 
             if (!result.success) {
               // v3.5.4: a failed/denied file write arms the delete guard.
-              if (toolCall.function.name === 'file' && parsed?.action === 'write') writeDenied = true;
+              if (isFileWrite) writeDenied = true;
               // v3.5.3: a cancellation is a permission decision, not a tool
               // fault — count it separately so the circuit breaker can tell
               // "user refused everything" from "tools are broken".
@@ -488,10 +491,11 @@ export class LLMService {
                 role: 'system',
                 content: `[TOOL_REPAIR] Tool "${toolCall.function.name}" returned success=false: ${output}. Consider correcting the arguments and retrying.`,
               });
-            mirror(currentMessages[currentMessages.length - 1]);            } else {
+              mirror(currentMessages[currentMessages.length - 1]);
+            } else {
               // v3.5.4: a successful file write proves content handling works
               // again — disarm the delete guard.
-              if (toolCall.function.name === 'file' && parsed?.action === 'write') writeDenied = false;
+              if (isFileWrite) writeDenied = false;
               roundHadSuccess = true;
             }
           } catch (error: any) {

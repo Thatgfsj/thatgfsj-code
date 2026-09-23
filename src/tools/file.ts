@@ -11,50 +11,21 @@
  */
 
 import type { Tool, ToolResult, ToolContext } from './types.js';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, realpathSync } from 'fs';
-import { join, dirname, basename, extname, isAbsolute, resolve, sep } from 'path';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync } from 'fs';
+import { join, dirname } from 'path';
 import { DiffPreview } from '../utils/diff.js';
-
-/**
- * v3.5.4 (field report P0): symlink-hardened containment. resolve() alone
- * does not follow links, so `proj/link.txt -> /etc/target` slipped past a
- * plain prefix check. Walk the deepest EXISTING ancestor with
- * realpathSync and compare against the realpath of the root.
- */
-function isInsideWorkspace(root: string, path: string): boolean {
-  const rootReal = (() => { try { return realpathSync(resolve(root)); } catch { return resolve(root); } })();
-  let cur = resolve(path);
-  for (;;) {
-    try {
-      const real = realpathSync(cur);
-      return real === rootReal || real.startsWith(rootReal + sep);
-    } catch {
-      const parent = dirname(cur);
-      if (parent === cur) return false;
-      cur = parent; // file may not exist yet — walk up to the first ancestor that does
-    }
-  }
-}
+import { assertWorkspacePath } from './fence.js';
 
 export class FileTool implements Tool {
   name = 'file';
-  description = 'Perform file operations: read, write, list, delete, etc. Write/delete are confined to the project directory.';
+  // v3.5.4: writes moved to the dedicated `write_file` tool (content is
+  // schema-required THERE — see tools/write-file.ts). The runtime write
+  // branch below stays as a compatibility path and still enforces
+  // non-empty content.
+  description = 'Perform file operations: read, list, exists, delete, mkdir. For writing files use write_file.';
 
-  /**
-   * v3.5.3 (field report A-2): the tool accepted any absolute path, so a
-   * model could be steered into writing OUTSIDE the project directory.
-   * Mutating actions are now confined to ctx.workingDirectory (the
-   * project root, injected by App). Read-class actions stay unrestricted —
-   * reading an installed package or a user file is legitimate research.
-   * No ctx (tests, direct use) skips the fence.
-   */
   private assertInsideWorkspace(action: string, path: string, ctx?: ToolContext): ToolResult | null {
-    if (!ctx?.workingDirectory) return null;
-    if (isInsideWorkspace(ctx.workingDirectory, path)) return null;
-    return {
-      success: false,
-      error: `[WORKSPACE] "${action}" may only touch files inside the project directory (${ctx.workingDirectory}). Target was outside: ${path}. If this is genuinely required, ask the user or use the shell tool (it asks for confirmation).`,
-    };
+    return assertWorkspacePath(action, path, ctx);
   }
 
   inputSchema = {
@@ -215,9 +186,13 @@ export class FileTool implements Tool {
     if (!existsSync(path)) {
       return { success: false, error: `Directory not found: ${path}` };
     }
-    
+
+    // v3.5.4 (field report): an unbounded listing is a context bomb — a
+    // 10k-entry directory went straight onto the wire.
+    const MAX_ENTRIES = 500;
     const files = readdirSync(path);
-    const items = files.map(f => {
+    const shown = files.slice(0, MAX_ENTRIES);
+    const items = shown.map(f => {
       const fullPath = join(path, f);
       const stat = statSync(fullPath);
       return {
@@ -227,7 +202,15 @@ export class FileTool implements Tool {
         modified: stat.mtime.toISOString()
       };
     });
-    
+    if (files.length > MAX_ENTRIES) {
+      items.push({
+        name: `...[${files.length - MAX_ENTRIES} more entries not listed — use a more specific path or the search tool]`,
+        type: 'file',
+        size: 0,
+        modified: new Date(0).toISOString(),
+      } as any);
+    }
+
     return { success: true, output: JSON.stringify(items, null, 2) };
   }
 

@@ -550,8 +550,12 @@ function safeRealpath(p: string): string {
   }
 }
 
-/** True when `target` (symlink-resolved) sits inside `rootReal`. */
+/** True when `target` (symlink-resolved) sits inside `rootReal`.
+ * v3.5.4: case-folded on Windows — string comparison is case-sensitive
+ * while NTFS is not, so `C:\Proj` vs `c:\proj` used to false-positive. */
 function isInsideReal(rootReal: string, target: string): boolean {
-  const t = safeRealpath(resolve(target));
-  return t === rootReal || t.startsWith(rootReal + sep);
+  const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const t = fold(safeRealpath(resolve(target)));
+  const r = fold(rootReal);
+  return t === r || t.startsWith(r + sep);
 }

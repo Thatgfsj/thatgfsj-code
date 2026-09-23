@@ -304,5 +304,5 @@ export function useChat(app: App) {
     setState(prev => ({ ...prev, messages: [] }));
   }, []);
 
-  return { ...state, sendMessage, cancel, hydrateMessages, clearMessages };
+  return { ...state, commit, sendMessage, cancel, hydrateMessages, clearMessages };
 }

@@ -11,6 +11,7 @@ import { SearchTool } from './search.js';
 import { NwtTool } from './nwt.js';
 import { BrowserTool } from './browser.js';
 import { ApplyPatchTool } from './patch.js';
+import { WriteFileTool } from './write-file.js';
 import { UpdatePlanTool } from './plan.js';
 
 export class ToolRegistry {
@@ -26,6 +27,7 @@ export class ToolRegistry {
    */
   private registerDefaults(): void {
     this.register(new FileTool());
+    this.register(new WriteFileTool());
     this.register(new ShellTool());
     this.register(new GitTool());
     this.register(new SearchTool());

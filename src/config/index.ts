@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkS
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import type { Config, AIConfig, ProviderName } from './types.js';
-import { PROVIDERS, getApiKeyFromEnv, isCustomProvider } from './providers.js';
+import { PROVIDERS, MODEL_CATALOGS, getApiKeyFromEnv, isCustomProvider } from './providers.js';
 import { BUILTIN_MODEL_ID, BUILTIN_PROVIDER, revealBuiltinKey } from './builtin.js';
 
 const DEFAULT_CONFIG: Config = {
@@ -229,11 +229,15 @@ export class ConfigManager {
     // silently went to the shared cloud model — "written but unusable".
     const providerConfig = PROVIDERS[this.config.provider];
     // v3.4.3: explicit 内置共享 selection wins over everything.
+    // v3.5.4: the shared SiliconFlow key can call ANY SiliconFlow-catalog
+    // model — useBuiltin no longer pins the user to the 4B when they
+    // picked a catalog sibling.
     if (this.config.useBuiltin) {
+      const inCatalog = MODEL_CATALOGS[BUILTIN_PROVIDER]?.some(m => m.id === this.config.model);
       return {
         ...base,
         provider: BUILTIN_PROVIDER,
-        model: BUILTIN_MODEL_ID,
+        model: inCatalog || !this.config.model ? this.config.model || BUILTIN_MODEL_ID : BUILTIN_MODEL_ID,
         apiKey: revealBuiltinKey(),
         baseUrl: PROVIDERS.siliconflow.baseUrl,
         usingBuiltinKey: true,
@@ -303,6 +307,9 @@ export class ConfigManager {
     // entry; any other model choice leaves shared-model mode.
     if (updates.useBuiltin !== undefined) this.config.useBuiltin = updates.useBuiltin;
     else if (updates.model !== undefined) this.config.useBuiltin = false;
+    // v3.5.4: an explicit model write beats the MODEL env pin (same rule
+    // as setTransient — resolveProvider otherwise lets the env win).
+    if (updates.model !== undefined && process.env.MODEL) this.config.model = updates.model;
 
     const dir = dirname(this.configPath);
     if (!existsSync(dir)) {
@@ -337,6 +344,9 @@ export class ConfigManager {
     if (updates.useBuiltin !== undefined) this.config.useBuiltin = updates.useBuiltin;
     else if (updates.model !== undefined) this.config.useBuiltin = false;
     this.config = ConfigManager.resolveProvider(this.config);
+    // v3.5.4 (field report): resolveProvider lets the MODEL env var win —
+    // an explicit -m flag must beat a pinned env var (it silently didn't).
+    if (updates.model !== undefined && process.env.MODEL) this.config.model = updates.model;
   }
 
   /**

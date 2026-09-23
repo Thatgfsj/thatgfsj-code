@@ -42,9 +42,8 @@ type ViewMode = 'chat' | 'model_settings';
  * the shell screen verbatim.
  */
 export function TuiApp({ app }: Props) {
-  const { messages, isThinking, queuedMessage, streamingView, sendMessage, cancel, hydrateMessages, clearMessages } = useChat(app);
+  const { messages, isThinking, queuedMessage, streamingView, sendMessage, cancel, hydrateMessages, clearMessages, commit } = useChat(app);
   const { handleCommand } = useCommands(app);
-  const [systemMessages, setSystemMessages] = useState<MessageData[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('chat');
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns || 80;
@@ -105,9 +104,14 @@ export function TuiApp({ app }: Props) {
     });
   }, [terminalWidth, terminalRows]);
 
+  // v3.5.5 (field report): notices/echo now TAIL-INSERT via useChat.commit.
+  // They used to go into systemMessages, which is pinned to the HEAD of
+  // allMessages — once the transcript exceeded one screen, every
+  // slash-command reply scrolled out of the tail-anchored viewport and the
+  // user saw nothing (probe round 7).
   const addMsg = useCallback((content: string) => {
-    setSystemMessages(prev => [...prev, { role: 'assistant', content }]);
-  }, []);
+    commit({ content });
+  }, [commit]);
 
   // ── v3.0.5: permission prompt wiring ──────────────────────
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
@@ -134,19 +138,13 @@ export function TuiApp({ app }: Props) {
         confirmResolveRef.current = null;
         if (v.always && app.permissionMode !== 'accept') {
           app.setYolo(true);
-          setSystemMessages(prev => [
-            ...prev,
-            { role: 'assistant', content: '✓ 本会话已切换为自动确认（/yolo 可关回）。' },
-          ]);
+          addMsg('✓ 本会话已切换为自动确认（/yolo 可关回）。');
         }
         resolve(v.allowed);
       };
     });
     app.session.onAutoCompact = (info) => {
-      setSystemMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `⚠️ 上下文较长（${info.before} 条），已自动压缩到 ${info.after} 条（工具调用块保持完整）。可用 /resume 随时找回历史。` },
-      ]);
+      addMsg(`⚠️ 上下文较长（${info.before} 条），已自动压缩到 ${info.after} 条（工具调用块保持完整）。可用 /resume 随时找回历史。`);
     };
     // v3.1.0: offer plan approval when a turn completes in plan mode.
     app.onTurnComplete = () => {
@@ -187,19 +185,15 @@ export function TuiApp({ app }: Props) {
         return;
       }
 
-      if (result.output) {
-        setSystemMessages(prev => [
-          ...prev,
-          { role: 'user', content: input },
-          { role: 'assistant', content: result.output! },
-        ]);
-      }
-
+      // v3.5.5 (field report): command echo/output goes through commit
+      // (tail-insert). The /new notice is committed AFTER clearMessages so
+      // it no longer swallows its own confirmation.
       if (result.action === 'clear') {
-        setSystemMessages([]);
-        // v3.0.16: /new resets the session — reset the visible list too
-        // (useChat messages are display-only now).
         clearMessages();
+        if (result.output) commit({ content: result.output });
+      } else if (result.output) {
+        commit({ role: 'user', content: input } as any);
+        commit({ content: result.output });
       }
 
       // v3.0.16: /browser — verifyLaunch is async (spawns Chromium), so
@@ -288,7 +282,7 @@ export function TuiApp({ app }: Props) {
       if (result.action === 'switch_model' && result.payload) {
         // v3.4.2: ownership-checked switch (may auto-change provider).
         const notice = await app.switchModelChecked(result.payload);
-        setSystemMessages(prev => [...prev, { role: 'assistant', content: notice }]);
+        addMsg(notice);
         setResolvedTtl(null);
       }
 
@@ -328,7 +322,6 @@ export function TuiApp({ app }: Props) {
             visible.push({ role: 'assistant', content: `⎿ ${name}: ${preview.replace(/\n/g, ' ')}`, plain: true, dim: true });
           }
         }
-        setSystemMessages([]);
         hydrateMessages(visible);
         const model = file.model ? `（模型: ${file.model}）` : '';
         addMsg(`✓ 已恢复会话 ${summary.id.slice(0, 24)}…，共 ${visible.length} 条可见消息${model}。输入 /模型 <名称> 可切换模型。`);
@@ -340,7 +333,10 @@ export function TuiApp({ app }: Props) {
     sendMessage(input);
   }, [handleCommand, sendMessage, app, viewMode, addMsg, hydrateMessages, clearMessages]);
 
-  const allMessages = [...systemMessages, ...messages];
+  // v3.5.5: everything the user sees lives in ONE tail-inserted list —
+  // the old head-pinned systemMessages made command output invisible once
+  // the transcript exceeded one screen.
+  const allMessages = messages;
   allMessagesRef.current = allMessages;
   const activeSkills = app.skills.listActive().map(s => s.id);
   const splashMode = allMessages.length === 0;

@@ -147,8 +147,9 @@ export class SystemPromptBuilder {
     // parameter on 100% of file writes and leaked its own tool-template
     // markup (<parameter=…>, </tool_call>) as plain text. Small models need
     // the format spelled out with a concrete example, not just a parameter
-    // list.
-    const formatNote = tools.some(t => t.name === 'file')
+    // list. v3.5.5: write lives on the dedicated write_file tool whose
+    // schema REQUIRES content — the example now matches.
+    const formatNote = tools.some(t => t.name === 'write_file')
       ? `
 
 ### Tool call format (strict)
@@ -158,11 +159,11 @@ Do NOT write markup like <tool_call>, <parameter=name>, or XML/Fenced blocks
 in your message: the runtime cannot execute those.
 
 Every parameter listed as required MUST be present with a non-empty value.
-Example — writing a file (content is mandatory):
+Example — creating or overwriting a file (content is mandatory):
 
-  file { "action": "write", "path": "notes/hello.txt", "content": "hello world" }
+  write_file { "path": "notes/hello.txt", "content": "hello world" }
 
-Example — reading one (no content parameter at all):
+Example — reading one (never pass content):
 
   file { "action": "read", "path": "notes/hello.txt" }`
       : '';
@@ -275,10 +276,13 @@ Example — reading one (no content parameter at all):
         }
         up.reverse();
         ancestors.push(...up);
-      } else {
-        // No project marker: only the two nearest levels above cwd — a
-        // full walk to the filesystem root would burn the section budget
+      } else if (boundary !== cwd) {
+        // No project marker above cwd: only the two nearest levels above —
+        // a full walk to the filesystem root would burn the section budget
         // on unrelated directories.
+        // (v3.5.4: boundary === cwd — cwd IS the git root — pushes NOTHING;
+        // the old fallthrough leaked the PARENT directory's AGENTS.md into
+        // the prompt. Field report, round 7.)
         const a = dirname(cwd);
         const b = dirname(a);
         if (a !== cwd) ancestors.push(a);

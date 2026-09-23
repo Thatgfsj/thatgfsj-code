@@ -75,6 +75,22 @@ program
   }) => {
     try {
       const jsonMode = !!options.json;
+      // v3.5.4 (field report): a HOME/USERPROFILE pointing at a
+      // nonexistent path used to silently mkdir the whole tree and fall
+      // back to the builtin model, making REAL network calls. Name the
+      // root cause in the warning.
+      {
+        const { existsSync, mkdirSync } = await import('fs');
+        const { homedir } = await import('os');
+        const home = homedir();
+        if (!existsSync(home)) {
+          try { mkdirSync(home, { recursive: true }); } catch { /* report below */ }
+          console.error(chalk.yellow(
+            `⚠ HOME/USERPROFILE 指向的目录不存在，已创建空目录: ${home}\n` +
+            `  这通常是环境变量配置错误（正以内置共享模型继续运行）。如非有意请修正后重试。`,
+          ));
+        }
+      }
       // v3.5.0: validate --thinking here (the option parser used to throw,
       // surfacing as an uncaughtException with a full Node stack).
       const thinkingLevels = ['off', 'low', 'medium', 'high'] as const;
@@ -105,6 +121,14 @@ program
       let persistModelBeforeTui = false;
       if (options.model) {
         app.config.setTransient({ model: options.model });
+        // v3.5.4 (field report): with no key, -m to a SiliconFlow-catalog
+        // model can use the SHARED key directly (the pool key IS an SF
+        // key) — without this, -m away from the 4B silently lost all key
+        // access. Non-catalog models keep the honest failure.
+        if (!app.config.hasApiKey()
+          && (MODEL_CATALOGS.siliconflow || []).some(m => m.id === options.model)) {
+          app.config.setTransient({ model: options.model, useBuiltin: true });
+        }
         await app.reloadModel();
         if (!oneShot) persistModelBeforeTui = true;
       }

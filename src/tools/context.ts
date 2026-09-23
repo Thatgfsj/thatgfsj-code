@@ -41,10 +41,10 @@ export function createGetContextTool(getState: () => ContextState): Tool {
       }
       const used = Math.max(0, state.used || 0);
       const win = Math.max(1, state.window || 128000);
-      const pct = Math.min(100, Math.round((used / win) * 100));
+      // v3.5.4 (field report): the cap at 100 hid HOW FAR over the window
+      // an estimate ran — show the real number plus the overshoot.
+      const pct = Math.round((used / win) * 100);
       const remaining = Math.max(0, win - used);
-      // v3.5.4 (field report): capping the percent at 100 hid HOW FAR over
-      // the window an estimate was — show the overshoot explicitly.
       const over = Math.max(0, used - win);
       const overNote = over > 0 ? ` ⚠ 超出窗口 ${over.toLocaleString()} tokens。` : '';
       const advice =
