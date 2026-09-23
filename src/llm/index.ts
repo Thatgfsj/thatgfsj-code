@@ -38,6 +38,14 @@ export class LLMService {
 
   /** v3.5.4: true for keyless providers (ollama) — an empty key is fine. */
   private keyless: boolean;
+  /**
+   * v3.5.4 (round 8): session-scoped delete guard. Arming it per-TURN was
+   * a hole — "write fails in round N, delete lands in round N+1" really
+   * deleted files (mock-verified). Lives on the service instance, so it
+   * spans every turn of the session; a successful file write disarms it,
+   * and reloadModel naturally re-arms a fresh instance.
+   */
+  private writeDenied = false;
 
   constructor(provider: LLMProvider, apiKey: string, model = '', keyless = false) {
     this.provider = provider;
@@ -253,11 +261,10 @@ export class LLMService {
       // corrective system note gets injected so the next round can recover.
       let leakedTemplate = false;
       let templateLeaks = 0;
-      // v3.5.4 (field report, round-5 data-loss case): a rename task became
-      // "delete target + write empty" and still reported success. After a
-      // failed file write, delete-like operations are blocked for the rest
-      // of the turn — irreversible actions must not follow a broken write.
-      let writeDenied = false;
+      // TOOL_FORMAT_NOTE wording moved to the instance field below — the
+      // data guard is SESSION-scoped now (see this.writeDenied), so the
+      // round-5 "write fails this turn, delete lands next turn" hole
+      // (round-8 mock-verified victim.txt loss) is closed.
       const TOOL_FORMAT_NOTE =
         '[TOOL_FORMAT] Your reply contained raw tool-call markup (<tool_call>, <parameter=...>). ' +
         'That markup is not executable. Issue tool calls through the function-calling channel instead, ' +
@@ -387,7 +394,7 @@ export class LLMService {
             const isDeleteLike =
               (toolCall.function.name === 'file' && parsed?.action === 'delete') ||
               toolCall.function.name === 'apply_patch';
-            if (writeDenied && isDeleteLike) {
+            if (this.writeDenied && isDeleteLike) {
               const guardMsg =
                 '[DATA_GUARD] A file write failed earlier in this turn (missing/empty content). Delete operations are blocked until a write succeeds, to prevent irreversible data loss. Re-issue the write with the full content first, then retry the delete.';
               currentMessages.push({
@@ -433,6 +440,11 @@ export class LLMService {
             const missing = requiredNames
               .filter(name => parsed?.[name] === undefined || parsed?.[name] === null || parsed?.[name] === '');
             if (requiredNames.length > 0 && missing.length > 0) {
+              // v3.5.4 (round 8): count it — this path used to burn rounds
+              // with stats.failed staying 0 (asymmetric with tool-layer
+              // failures).
+              loopStats.failed += 1;
+              roundHadSuccess = false;
               const errMsg = `[PARAM_ERROR] Missing required parameter(s): ${missing.join(', ')}. Retry the call with all required parameters filled.`;
               currentMessages.push({
                 role: 'tool',
@@ -479,7 +491,7 @@ export class LLMService {
 
             if (!result.success) {
               // v3.5.4: a failed/denied file write arms the delete guard.
-              if (isFileWrite) writeDenied = true;
+              if (isFileWrite) this.writeDenied = true;
               // v3.5.3: a cancellation is a permission decision, not a tool
               // fault — count it separately so the circuit breaker can tell
               // "user refused everything" from "tools are broken".
@@ -495,7 +507,7 @@ export class LLMService {
             } else {
               // v3.5.4: a successful file write proves content handling works
               // again — disarm the delete guard.
-              if (isFileWrite) writeDenied = false;
+              if (isFileWrite) this.writeDenied = false;
               roundHadSuccess = true;
             }
           } catch (error: any) {
@@ -623,7 +635,7 @@ export class LLMService {
     return [
       `❌ ${model || '调用 AI '}失败：当前服务商未配置 API Key。`,
       '',
-      model ? '（该模型来自 -m/--model 参数：确认模型名与所属服务商，或去掉 -m 用内置共享模型）' : '',
+      model ? '（请确认该模型名与所属服务商是否来自 -m/--model 或 config；去掉 -m 可回退内置共享模型）' : '',
       '请先运行: gfcode init',
       '',
       '或设置环境变量:',

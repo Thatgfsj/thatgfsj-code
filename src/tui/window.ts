@@ -74,6 +74,10 @@ export interface WindowResult {
  * head is replaced by an ellipsis marker.
  */
 export function clipContentToRows(content: string, width: number, rows: number): string {
+  // v3.5.4 (probe round 7): the EFFECTIVE budget callers pass is
+  // rows - 9 on the reference layout (input stack measured at 7 rows,
+  // frame spare 2) — documented here because the sandbox probes first
+  // assumed rows - 8.
   const budget = Math.max(1, rows);
   if (wrappedLines(content, width) <= budget) return content;
   const lines = content.split('\n');
@@ -137,6 +141,10 @@ export function buildWindow(
   width: number,
   rows: number,
 ): WindowResult {
+  // v3.5.4 (probe round 7): the EFFECTIVE budget callers pass is
+  // rows - 9 on the reference layout (input stack measured at 7 rows,
+  // frame spare 2) — documented here because the sandbox probes first
+  // assumed rows - 8.
   const budget = Math.max(1, rows);
   // Clamp the end into [0, length] — hydrate/resize races can leave a
   // stale scroll larger than the list.
@@ -157,8 +165,12 @@ export function buildWindow(
     // tail by WRAPPED lines until its estimate fits (guaranteed to end:
     // each pass cuts the content in half; budget >= 1 eventually holds
     // even a single wrapped line).
+    // v3.5.4 (field report): when tail-clipping drops the FIRST line
+    // (e.g. /help's "命令列表:" title), keep it as a header line so a
+    // clipped listing still announces itself.
     const m = messages[end - 1];
     let content = m.content;
+    const firstLine = content.split('\n')[0];
     let candidate: MessageData = m;
     for (let guard = 0; guard < 32; guard++) {
       const est = estimateMsgLines(candidate, width);
@@ -172,6 +184,9 @@ export function buildWindow(
         content = '…' + lines.slice(-Math.max(1, Math.floor(lines.length / 2))).join('\n');
       }
       candidate = { ...m, content };
+    }
+    if (!candidate.content.startsWith(firstLine)) {
+      candidate = { ...candidate, content: firstLine + '\n…\n' + candidate.content };
     }
     picked.push(candidate);
     return { messages: picked, start: end - 1, end };

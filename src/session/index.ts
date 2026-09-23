@@ -444,6 +444,34 @@ export class SessionManager {
     }
   }
 
+  /**
+   * v3.5.4 (field report): newest-first RAW session files (id + mtime),
+   * INCLUDING unparsable ones. `-c` walks this list so a corrupt newest
+   * file falls back to older sessions instead of ending the search, and
+   * the "skipped N corrupt" count is real.
+   */
+  static listFiles(limit = 10): Array<{ id: string; path: string; mtime: number }> {
+    const dir = sessionsDir();
+    if (!existsSync(dir)) return [];
+    try {
+      return readdirSync(dir)
+        .filter(f => f.endsWith('.json'))
+        .map(f => {
+          const full = join(dir, f);
+          try {
+            return { path: full, mtime: statSync(full).mtimeMs, id: f.replace(/\.json$/, '') };
+          } catch {
+            return null;
+          }
+        })
+        .filter((x): x is { id: string; path: string; mtime: number } => x !== null)
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, limit);
+    } catch {
+      return [];
+    }
+  }
+
   /** Load a persisted session file by id (or filename). */
   static load(id: string): SessionFile | null {
     const dir = sessionsDir();

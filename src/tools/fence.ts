@@ -23,9 +23,9 @@ import type { ToolResult, ToolContext } from './types.js';
  * - `\\?\` extended-length prefixes: strip before comparing (realpath
  *   keeps them on some Node builds).
  */
-function normalizeForCompare(p: string): string {
+export function normalizeForCompare(p: string): string {
   let s = p;
-  if (s.startsWith('\\\?\\')) s = s.slice(4);
+  if (s.startsWith('\\\\?\\')) s = s.slice(4);
   if (s.startsWith('/??/')) s = s.slice(4);
   return process.platform === 'win32' ? s.toLowerCase() : s;
 }

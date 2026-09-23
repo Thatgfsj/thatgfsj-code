@@ -31,6 +31,7 @@
 
 import type { Tool, ToolResult, ToolContext } from './types.js';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, renameSync, mkdirSync, statSync, realpathSync } from 'fs';
+import { normalizeForCompare } from './fence.js';
 import { dirname, isAbsolute, relative, resolve, sep, join, basename } from 'path';
 
 // ── types ──────────────────────────────────────────────────
@@ -552,10 +553,11 @@ function safeRealpath(p: string): string {
 
 /** True when `target` (symlink-resolved) sits inside `rootReal`.
  * v3.5.4: case-folded on Windows — string comparison is case-sensitive
- * while NTFS is not, so `C:\Proj` vs `c:\proj` used to false-positive. */
+ * while NTFS is not, so `C:\Proj` vs `c:\proj` used to false-positive.
+ * v3.5.4 round 8: also strips \\?\ extended-length prefixes (fence.ts
+ * shared normalization; the strip used to be missing here entirely). */
 function isInsideReal(rootReal: string, target: string): boolean {
-  const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  const t = fold(safeRealpath(resolve(target)));
-  const r = fold(rootReal);
+    const t = normalizeForCompare(safeRealpath(resolve(target)));
+  const r = normalizeForCompare(rootReal);
   return t === r || t.startsWith(r + sep);
 }

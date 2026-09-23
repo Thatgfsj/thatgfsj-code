@@ -155,6 +155,7 @@ export const MODEL_CATALOGS: Record<ProviderName, ModelInfo[]> = {
   // 2026-09 目录更新（来源：各平台官方定价页/文档核实；baichuan/stepfun/doubao
   // 未查到可靠的 2026-09 现行清单，保留原目录取自其官方文档旧版）
   siliconflow: [
+    { id: 'Qwen/Qwen3.5-4B', name: 'Qwen3.5-4B', desc: '内置共享模型档' },
     { id: 'Qwen/Qwen3.5-35B-A3B', name: 'Qwen3.5-35B-A3B', desc: '超低价 MoE 快档，日常编程首选' },
     { id: 'deepseek-ai/DeepSeek-V4-Pro', name: 'DeepSeek-V4-Pro', desc: 'DeepSeek 旗舰/思考档' },
     { id: 'deepseek-ai/DeepSeek-V4-Flash', name: 'DeepSeek-V4-Flash', desc: '便宜快档' },

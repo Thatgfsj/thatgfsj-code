@@ -139,21 +139,25 @@ program
       // v3.5.3 (field report C-3): -c used to load ONLY the newest file and
       // give up if that one was corrupt. Walk newest-first, take the first
       // session that parses, and say how many corrupt files were skipped.
+      // v3.5.5 (field report C-3) / v3.5.4 round-8 closeout: list() only
+      // returns PARSEABLE files, so the corrupt-skip counter was dead code
+      // and "all corrupt" misread as "directory is empty". Walk the RAW
+      // file list instead — every skip is real and counted.
       if (options.continue) {
-        const candidates = SessionManager.list(10);
-        if (candidates.length === 0) {
+        const rawFiles = SessionManager.listFiles(10);
+        if (rawFiles.length === 0) {
           console.error(chalk.yellow('\n  没有可恢复的会话（~/.thatgfsj/sessions/ 为空）。'));
           process.exit(1);
         }
         let file: ReturnType<typeof SessionManager.load> = null;
         let skipped = 0;
-        for (const cand of candidates) {
+        for (const cand of rawFiles) {
           const f = SessionManager.load(cand.id);
           if (f && Array.isArray(f.messages)) { file = f; break; }
           skipped++;
         }
         if (!file) {
-          console.error(chalk.red(`\n  最近 ${candidates.length} 个会话文件均无法读取（损坏或格式错误）。可删除损坏文件后重试。\n`));
+          console.error(chalk.red(`\n  最近 ${rawFiles.length} 个会话文件均无法读取（损坏或格式错误）。可删除损坏文件后重试。\n`));
           process.exit(1);
         }
         app.session.loadFrom(file);
@@ -167,12 +171,15 @@ program
       // v3.5.4 (field report): the notice must match the REAL fallback
       // decision (getAIConfig), not just "no key" — with an explicit setup
       // and no key the old text promised the builtin model, then the
-      // request failed with "未配置 API Key". Both sides now agree.
+      // request failed with "未配置 API Key". Both sides now agree, and
+      // the banner shows the EFFECTIVE model (round 8: it hardcoded the
+      // 4B even when -m picked a catalog sibling).
       if (app.usingBuiltinModel) {
+        const eff = app.config.getAIConfig();
         if (!jsonMode) {
-          console.log(chalk.gray('  ℹ 未检测到 API Key，将使用内置共享模型 Qwen/Qwen3.5-4B（共享额度）。运行 gfcode init 配置自己的 key。'));
+          console.log(chalk.gray(`  ℹ 未检测到 API Key，将使用内置共享模型（共享额度）：${eff.provider} / ${eff.model}。运行 gfcode init 配置自己的 key。`));
         } else {
-          process.stderr.write('[builtin] using built-in shared model Qwen/Qwen3.5-4B (no API key configured)\n');
+          process.stderr.write(`[builtin] using built-in shared model (no API key configured): ${eff.provider} / ${eff.model}\n`);
         }
       } else if (!app.config.hasApiKey()) {
         const eff = app.config.getAIConfig();

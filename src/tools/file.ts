@@ -64,7 +64,7 @@ export class FileTool implements Tool {
     if (action === 'write' && (typeof content !== 'string' || content.length === 0)) {
       return {
         success: false,
-        error: `[PARAM_ERROR] action=write requires a non-empty 'content' string. Retry including the full content to write.`,
+        error: `[PARAM_ERROR] file write requires a non-empty 'content' string. Preferred: call the dedicated write_file tool (path + content, same parameters). Retry with the full text to write.`,
       };
     }
 

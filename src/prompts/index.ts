@@ -92,7 +92,10 @@ export class SystemPromptBuilder {
       'IMPORTANT: You MUST follow the user configuration above (CLAUDE.md, AGENTS.md, SKILLS.md, etc).',
       'At the start of each task, read SKILLS.md to check for relevant skills.',
       '',
-      'Tools available: file, shell, git, search, nwt, browser (web search & page reading via the local browser), apply_patch, update_plan, get_context_remaining.',
+      // v3.5.4 (round 8): derived, not hardcoded — the list drifted the
+      // moment write_file was added while a full write_file section
+      // existed elsewhere in the SAME prompt.
+      `Tools available: ${this.config.tools.map(t => t.name).join(', ')}.`,
       '',
       'Edit policy:',
       '- To change existing code, prefer `apply_patch` (multi-file atomic patch with context anchors) over rewriting whole files with `file write`.',

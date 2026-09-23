@@ -112,15 +112,24 @@ describe('estimateBreakdown (v3.2.0 context panel)', () => {
     expect(bd.mcpTools).toBeGreaterThan(0);
     expect(bd.systemTools).toBeGreaterThan(bd.mcpTools); // shell schema dominates
     expect(bd.skills).toBeGreaterThan(0);
-    // Exclusion proof: tool-instructions live in the tool buckets, so adding
-    // a huge tool description must not move the prompt bucket at all.
+    // Exclusion proof: tool-instructions live in the tool buckets, so a
+    // huge tool DESCRIPTION must not move the prompt bucket at all.
+    // v3.5.4 note: the identity segment now lists tool NAMES dynamically,
+    // so the no-tools baseline legitimately differs; the invariant under
+    // test is description-independence with the same tool set.
     const huge = [
       { ...tools[0], description: 'A'.repeat(2000) },
       { ...tools[1] },
     ];
     const withTools = new SystemPromptBuilder({ cwd, tools: huge, includeProjectMd: false }).estimateBreakdown();
+    const sameNames = new SystemPromptBuilder({ cwd, tools, includeProjectMd: false }).estimateBreakdown();
+    // Description-independence: a bigger tool description lands ONLY in the
+    // toolInstructions bucket; systemPrompt stays byte-identical.
+    expect(withTools.systemPrompt).toBe(sameNames.systemPrompt);
+    expect(withTools.toolInstructions).toBeGreaterThan(sameNames.toolInstructions);
+    // The schema bucket grows with the description (it rides the wire).
+    expect(withTools.systemTools).toBeGreaterThan(sameNames.systemTools);
     const noTools = new SystemPromptBuilder({ cwd, tools: [], includeProjectMd: false }).estimateBreakdown();
-    expect(withTools.systemPrompt).toBe(noTools.systemPrompt);
     expect(withTools.systemTools).toBeGreaterThan(noTools.systemTools);
   });
 
